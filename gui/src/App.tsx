@@ -98,6 +98,10 @@ export default function App() {
   const [runtimeVersion, setRuntimeVersion] = useState<string | null>(null);
   const { locale, setLocale } = useI18n();
   const t = useT();
+  // Keep latest `t` in a ref so the probe effect (which depends on []) always reads the
+  // current locale's translations even if a fetch resolves after the user switches language.
+  const tRef = useRef(t);
+  tRef.current = t;
   useEffect(() => {
     const onHash = () => setPageState(readPageFromHash());
     window.addEventListener("hashchange", onHash);
@@ -127,10 +131,7 @@ export default function App() {
 
 
   useEffect(() => {
-  const tRef = useRef(t);
     let cancelled = false;
-  // Keep latest `t` in a ref so the probe effect does not re-run on every locale change.
-  tRef.current = t;
 
     // 1. Loopback short-circuit: page loaded via localhost / 127.0.0.1 / [::1] → skip
     //    the probe entirely. The server grants admission for any loopback source IP,
