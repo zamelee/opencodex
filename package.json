@@ -1,5 +1,5 @@
 {
-  "name": "@bitkyc08/opencodex",
+  "name": "@zamelee/opencodex",
   "version": "2.7.8",
   "description": "Universal provider proxy for OpenAI Codex — use any LLM with Codex CLI/App/SDK",
   "type": "module",

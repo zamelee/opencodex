@@ -69,10 +69,24 @@ export function useI18n(): Ctx {
 
 export function useT(): TFn { return useI18n().t; }
 
-// Render a translation containing a single {cmd} slot as text + a <code className="chip"> token.
-// Other {vars} are interpolated first; the leftover {cmd} marks the chip position.
-export function Trans({ k, cmd, vars }: { k: TKey; cmd: string; vars?: Vars }) {
+// Render a translation containing one or more named {slot} placeholders as inline
+// <code className="chip"> tokens. Other {vars} are interpolated first, then the
+// remaining {slot} markers are replaced with chip elements. If neither cmd nor
+// slots is provided, the translated string is rendered as plain text.
+export function Trans({ k, cmd, slots, vars }: { k: TKey; cmd?: string; slots?: Record<string, string>; vars?: Vars }) {
   const { t } = useI18n();
-  const [pre, post = ""] = t(k, vars).split("{cmd}");
-  return <>{pre}<code className="chip">{cmd}</code>{post}</>;
+  const merged = cmd ? { ...(slots ?? {}), cmd } : slots;
+  const text = t(k, vars);
+  if (!merged) return <>{text}</>;
+  const names = Object.keys(merged);
+  if (names.length === 0) return <>{text}</>;
+  const esc = (str: string) => str.replace(/[.*+?^${}()|[\]\\]/g, String.fromCharCode(92,36) + "&");
+  const pattern = new RegExp(String.fromCharCode(92,123) + "(" + names.map(esc).join("|") + ")" + String.fromCharCode(92,125), "g");
+  const parts = text.split(pattern);
+  const out = [];
+  for (let i = 0; i < parts.length; i++) {
+    if (i % 2 === 0) { if (parts[i]) out.push(parts[i]); }
+    else { out.push(<code key={"chip-" + i} className="chip">{merged[parts[i]]}</code>); }
+  }
+  return <>{out}</>;
 }

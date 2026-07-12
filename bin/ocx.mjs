@@ -3,7 +3,7 @@
  * opencodex npm bin launcher.
  *
  * The package source is TypeScript that runs on the Bun runtime. To let
- * `npm install -g @bitkyc08/opencodex` work without a separately-installed Bun,
+ * `npm install -g @zamelee/opencodex` work without a separately-installed Bun,
  * we bundle the runtime via the `bun` npm dependency and exec it from this
  * Node shim. (Dev still runs `bun run src/cli/index.ts` directly via the shebang on
  * src/cli/index.ts — only the published npm `bin` routes through here.)
@@ -15,7 +15,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const PKG = "@bitkyc08/opencodex";
+const PKG = "@zamelee/opencodex";
 const require = createRequire(import.meta.url);
 const here = dirname(fileURLToPath(import.meta.url));
 const cliPath = join(here, "..", "src", "cli", "index.ts");
@@ -192,7 +192,7 @@ function fail(msg) {
     `opencodex: ${msg}\n` +
       "The bundled Bun runtime could not be prepared. This usually means the\n" +
       "install skipped lifecycle scripts or optional dependencies. Reinstall with:\n" +
-      "  npm install -g @bitkyc08/opencodex\n" +
+      "  npm install -g @zamelee/opencodex\n" +
       "(without --ignore-scripts and without --omit=optional / optional=false)"
   );
   process.exit(1);

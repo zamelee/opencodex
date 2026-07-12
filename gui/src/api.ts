@@ -2,6 +2,12 @@ const TOKEN_KEY = "opencodex-api-token";
 
 let installed = false;
 let promptInFlight: Promise<string | null> | null = null;
+let registeredPrompt: ((error?: string) => Promise<string | null>) | null = null;
+
+/** Register a custom prompt handler (e.g. a React modal). Falls back to window.prompt if unset. */
+export function registerApiKeyPrompt(fn: (error?: string) => Promise<string | null>): void {
+  registeredPrompt = fn;
+}
 
 function apiPath(input: RequestInfo | URL): string | null {
   try {
@@ -44,7 +50,7 @@ function withToken(input: RequestInfo | URL, init: RequestInit | undefined, toke
 async function promptForToken(): Promise<string | null> {
   if (promptInFlight) return promptInFlight;
   promptInFlight = Promise.resolve()
-    .then(() => window.prompt("OpenCodex API token")?.trim() || null)
+    .then(async () => (registeredPrompt ? registeredPrompt() : window.prompt("OpenCodex API token")?.trim() || null))
     .finally(() => { promptInFlight = null; });
   return promptInFlight;
 }

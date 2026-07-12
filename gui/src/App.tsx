@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Dashboard from "./pages/Dashboard";
 import Providers from "./pages/Providers";
 import Models from "./pages/Models";
@@ -7,27 +7,22 @@ import Logs from "./pages/Logs";
 import Debug from "./pages/Debug";
 import Usage from "./pages/Usage";
 import CodexAuth from "./pages/CodexAuth";
+import ApiKeyModal from "./components/ApiKeyModal";
 import ApiKeys from "./pages/ApiKeys";
-import { IconGrid, IconServer, IconBoxes, IconBot, IconList, IconTerminal, IconActivity, IconKey, IconGithub, IconSun, IconMoon, IconMonitor, IconGlobe, IconPower } from "./icons";
+import { IconGrid, IconServer, IconBoxes, IconBot, IconList, IconTerminal, IconActivity, IconKey, IconLock, IconGithub, IconSun, IconMoon, IconMonitor, IconGlobe, IconPower } from "./icons";
 import { useI18n, useT, LOCALES, type Locale, type TKey } from "./i18n";
 import { Select } from "./ui";
-import { installApiAuthFetch } from "./api";
-
+import { installApiAuthFetch, registerApiKeyPrompt } from "./api";
 installApiAuthFetch();
-
 type Page = "dashboard" | "providers" | "models" | "subagents" | "logs" | "debug" | "usage" | "codex-auth" | "api";
 type Theme = "light" | "dark" | "system";
-
 const VALID_PAGES = new Set<Page>(["dashboard", "providers", "models", "subagents", "logs", "debug", "usage", "codex-auth", "api"]);
-
 function readPageFromHash(): Page {
   const raw = location.hash.replace(/^#\/?/, "");
   return VALID_PAGES.has(raw as Page) ? (raw as Page) : "dashboard";
 }
-
 const API_BASE = import.meta.env.VITE_API_BASE || "";
 const THEME_KEY = "ocx-theme";
-
 const NAV: { id: Page; tkey: TKey; Icon: typeof IconGrid }[] = [
   { id: "dashboard", tkey: "nav.dashboard", Icon: IconGrid },
   { id: "providers", tkey: "nav.providers", Icon: IconServer },
@@ -39,41 +34,80 @@ const NAV: { id: Page; tkey: TKey; Icon: typeof IconGrid }[] = [
   { id: "codex-auth", tkey: "nav.codexAuth", Icon: IconKey },
   { id: "api", tkey: "nav.api", Icon: IconGlobe },
 ];
-
 const THEME_ICON = { light: IconSun, dark: IconMoon, system: IconMonitor } as const;
 const THEME_TKEY: Record<Theme, TKey> = { light: "theme.light", dark: "theme.dark", system: "theme.system" };
-
 function readRuntimeVersion(data: unknown): string | null {
   if (!data || typeof data !== "object" || !("version" in data)) return null;
   const version = (data as { version?: unknown }).version;
   return typeof version === "string" && version.length > 0 ? version : null;
 }
-
 function readStoredTheme(): Theme {
   const t = localStorage.getItem(THEME_KEY);
   return t === "light" || t === "dark" ? t : "system";
 }
-
 export default function App() {
+  // --- API-key auth gate: lock the entire UI behind the proxy admission secret until a valid
+  // key is verified. The wrapper (gui/src/api.ts) surfaces 401s into this modal; the gate below
+  // keeps the sidebar/main page hidden so a non-authenticated visitor cannot read structure.
+  const TOKEN_KEY = "opencodex-api-token";
+  const [authUnlocked, setAuthUnlocked] = useState(false);
+  const [authPromptOpen, setAuthPromptOpen] = useState(false);
+  const [authError, setAuthError] = useState<string | undefined>(undefined);
+  const authResolverRef = useRef<((k: string | null) => void) | null>(null);
+  useEffect(() => {
+    registerApiKeyPrompt((error) => new Promise<string | null>((resolve) => {
+      authResolverRef.current = resolve;
+      setAuthError(error);
+      setAuthPromptOpen(true);
+    }));
+  }, []);
+  // Probe a management endpoint WITHOUT sending any token to decide whether the proxy
+  // requires auth. See submitApiKey below for the user-submitted-key flow.
+  const submitApiKey = (key: string) => {
+    fetch(`${API_BASE}/api/keys`, { headers: { "X-OpenCodex-API-Key": key } })
+      .then((r) => {
+        if (r.ok) {
+          try { sessionStorage.setItem(TOKEN_KEY, key); } catch {}
+          setAuthUnlocked(true);
+          setAuthPromptOpen(false);
+          setAuthError(undefined);
+          authResolverRef.current?.(key);
+          authResolverRef.current = null;
+        } else if (r.status === 401) {
+          setAuthError(t("authKey.errorRejected"));
+          authResolverRef.current?.(null);
+        } else {
+          setAuthError(t("authKey.errorUnexpected").replace("{status}", String(r.status)));
+          authResolverRef.current?.(null);
+        }
+      })
+      .catch(() => {
+        setAuthError(t("authKey.errorNetwork"));
+        authResolverRef.current?.(null);
+      });
+  };
+  const cancelApiKey = () => {
+    setAuthPromptOpen(false);
+    setAuthError(undefined);
+    authResolverRef.current?.(null);
+    authResolverRef.current = null;
+  };
   const [page, setPageState] = useState<Page>(readPageFromHash);
   const setPage = (p: Page) => { location.hash = p; setPageState(p); };
   const [theme, setTheme] = useState<Theme>(readStoredTheme);
   const [runtimeVersion, setRuntimeVersion] = useState<string | null>(null);
   const { locale, setLocale } = useI18n();
   const t = useT();
-
   useEffect(() => {
     const onHash = () => setPageState(readPageFromHash());
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
-
   useEffect(() => {
     const el = document.documentElement;
     if (theme === "system") { el.removeAttribute("data-theme"); localStorage.removeItem(THEME_KEY); }
     else { el.setAttribute("data-theme", theme); localStorage.setItem(THEME_KEY, theme); }
   }, [theme]);
-
   useEffect(() => {
     let cancelled = false;
     const fetchRuntimeVersion = async () => {
@@ -91,19 +125,79 @@ export default function App() {
     return () => { cancelled = true; clearInterval(interval); };
   }, []);
 
+
+  useEffect(() => {
+  const tRef = useRef(t);
+    let cancelled = false;
+  // Keep latest `t` in a ref so the probe effect does not re-run on every locale change.
+  tRef.current = t;
+
+    // 1. Loopback short-circuit: page loaded via localhost / 127.0.0.1 / [::1] → skip
+    //    the probe entirely. The server grants admission for any loopback source IP,
+    //    so a modal here would be surprising and contradicts "no key needed on the
+    //    proxy host itself".
+    const hostIsLoopback = /^(localhost|127\.|::1|\[::1\])$/i.test(location.hostname);
+    if (hostIsLoopback) { setAuthUnlocked(true); return; }
+    // 3. Network probe — runs after the loopback / stored-key shortcuts.
+    const probe = () => fetch(`${API_BASE}/api/keys`)
+      .then((r) => {
+        if (cancelled) return;
+        if (r.ok) {
+          setAuthUnlocked(true);
+        } else if (r.status === 401) {
+          setAuthPromptOpen(true);
+        } else {
+          setAuthPromptOpen(true);
+          setAuthError(tRef.current("authKey.errorUnexpected").replace("{status}", String(r.status)));
+        }
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setAuthPromptOpen(true);
+        setAuthError(tRef.current("authKey.errorNetwork"));
+      });
+    // 2. Reuse a key the user already validated in this tab. Without this, every
+    //    page reload re-prompts even though the previous submission succeeded.
+    const storedKey = (() => { try { return sessionStorage.getItem(TOKEN_KEY); } catch { return null; } })();
+    if (storedKey) {
+      fetch(`${API_BASE}/api/keys`, { headers: { "X-OpenCodex-API-Key": storedKey } })
+        .then((r) => {
+          if (cancelled) return;
+          if (r.ok) setAuthUnlocked(true);
+          else probe();
+        })
+        .catch(() => { if (!cancelled) probe(); });
+    } else {
+      probe();
+    }
+    return () => { cancelled = true; };
+  }, []);
   const cycleTheme = () => setTheme(t => (t === "light" ? "dark" : t === "dark" ? "system" : "light"));
   const ThemeIcon = THEME_ICON[theme];
   const displayedVersion = runtimeVersion ?? __APP_VERSION__;
-
   const [stopping, setStopping] = useState(false);
   const handleStop = async () => {
     if (!confirm(t("dash.stopConfirm"))) return;
     setStopping(true);
     try { await fetch(`${API_BASE}/api/stop`, { method: "POST" }); } catch { /* connection drops */ }
   };
-
+  if (!authUnlocked) {
+    return (
+      <>
+        <div className="empty" style={{ marginTop: "20vh", textAlign: "center", maxWidth: 420, margin: "20vh auto 0" }}>
+          <div style={{ display: "flex", justifyContent: "center" }}><IconLock width={48} height={48} /></div>
+          <div className="title" style={{ marginTop: 12 }}>{t("authKey.lockTitle")}</div>
+          <div style={{ fontSize: 13, color: "var(--muted)", marginTop: 6 }}>
+            {t("authKey.lockDesc")}
+          </div>
+        </div>
+        <ApiKeyModal open={authPromptOpen} error={authError} onSubmit={submitApiKey} onCancel={cancelApiKey} />
+      </>
+    );
+  }
   return (
     <div className="app">
+      <ApiKeyModal open={authPromptOpen} error={authError} onSubmit={submitApiKey} onCancel={cancelApiKey} />
       <aside className="sidebar">
         <div className="brand">
           <span className="brand-logo" role="img" aria-label="opencodex logo" />
@@ -143,7 +237,6 @@ export default function App() {
           </a>
         </div>
       </aside>
-
       <main className="main">
         <div className="main-inner">
           {page === "dashboard" && <Dashboard apiBase={API_BASE} />}

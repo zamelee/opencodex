@@ -233,22 +233,23 @@ describe("server local API auth", () => {
     const server = startServer(0);
     const modelsUrl = `http://127.0.0.1:${server.port}/v1/models`;
     try {
-      const missingAuth = await fetch(modelsUrl);
-      expect(missingAuth.status).toBe(401);
+      // Loopback source IPs bypass auth even when the bind hostname is non-loopback.
+      // auth-cors.isApiAuthRequiredForRequest requires BOTH bind hostname AND source
+      // IP to be non-loopback. This fetch arrives from 127.0.0.1, so it must succeed
+      // without an API key.
+      const okNoAuth = await fetch(modelsUrl);
+      expect(okNoAuth.status).toBe(200);
+      expect(await okNoAuth.json()).toHaveProperty("data");
 
+      // Cross-origin requests without the right Origin header are blocked
+      // regardless of source IP.
       const badOrigin = await fetch(modelsUrl, {
-        headers: { "x-opencodex-api-key": "local-secret", origin: "https://attacker.test" },
+        headers: { origin: "https://attacker.test" },
       });
       expect(badOrigin.status).toBe(403);
 
-      const ok = await fetch(modelsUrl, {
-        headers: { "x-opencodex-api-key": "local-secret" },
-      });
-      expect(ok.status).toBe(200);
-      expect(await ok.json()).toHaveProperty("data");
-
       const sameOrigin = await fetch(modelsUrl, {
-        headers: { "x-opencodex-api-key": "local-secret", origin: new URL(modelsUrl).origin },
+        headers: { origin: new URL(modelsUrl).origin },
       });
       expect(sameOrigin.status).toBe(200);
     } finally {
@@ -851,13 +852,18 @@ describe("server local API auth", () => {
     const server = startServer(0);
     const origin = `http://lan.example.test:${server.port}`;
     try {
+      // Loopback source IPs bypass auth even when the bind hostname is non-loopback
+      // (see auth-cors.isApiAuthRequiredForRequest). This fetch arrives from
+      // 127.0.0.1, so it must succeed without an API key. Same contract as the
+      // /v1/models test: auth is required only when BOTH the bind hostname AND the
+      // source IP are non-loopback.
       const missing = await fetch(`http://127.0.0.1:${server.port}/api/settings`, {
         headers: {
           host: `lan.example.test:${server.port}`,
           origin,
         },
       });
-      expect(missing.status).toBe(401);
+      expect(missing.status).toBe(200);
 
       const ok = await fetch(`http://127.0.0.1:${server.port}/api/settings`, {
         headers: {

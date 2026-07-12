@@ -59,7 +59,7 @@ function parseDebugLogQuery(url: URL): { after: number; limit: number } {
   };
 }
 
-export async function handleManagementAPI(req: Request, url: URL, config: OcxConfig): Promise<Response | null> {
+export async function handleManagementAPI(req: Request, url: URL, config: OcxConfig, sourceIp: string | null = null): Promise<Response | null> {
   if (!isAllowedRequestOrigin(req, config)) {
     return jsonResponse({ error: "cross-origin request blocked" }, 403, req, config);
   }

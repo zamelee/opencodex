@@ -107,13 +107,33 @@ export function isLoopbackHostname(hostname: string | undefined): boolean {
   return normalized === "" || normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1" || normalized === "[::1]";
 }
 
+/** True if the TCP source is on the loopback interface — i.e. the same machine. */
+export function isLoopbackSourceIp(ip: string | null | undefined): boolean {
+  if (!ip) return false;
+  const clean = ip.replace(/^[\[]|[\]]$/g, "").toLowerCase();
+  return clean === "127.0.0.1" || clean === "::1" || clean.startsWith("127.");
+}
+
+/** Runtime check: requires API auth only when bind is non-loopback AND request source is non-loopback. */
+export function isApiAuthRequiredForRequest(req: Request, config: OcxConfig, sourceIp: string | null): boolean {
+  if (isLoopbackHostname(config.hostname)) return false;
+  if (isLoopbackSourceIp(sourceIp)) return false;
+  return true;
+}
+
 export function isApiAuthRequired(config: OcxConfig): boolean {
   return !isLoopbackHostname(config.hostname);
 }
 
 export function assertServerAuthConfig(config: OcxConfig): void {
-  if (isApiAuthRequired(config) && !configuredApiAuthToken(config)) {
-    throw new Error("OPENCODEX_API_AUTH_TOKEN is required when binding opencodex to a non-loopback hostname");
+  if (!isApiAuthRequired(config)) return;
+  const hasEnv = !!configuredApiAuthToken(config);
+  const hasApiKeys = (config.apiKeys ?? []).some(k => k.key.trim().length > 0);
+  if (!hasEnv && !hasApiKeys) {
+    throw new Error(
+      "OPENCODEX_API_AUTH_TOKEN or at least one entry in config.apiKeys is required " +
+      "when binding opencodex to a non-loopback hostname"
+    );
   }
 }
 
@@ -137,16 +157,16 @@ export function isProxyAdmissionSecret(token: string, config: OcxConfig): boolea
   return false;
 }
 
-export function hasValidApiAuth(req: Request, config: OcxConfig): boolean {
-  if (!isApiAuthRequired(config)) return true;
+export function hasValidApiAuth(req: Request, config: OcxConfig, sourceIp: string | null): boolean {
+  if (!isApiAuthRequiredForRequest(req, config, sourceIp)) return true;
   const actual = req.headers.get("x-opencodex-api-key")?.trim()
     || req.headers.get("authorization")?.replace(/^Bearer\s+/i, "").trim();
   if (!actual) return false;
   return isProxyAdmissionSecret(actual, config);
 }
 
-export function requireApiAuth(req: Request, config: OcxConfig, kind: "management" | "data-plane"): Response | null {
-  if (hasValidApiAuth(req, config)) return null;
+export function requireApiAuth(req: Request, config: OcxConfig, kind: "management" | "data-plane", sourceIp: string | null): Response | null {
+  if (hasValidApiAuth(req, config, sourceIp)) return null;
   if (kind === "management") return jsonResponse({ error: "opencodex API key required" }, 401);
   return formatErrorResponse(401, "authentication_error", "opencodex API key required");
 }

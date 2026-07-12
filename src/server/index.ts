@@ -196,6 +196,7 @@ export function startServer(port?: number) {
     idleTimeout: 255,
     async fetch(req, requestServer): Promise<Response> {
       const url = new URL(req.url);
+      const sourceIp = requestServer.requestIP(req)?.address ?? null;
       markActivity(`${req.method} ${url.pathname}`);
 
       if (req.method === "OPTIONS") {
@@ -211,7 +212,7 @@ export function startServer(port?: number) {
         if (isDraining()) {
           return new Response("Service shutting down", { status: 503, headers: { ...corsHeaders(req, config), "Retry-After": "5" } });
         }
-        const apiAuthError = requireApiAuth(req, config, "data-plane");
+        const apiAuthError = requireApiAuth(req, config, "data-plane", sourceIp);
         if (apiAuthError) return withCors(apiAuthError, req, config);
         if (!isAllowedRequestOrigin(req, config)) {
           return withCors(formatErrorResponse(403, "origin_rejected", "WebSocket upgrade blocked: non-local Origin"), req, config);
@@ -256,14 +257,14 @@ export function startServer(port?: number) {
       }
 
       if (url.pathname.startsWith("/api/")) {
-        const apiAuthError = requireApiAuth(req, config, "management");
+        const apiAuthError = requireApiAuth(req, config, "management", sourceIp);
         if (apiAuthError) return withCors(apiAuthError, req, config);
-        const mgmtResponse = await handleManagementAPI(req, url, config);
+        const mgmtResponse = await handleManagementAPI(req, url, config, sourceIp);
         if (mgmtResponse) return withCors(mgmtResponse, req, config);
       }
 
       if (url.pathname === "/v1/models" && req.method === "GET") {
-        const apiAuthError = requireApiAuth(req, config, "data-plane");
+        const apiAuthError = requireApiAuth(req, config, "data-plane", sourceIp);
         if (apiAuthError) return withCors(apiAuthError, req, config);
         if (!isAllowedRequestOrigin(req, config)) {
           return withCors(formatErrorResponse(403, "origin_rejected", "cross-origin data-plane request blocked"), req, config);
@@ -299,7 +300,7 @@ export function startServer(port?: number) {
         if (isDraining()) {
           return new Response("Service shutting down", { status: 503, headers: { ...corsHeaders(req, config), "Retry-After": "5" } });
         }
-        const apiAuthError = requireApiAuth(req, config, "data-plane");
+        const apiAuthError = requireApiAuth(req, config, "data-plane", sourceIp);
         if (apiAuthError) return withCors(apiAuthError, req, config);
         if (!isAllowedRequestOrigin(req, config)) {
           return withCors(formatErrorResponse(403, "origin_rejected", "cross-origin data-plane request blocked"), req, config);
@@ -318,7 +319,7 @@ export function startServer(port?: number) {
             headers: { ...corsHeaders(req, config), "Retry-After": "5" },
           });
         }
-        const apiAuthError = requireApiAuth(req, config, "data-plane");
+        const apiAuthError = requireApiAuth(req, config, "data-plane", sourceIp);
         if (apiAuthError) return withCors(apiAuthError, req, config);
         if (!isAllowedRequestOrigin(req, config)) {
           return withCors(formatErrorResponse(403, "origin_rejected", "cross-origin data-plane request blocked"), req, config);
@@ -340,7 +341,7 @@ export function startServer(port?: number) {
             headers: { ...corsHeaders(req, config), "Retry-After": "5" },
           });
         }
-        const apiAuthError = requireApiAuth(req, config, "data-plane");
+        const apiAuthError = requireApiAuth(req, config, "data-plane", sourceIp);
         if (apiAuthError) return withCors(apiAuthError, req, config);
         if (!isAllowedRequestOrigin(req, config)) {
           return withCors(formatErrorResponse(403, "origin_rejected", "cross-origin data-plane request blocked"), req, config);
@@ -364,7 +365,7 @@ export function startServer(port?: number) {
         if (isDraining()) {
           return new Response("Service shutting down", { status: 503, headers: { ...corsHeaders(req, config), "Retry-After": "5" } });
         }
-        const apiAuthError = requireApiAuth(req, config, "data-plane");
+        const apiAuthError = requireApiAuth(req, config, "data-plane", sourceIp);
         if (apiAuthError) return withCors(apiAuthError, req, config);
         if (!isAllowedRequestOrigin(req, config)) {
           return withCors(formatErrorResponse(403, "origin_rejected", "cross-origin data-plane request blocked"), req, config);
