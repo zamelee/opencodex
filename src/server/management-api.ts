@@ -72,6 +72,12 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
       return jsonResponse({ error: "request body too large" }, 413, req, config);
     }
   }
+  // Fire-and-forget: the on-disk catalog refresh must NEVER block a management API
+  // response. A slow or unreachable upstream (DNS hiccup, broken provider URL) used to
+  // hang DELETE / POST / PATCH for up to the AbortSignal timeout because callers awaited
+  // this. The catalog is just a sync hint for Codex's next poll -- it is not part of
+  // the operation's contract. The inner try/catch keeps the returned promise resolved,
+  // so callers can fire it without await and there are no unhandled-rejection warnings.
   async function refreshCodexCatalogBestEffort(): Promise<void> {
     try {
       const { refreshCodexModelCatalog } = await import("../codex/refresh");
@@ -305,7 +311,7 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
     }
     const { clearModelCache } = await import("../codex/model-cache");
     clearModelCache(name);
-    await refreshCodexCatalogBestEffort();
+    refreshCodexCatalogBestEffort();
     return jsonResponse({ success: true, name });
   }
 
@@ -321,7 +327,7 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
     const { saveConfig: save } = await import("../config");
     config.providers[name] = { ...config.providers[name], disabled: body.disabled };
     save(config);
-    await refreshCodexCatalogBestEffort();
+    refreshCodexCatalogBestEffort();
     return jsonResponse({ success: true, name, disabled: body.disabled });
   }
 
@@ -335,7 +341,7 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
     save(config);
     const { clearModelCache: clearCache } = await import("../codex/model-cache");
     clearCache(name);
-    await refreshCodexCatalogBestEffort();
+    refreshCodexCatalogBestEffort();
     return jsonResponse({ success: true });
   }
 
@@ -384,7 +390,7 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
       setGlobalContextCapValue(config, body.value);
       save(config);
       for (const provider of affected) clearModelCache(provider);
-      await refreshCodexCatalogBestEffort();
+      refreshCodexCatalogBestEffort();
       return respond();
     }
 
@@ -398,7 +404,7 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
       setAllProviderContextCaps(config, names, body.setAll);
       save(config);
       for (const provider of new Set([...before, ...names])) clearModelCache(provider);
-      await refreshCodexCatalogBestEffort();
+      refreshCodexCatalogBestEffort();
       return respond();
     }
 
@@ -416,7 +422,7 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
     setProviderContextCap(config, provider, body.enabled);
     save(config);
     clearModelCache(provider);
-    await refreshCodexCatalogBestEffort();
+    refreshCodexCatalogBestEffort();
     return respond();
   }
 
@@ -429,7 +435,7 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
     config.disabledModels = disabled;
     const { saveConfig: save } = await import("../config");
     save(config);
-    await refreshCodexCatalogBestEffort();
+    refreshCodexCatalogBestEffort();
     return jsonResponse({ ok: true, disabled });
   }
 
@@ -472,7 +478,7 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
       } catch (err) {
         return jsonResponse({ error: `codex features ${body.enabled ? "enable" : "disable"} failed: ${err instanceof Error ? err.message : String(err)}` }, 502);
       }
-      await refreshCodexCatalogBestEffort();
+      refreshCodexCatalogBestEffort();
     }
     if (wantsThreads) {
       // setMaxConcurrentThreads is idempotent (equal value -> no write) and refuses
@@ -487,7 +493,7 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
       if (mode === "default") delete config.multiAgentMode;
       else config.multiAgentMode = mode;
       saveConfig(config);
-      await refreshCodexCatalogBestEffort();
+      refreshCodexCatalogBestEffort();
       warnings.push(`Multi-agent mode set to '${mode}'. Applies to new sessions.`);
     }
     if ((wantsFlag ? body.enabled === true : isMultiAgentV2Enabled()) && hasAgentsMaxThreads()) {
@@ -622,7 +628,7 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
     config.subagentModels = chosen;
     const { saveConfig: save } = await import("../config");
     save(config);
-    await refreshCodexCatalogBestEffort();
+    refreshCodexCatalogBestEffort();
     return jsonResponse({ ok: true, applied: chosen });
   }
 
@@ -654,7 +660,7 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
     else delete config.providers[provider].selectedModels;
     const { saveConfig: save } = await import("../config");
     save(config);
-    await refreshCodexCatalogBestEffort();
+    refreshCodexCatalogBestEffort();
     return jsonResponse({ ok: true, provider, selected: models });
   }
 
