@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { IconPlus, IconX, IconCheck } from "../icons";
+import { IconPlus, IconX, IconCheck, IconEye, IconEyeOff, IconCopy } from "../icons";
 import { useI18n, LOCALES } from "../i18n";
 
 interface ApiKeyEntry {
@@ -8,6 +8,12 @@ interface ApiKeyEntry {
   prefix: string;
   createdAt: string;
 }
+
+// One row's reveal state: full key + a 30s auto-collapse timer handle. Cleared when
+// the timer fires, the user toggles it back off, the key is deleted, or the page unmounts.
+interface RevealEntry { key: string; timer: number; }
+const REVEAL_TTL_MS = 30_000;
+const COPY_FEEDBACK_MS = 1500;
 
 export default function ApiKeys({ apiBase }: { apiBase: string }) {
   const { t, locale } = useI18n();
@@ -19,6 +25,14 @@ export default function ApiKeys({ apiBase }: { apiBase: string }) {
   const [newKey, setNewKey] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  // id -> {key, timer}. timer is the auto-collapse setTimeout handle; cleared on
+  // toggle off, delete, or unmount. Source of truth: server's POST /api/keys/reveal.
+  const [revealed, setRevealed] = useState<Record<string, RevealEntry>>({});
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [revealError, setRevealError] = useState<string | null>(null);
+  // Tracks which row is currently waiting on a reveal response, so the row's
+  // reveal/copy buttons can disable and we don't fire the request twice.
+  const [revealInFlight, setRevealInFlight] = useState<string | null>(null);
 
   const fetchKeys = useCallback(async () => {
     try {
@@ -32,6 +46,13 @@ export default function ApiKeys({ apiBase }: { apiBase: string }) {
   }, [apiBase]);
 
   useEffect(() => { fetchKeys(); }, [fetchKeys]);
+  // Clear all reveal timers on unmount so they don't fire after the page is gone.
+  useEffect(() => () => {
+    setRevealed(prev => {
+      Object.values(prev).forEach(r => window.clearTimeout(r.timer));
+      return {};
+    });
+  }, []);
 
   const responseEndpoint = endpoint || "http://127.0.0.1:10100/v1/responses";
 
@@ -60,6 +81,13 @@ export default function ApiKeys({ apiBase }: { apiBase: string }) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id }),
     });
+    // Drop the deleted id's reveal entry + timer so it can't fire after deletion.
+    setRevealed(prev => {
+      if (!prev[id]) return prev;
+      window.clearTimeout(prev[id].timer);
+      const { [id]: _gone, ...rest } = prev;
+      return rest;
+    });
     setConfirmDelete(null);
     fetchKeys();
   };
@@ -69,6 +97,83 @@ export default function ApiKeys({ apiBase }: { apiBase: string }) {
       navigator.clipboard.writeText(newKey);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
+    }
+  };
+
+  // Ask the server for the full key value. The auth-gate fetch wrapper handles 401
+  // by popping the modal; here we surface only non-auth failures (e.g. 404 stale id).
+  const fetchFullKey = async (id: string): Promise<string | null> => {
+    if (revealInFlight) return null;
+    setRevealInFlight(id);
+    try {
+      const res = await fetch(`${apiBase}/api/keys/reveal`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id }),
+      });
+      if (!res.ok) {
+        setRevealError(t("apiKeys.revealError"));
+        return null;
+      }
+      const data = await res.json();
+      setRevealError(null);
+      return (data.key as string) ?? null;
+    } catch {
+      setRevealError(t("apiKeys.revealError"));
+      return null;
+    } finally {
+      setRevealInFlight(prev => prev === id ? null : prev);
+    }
+  };
+
+  // Schedule a 30s auto-collapse. Returns the timer handle so callers can stash it
+  // in revealed[id].timer; the collapse itself removes the entry from state.
+  const scheduleRevealCollapse = (id: string): number => {
+    return window.setTimeout(() => {
+      setRevealed(prev => {
+        if (!prev[id]) return prev;
+        const { [id]: _gone, ...rest } = prev;
+        return rest;
+      });
+    }, REVEAL_TTL_MS);
+  };
+
+  const revealKey = async (id: string) => {
+    const key = await fetchFullKey(id);
+    if (!key) return;
+    const timer = scheduleRevealCollapse(id);
+    setRevealed(prev => ({ ...prev, [id]: { key, timer } }));
+  };
+
+  const hideKey = (id: string) => {
+    setRevealed(prev => {
+      if (!prev[id]) return prev;
+      window.clearTimeout(prev[id].timer);
+      const { [id]: _gone, ...rest } = prev;
+      return rest;
+    });
+  };
+
+  const toggleReveal = (id: string) => {
+    if (revealed[id]) hideKey(id);
+    else revealKey(id);
+  };
+
+  const copyExistingKey = async (id: string) => {
+    let key = revealed[id]?.key;
+    if (!key) {
+      const fetched = await fetchFullKey(id);
+      if (!fetched) return;
+      key = fetched;
+      const timer = scheduleRevealCollapse(id);
+      setRevealed(prev => ({ ...prev, [id]: { key, timer } }));
+    }
+    try {
+      await navigator.clipboard.writeText(key);
+      setCopiedId(id);
+      window.setTimeout(() => setCopiedId(prev => prev === id ? null : prev), COPY_FEEDBACK_MS);
+    } catch {
+      setRevealError(t("apiKeys.copyError"));
     }
   };
 
@@ -128,6 +233,11 @@ export default function ApiKeys({ apiBase }: { apiBase: string }) {
 
       <div className="panel api-panel" style={{ marginTop: "1rem" }}>
         <h3 className="panel-title">{t("api.activeKeys", { count: keys.length })}</h3>
+        {revealError && (
+          <div className="notice notice-err" style={{ marginBottom: 8, fontSize: 12 }}>
+            {revealError}
+          </div>
+        )}
         {keys.length === 0 ? (
           <p className="muted">{t("api.noKeys")}</p>
         ) : (
@@ -140,7 +250,39 @@ export default function ApiKeys({ apiBase }: { apiBase: string }) {
                 {keys.map(k => (
                   <tr key={k.id}>
                     <td>{k.name}</td>
-                    <td><code>{k.prefix}</code></td>
+                    <td>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <code className="api-code-inline" style={{
+                          flex: 1,
+                          fontFamily: "var(--mono)",
+                          fontSize: 12,
+                          maxWidth: revealed[k.id] ? 360 : 180,
+                          wordBreak: "break-all",
+                        }}>
+                          {revealed[k.id] ? revealed[k.id].key : k.prefix}
+                        </code>
+                        <button
+                          type="button"
+                          className="btn btn-sm btn-ghost"
+                          onClick={() => toggleReveal(k.id)}
+                          aria-label={revealed[k.id] ? t("apiKeys.hide") : t("apiKeys.reveal")}
+                          title={revealed[k.id] ? t("apiKeys.hide") : t("apiKeys.reveal")}
+                          disabled={revealInFlight === k.id}
+                        >
+                          {revealed[k.id] ? <IconEyeOff width={14} /> : <IconEye width={14} />}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-sm btn-ghost"
+                          onClick={() => copyExistingKey(k.id)}
+                          aria-label={t("apiKeys.copy")}
+                          title={t("apiKeys.copy")}
+                          disabled={revealInFlight === k.id}
+                        >
+                          {copiedId === k.id ? <IconCheck width={14} /> : <IconCopy width={14} />}
+                        </button>
+                      </div>
+                    </td>
                     <td>{new Date(k.createdAt).toLocaleDateString(localeTag)}</td>
                     <td>
                       {confirmDelete === k.id ? (

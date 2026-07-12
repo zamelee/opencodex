@@ -443,6 +443,12 @@ export const en = {
   "authKey.submit": "Submit",
   "authKey.lockTitle": "opencodex",
   "authKey.lockDesc": "This proxy is bound to a non-loopback address and requires an API key.",
+  "apiKeys.reveal": "Show",
+  "apiKeys.hide": "Hide",
+  "apiKeys.copy": "Copy",
+  "apiKeys.copied": "Copied",
+  "apiKeys.revealError": "Couldn't load this key. Try again or check your admin access.",
+  "apiKeys.copyError": "Couldn't copy. Your browser blocked clipboard access.",
 } as const;
 
 export type TKey = keyof typeof en;

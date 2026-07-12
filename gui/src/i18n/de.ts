@@ -422,6 +422,12 @@ export const de = {
   "authKey.submit": "Absenden",
   "authKey.lockTitle": "opencodex",
   "authKey.lockDesc": "Dieser Proxy ist an eine Nicht-Loopback-Adresse gebunden und benötigt einen API-Schlüssel.",
+  "apiKeys.reveal": "Anzeigen",
+  "apiKeys.hide": "Verbergen",
+  "apiKeys.copy": "Kopieren",
+  "apiKeys.copied": "Kopiert",
+  "apiKeys.revealError": "Dieser Schlüssel konnte nicht geladen werden. Erneut versuchen oder Admin-Zugriff prüfen.",
+  "apiKeys.copyError": "Kopieren fehlgeschlagen. Der Browser hat den Zugriff auf die Zwischenablage blockiert.",
 } as const;
 
 export type TKey = keyof typeof de;

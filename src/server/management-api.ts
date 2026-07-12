@@ -40,6 +40,7 @@ import { drainAndShutdown } from "./lifecycle";
 import { filterRequestLogs, getRequestLogEntries } from "./request-log";
 import { isAllowedRequestOrigin, jsonResponse, providerManagementConfigError, publicProviderBaseUrl, safeConfigDTO } from "./auth-cors";
 
+import { markActivity } from "../lib/sidecar-tracker";
 // Single source of truth = package.json (../ from src/), so /healthz + the GUI badge match the
 // installed npm version instead of a stale hardcode.
 export const VERSION = (() => {
@@ -811,6 +812,22 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
     config.apiKeys = (config.apiKeys ?? []).filter(k => k.id !== body.id);
     saveConfig(config);
     return jsonResponse({ success: true }, 200, req, config);
+  }
+  if (url.pathname === "/api/keys/reveal" && req.method === "POST") {
+    let rb: { id?: string };
+    try { rb = await req.json() as { id?: string }; }
+    catch { return jsonResponse({ error: "invalid JSON body" }, 400, req, config); }
+    const rid = rb.id?.trim();
+    if (!rid) return jsonResponse({ error: "id required" }, 400, req, config);
+    const entry = (config.apiKeys ?? []).find(k => k.id === rid);
+    if (!entry) return jsonResponse({ error: "api key not found" }, 404, req, config);
+    // Audit: log who revealed which key. Key NAME is included (admin ops needs to
+    // know which human-readable key got exposed); full KEY CONTENT is never logged.
+    const ts = new Date().toISOString();
+    const from = sourceIp ?? "unknown";
+    console.log(`[opencodex-audit] revealed apiKey name=${entry.name} id=${rid} from=${from} at=${ts}`);
+    markActivity(`revealed apiKey name=${entry.name} id=${rid} from=${from}`);
+    return jsonResponse({ id: entry.id, name: entry.name, key: entry.key }, 200, req, config);
   }
 
   if (url.pathname === "/api/stop" && req.method === "POST") {

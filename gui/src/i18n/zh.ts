@@ -442,4 +442,10 @@ export const zh: Record<TKey, string> = {
   "authKey.submit": "提交",
   "authKey.lockTitle": "opencodex",
   "authKey.lockDesc": "此代理绑定在非本机地址上，需要 API 密钥。",
+  "apiKeys.reveal": "显示",
+  "apiKeys.hide": "隐藏",
+  "apiKeys.copy": "复制",
+  "apiKeys.copied": "已复制",
+  "apiKeys.revealError": "无法加载此密钥。请重试或检查管理员权限。",
+  "apiKeys.copyError": "无法复制。浏览器拦截了对剪贴板的访问。",
 };

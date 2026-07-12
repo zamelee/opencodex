@@ -442,4 +442,10 @@ export const ko: Record<TKey, string> = {
   "authKey.submit": "제출",
   "authKey.lockTitle": "opencodex",
   "authKey.lockDesc": "이 프록시는 루프백이 아닌 주소에 바인딩되어 있어 API 키가 필요합니다.",
+  "apiKeys.reveal": "표시",
+  "apiKeys.hide": "숨기기",
+  "apiKeys.copy": "복사",
+  "apiKeys.copied": "복사됨",
+  "apiKeys.revealError": "이 키를 불러오지 못했습니다. 다시 시도하거나 관리자 권한을 확인하세요.",
+  "apiKeys.copyError": "복사하지 못했습니다. 브라우저가 클립보드 접근을 차단했습니다.",
 };

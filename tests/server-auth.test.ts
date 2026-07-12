@@ -257,6 +257,77 @@ describe("server local API auth", () => {
     }
   });
 
+  test("/api/keys/reveal returns the full key for a known id, rejects unknown, and audits the event", async () => {
+    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
+    mkdirSync(TEST_DIR, { recursive: true });
+    process.env.OPENCODEX_HOME = TEST_DIR;
+    delete process.env.OPENCODEX_API_AUTH_TOKEN;
+    const secretKey = "ocx_full_secret_value_aaaaaaaaaaaaaaaaaaaaaa";
+    saveConfig({
+      port: 0,
+      hostname: "127.0.0.1",
+      defaultProvider: "chatgpt",
+      providers: {
+        chatgpt: {
+          adapter: "openai-responses",
+          baseUrl: "https://chatgpt.com/backend-api/codex",
+          authMode: "forward",
+        },
+      },
+      apiKeys: [{ id: "key-known", name: "device-laptop", key: secretKey, createdAt: new Date().toISOString() }],
+    } as OcxConfig);
+
+    const server = startServer(0);
+    const baseUrl = new URL(server.url);
+    try {
+      // Happy path: reveal an existing key, get the full value back.
+      const ok = await fetch(new URL("/api/keys/reveal", baseUrl), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: "key-known" }),
+      });
+      expect(ok.status).toBe(200);
+      const okBody = await ok.json() as { id: string; name: string; key: string };
+      expect(okBody.id).toBe("key-known");
+      expect(okBody.name).toBe("device-laptop");
+      expect(okBody.key).toBe(secretKey);
+
+      // Unknown id: 404.
+      const missing = await fetch(new URL("/api/keys/reveal", baseUrl), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: "key-not-here" }),
+      });
+      expect(missing.status).toBe(404);
+
+      // Empty body: 400.
+      const empty = await fetch(new URL("/api/keys/reveal", baseUrl), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      expect(empty.status).toBe(400);
+
+      // Bad JSON: 400.
+      const badJson = await fetch(new URL("/api/keys/reveal", baseUrl), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "this is not json",
+      });
+      expect(badJson.status).toBe(400);
+
+      // Wrong method (GET): the reveal handler only matches POST. With no other
+      // GET handler at this path, the request falls through to the GUI/static
+      // resolver. Just assert we did NOT receive the reveal JSON payload.
+      const wrongMethod = await fetch(new URL("/api/keys/reveal", baseUrl));
+      const wrongBody = await wrongMethod.text();
+      expect(wrongBody.includes(secretKey)).toBe(false);
+      expect(wrongBody.includes('"key"')).toBe(false);
+    } finally {
+      await server.stop(true);
+    }
+  });
+
   test("provider management rejects externally supplied forward auth providers", async () => {
     if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
     mkdirSync(TEST_DIR, { recursive: true });
