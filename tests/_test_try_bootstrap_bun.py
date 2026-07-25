@@ -182,5 +182,111 @@ class RunCliPathResolutionTests(unittest.TestCase):
         self.assertIn("\u65e0\u6cd5\u542f\u52a8", buf.getvalue())
 
 
+
+
+class EnsureDepsInstalledTests(unittest.TestCase):
+    def setUp(self):
+        self._orig_call = mod.subprocess.call
+        self._orig_find = getattr(mod, "find_bun_exe", None)
+
+    def tearDown(self):
+        mod.subprocess.call = self._orig_call
+        if self._orig_find is not None:
+            mod.find_bun_exe = self._orig_find
+
+    def test_no_package_json_returns_true(self):
+        import tempfile, pathlib
+        with tempfile.TemporaryDirectory() as td:
+            orig_root = mod.ROOT
+            mod.ROOT = pathlib.Path(td)
+            try:
+                rv = mod.ensure_deps_installed()
+                self.assertTrue(rv)
+            finally:
+                mod.ROOT = orig_root
+
+    def test_node_modules_present_returns_true_no_call(self):
+        import tempfile, pathlib
+        with tempfile.TemporaryDirectory() as td:
+            td_path = pathlib.Path(td)
+            (td_path / "package.json").write_text("{}", encoding="utf-8")
+            (td_path / "node_modules").mkdir()
+            orig_root = mod.ROOT
+            orig_call = mod.subprocess.call
+            mod.ROOT = td_path
+            mod.subprocess.call = lambda *_, **__: self.fail("bun install must not run")
+            try:
+                rv = mod.ensure_deps_installed()
+                self.assertTrue(rv)
+            finally:
+                mod.ROOT = orig_root
+                mod.subprocess.call = orig_call
+
+    def test_node_modules_missing_runs_bun_install(self):
+        import tempfile, pathlib
+        calls = []
+        def fake_call(cmd, **kw):
+            calls.append(cmd)
+            return 0
+        with tempfile.TemporaryDirectory() as td:
+            td_path = pathlib.Path(td)
+            (td_path / "package.json").write_text("{}", encoding="utf-8")
+            orig_root = mod.ROOT
+            mod.ROOT = td_path
+            mod.find_bun_exe = lambda: "C:/fake/bun.exe"
+            mod.subprocess.call = fake_call
+            try:
+                import io, contextlib
+                buf = io.StringIO()
+                with contextlib.redirect_stderr(buf):
+                    rv = mod.ensure_deps_installed()
+                self.assertTrue(rv)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(calls[0], ["C:/fake/bun.exe", "install"])
+                self.assertIn("bun install", buf.getvalue())
+            finally:
+                mod.ROOT = orig_root
+
+    def test_bun_install_returns_nonzero_returns_false(self):
+        import tempfile, pathlib
+        with tempfile.TemporaryDirectory() as td:
+            td_path = pathlib.Path(td)
+            (td_path / "package.json").write_text("{}", encoding="utf-8")
+            orig_root = mod.ROOT
+            mod.ROOT = td_path
+            mod.find_bun_exe = lambda: "C:/fake/bun.exe"
+            mod.subprocess.call = lambda *_, **__: 1
+            try:
+                import io, contextlib
+                buf = io.StringIO()
+                with contextlib.redirect_stderr(buf):
+                    rv = mod.ensure_deps_installed()
+                self.assertFalse(rv)
+                self.assertIn("失败", buf.getvalue())
+            finally:
+                mod.ROOT = orig_root
+
+    def test_no_bun_returns_false_quiet(self):
+        import tempfile, pathlib
+        with tempfile.TemporaryDirectory() as td:
+            td_path = pathlib.Path(td)
+            (td_path / "package.json").write_text("{}", encoding="utf-8")
+            orig_root = mod.ROOT
+            mod.ROOT = td_path
+            mod.find_bun_exe = lambda: None
+            mod.subprocess.call = lambda *_, **__: self.fail("must not call without bun")
+            try:
+                rv_quiet = mod.ensure_deps_installed(quiet=True)
+                self.assertFalse(rv_quiet)
+                import io, contextlib
+                buf = io.StringIO()
+                with contextlib.redirect_stderr(buf):
+                    rv_loud = mod.ensure_deps_installed(quiet=False)
+                self.assertFalse(rv_loud)
+                self.assertIn("跳过", buf.getvalue())
+            finally:
+                mod.ROOT = orig_root
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2, exit=False)

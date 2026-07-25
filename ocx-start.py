@@ -324,6 +324,31 @@ def find_bun_exe() -> str | None:
         return p
 
 
+def ensure_deps_installed(quiet: bool = False) -> bool:
+    """确保 ROOT/node_modules 存在；缺失则跳 bun install。返回 True 表示成功。"""
+    pkg = ROOT / "package.json"
+    if not pkg.exists():
+        return True  # out-of-tree; nothing to install
+    nm = ROOT / "node_modules"
+    if nm.exists():
+        return True  # already installed
+    bun = find_bun_exe()
+    if bun is None:
+        if not quiet:
+            print("[deps] node_modules 缺失，bun 也找不到。跳过自动装依赖。", file=sys.stderr)
+        return False
+    if not quiet:
+        print("[deps] node_modules 缺失，跳 bun install ...", file=sys.stderr)
+    rc = subprocess.call([bun, "install"], cwd=str(ROOT))
+    if rc != 0:
+        if not quiet:
+            print(f"[err] bun install 失败 (exit={rc})", file=sys.stderr)
+        return False
+    if not quiet:
+        print("[deps] bun install 完成", file=sys.stderr)
+    return True
+
+
 def try_bootstrap_bun(non_interactive: bool = False) -> bool:
     """尝试自动装 bun。顺序探测 npm / pnpm / yarn。non_interactive=True 时不询问。
     装完返回 has_bun() 结果（true = 成功）。
@@ -446,6 +471,9 @@ def run_cli(*args: str, env_overrides: dict | None = None, no_bootstrap: bool = 
         if bun_exe is None:
             print("[err] bun 装完后 PATH 仍找不到。请重新打开 PowerShell 让 PATH 生效，或手动检查 bun 安装位置。", file=sys.stderr)
             return 127
+    if not ensure_deps_installed():
+        print("[err] 依赖装不上，请先手动跳 `bun install` 再重试。", file=sys.stderr)
+        return 127
     cmd = [bun_exe, "run", "src/cli/index.ts", *args]
     print(f"[run] {' '.join(cmd)}", file=sys.stderr)
     env = None
