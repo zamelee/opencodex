@@ -150,7 +150,10 @@ async function handleStart(options: { block?: boolean } = {}) {
   writePid(process.pid);
 
   const config = loadConfig();
-  writeRuntimePort({ pid: process.pid, port, hostname: config.hostname });
+  // Honor OCX_HOSTNAME env override (set by ocx-start.py --hostname) so runtime-port.json
+  // reports what we actually bound, not the stale config.hostname.
+  const runtimeHost = process.env.OCX_HOSTNAME ?? config.hostname;
+  writeRuntimePort({ pid: process.pid, port, hostname: runtimeHost });
   writeJournal();
 
   // Background proactive token refresh. No-op unless config.tokenGuardian.enabled; timer is unref'd
@@ -520,7 +523,9 @@ switch (command) {
     }
     // Open the host the proxy actually binds — `localhost` only answers for
     // loopback/wildcard binds, not a concrete LAN/IPv6 hostname.
-    const guiHost = probeHostname(live?.hostname ?? config.hostname);
+    // Match what the proxy actually bound (OCX_HOSTNAME override > config.hostname).
+    const effectiveHost = process.env.OCX_HOSTNAME ?? live?.hostname ?? config.hostname;
+    const guiHost = probeHostname(effectiveHost);
     const guiUrl = `http://${guiHost === "127.0.0.1" ? "localhost" : guiHost}:${live?.port ?? config.port}`;
     console.log(`Opening ${guiUrl}`);
     const { openUrl } = await import("../lib/open-url");

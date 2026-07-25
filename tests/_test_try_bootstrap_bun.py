@@ -328,5 +328,113 @@ class LauncherEnvTests(unittest.TestCase):
         self.assertEqual(env.get("OCX_SYNC_ROUTED_MODELS"), "false")
 
 
+
+
+class EnsureGuiBuiltTests(unittest.TestCase):
+    def setUp(self):
+        self._orig_call = mod.subprocess.call
+        self._orig_find = getattr(mod, "find_bun_exe", None)
+
+    def tearDown(self):
+        mod.subprocess.call = self._orig_call
+        if self._orig_find is not None:
+            mod.find_bun_exe = self._orig_find
+
+    def test_no_gui_dir_returns_true(self):
+        import tempfile, pathlib
+        with tempfile.TemporaryDirectory() as td:
+            orig_root = mod.ROOT
+            mod.ROOT = pathlib.Path(td)
+            try:
+                rv = mod.ensure_gui_built()
+                self.assertTrue(rv)
+            finally:
+                mod.ROOT = orig_root
+
+    def test_dist_index_present_returns_true_no_call(self):
+        import tempfile, pathlib
+        with tempfile.TemporaryDirectory() as td:
+            td_path = pathlib.Path(td)
+            gui = td_path / "gui"
+            gui.mkdir()
+            (gui / "package.json").write_text("{}", encoding="utf-8")
+            dist = gui / "dist"
+            dist.mkdir()
+            (dist / "index.html").write_text("<html></html>", encoding="utf-8")
+            orig_root = mod.ROOT
+            orig_call = mod.subprocess.call
+            mod.ROOT = td_path
+            mod.subprocess.call = lambda *_, **__: self.fail("must not call bun")
+            try:
+                rv = mod.ensure_gui_built()
+                self.assertTrue(rv)
+            finally:
+                mod.ROOT = orig_root
+                mod.subprocess.call = orig_call
+
+    def test_dist_missing_runs_build_gui(self):
+        import tempfile, pathlib
+        calls = []
+        def fake_call(cmd, **kw):
+            calls.append(cmd)
+            cwd = pathlib.Path(kw.get("cwd", "."))
+            (cwd / "gui" / "dist").mkdir(parents=True, exist_ok=True)
+            (cwd / "gui" / "dist" / "index.html").write_text("x", encoding="utf-8")
+            return 0
+        with tempfile.TemporaryDirectory() as td:
+            td_path = pathlib.Path(td)
+            gui = td_path / "gui"
+            gui.mkdir()
+            (gui / "package.json").write_text("{}", encoding="utf-8")
+            orig_root = mod.ROOT
+            mod.ROOT = td_path
+            mod.find_bun_exe = lambda: "C:/fake/bun.exe"
+            mod.subprocess.call = fake_call
+            try:
+                rv = mod.ensure_gui_built()
+                self.assertTrue(rv)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(calls[0], ["C:/fake/bun.exe", "run", "build:gui"])
+            finally:
+                mod.ROOT = orig_root
+
+    def test_no_bun_returns_false_quiet(self):
+        import tempfile, pathlib
+        with tempfile.TemporaryDirectory() as td:
+            td_path = pathlib.Path(td)
+            gui = td_path / "gui"
+            gui.mkdir()
+            (gui / "package.json").write_text("{}", encoding="utf-8")
+            orig_root = mod.ROOT
+            mod.ROOT = td_path
+            mod.find_bun_exe = lambda: None
+            mod.subprocess.call = lambda *_, **__: self.fail("must not call")
+            try:
+                self.assertFalse(mod.ensure_gui_built(quiet=True))
+                self.assertFalse(mod.ensure_gui_built(quiet=False))
+            finally:
+                mod.ROOT = orig_root
+
+
+class HostnameEnvPassthroughTests(unittest.TestCase):
+    def test_launcher_env_adds_OCX_HOSTNAME_when_override_set(self):
+        env = mod.launcher_env({}, {"hostname": "0.0.0.0"})
+        self.assertEqual(env.get("OCX_HOSTNAME"), "0.0.0.0")
+
+    def test_launcher_env_no_OCX_HOSTNAME_when_no_override(self):
+        env = mod.launcher_env({}, {})
+        self.assertNotIn("OCX_HOSTNAME", env)
+
+    def test_launcher_env_OCX_HOSTNAME_alongside_preset(self):
+        env = mod.launcher_env({"preset": "proxy-only"}, {"hostname": "0.0.0.0"})
+        self.assertEqual(env.get("OCX_HOSTNAME"), "0.0.0.0")
+        self.assertEqual(env.get("OCX_PRESET"), "proxy-only")
+
+    def test_launcher_env_OCX_HOSTNAME_empty_string_ignored(self):
+        # Empty string is falsy in Python, so should NOT inject (lets default kick in)
+        env = mod.launcher_env({}, {"hostname": ""})
+        self.assertNotIn("OCX_HOSTNAME", env)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2, exit=False)

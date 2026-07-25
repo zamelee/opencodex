@@ -21,6 +21,7 @@ OCX_SYNC_NATIVE_OPENAI_MODELS / OCX_PRESET）；日常 `python ocx-start.py` 不
   python ocx-start.py --clean             清 dist / gui/dist
   python ocx-start.py --port 8080         改端口（默认 10100）
   python ocx-start.py --no-auto-bootstrap bun 缺失时不要自动装 bun，只打 err
+  python ocx-start.py --hostname 0.0.0.0    bind 到所有网络接口（默认仅 127.0.0.1）
   python ocx-start.py --help              帮助
 
 Phase 5 launcher-mode flag 透传：
@@ -349,6 +350,31 @@ def ensure_deps_installed(quiet: bool = False) -> bool:
     return True
 
 
+def ensure_gui_built(quiet: bool = False) -> bool:
+    """确ӝ ROOT/gui/dist/index.html 存在；缺失则跳 `bun run build:gui`。返回 True 表示成功或已存在。"""
+    gui_pkg = ROOT / "gui" / "package.json"
+    if not gui_pkg.exists():
+        return True  # out-of-tree / no gui subdir
+    gui_index = ROOT / "gui" / "dist" / "index.html"
+    if gui_index.exists():
+        return True  # already built
+    bun = find_bun_exe()
+    if bun is None:
+        if not quiet:
+            print("[gui] gui/dist 缺失，bun 也找不到。跳过自动 build GUI。", file=sys.stderr)
+        return False
+    if not quiet:
+        print("[gui] gui/dist 缺失，跳 `bun run build:gui` ...", file=sys.stderr)
+    rc = subprocess.call([bun, "run", "build:gui"], cwd=str(ROOT))
+    if rc != 0:
+        if not quiet:
+            print(f"[err] bun run build:gui 失败 (exit={rc})", file=sys.stderr)
+        return False
+    if not quiet:
+        print("[gui] bun run build:gui 完成", file=sys.stderr)
+    return True
+
+
 def try_bootstrap_bun(non_interactive: bool = False) -> bool:
     """尝试自动装 bun。顺序探测 npm / pnpm / yarn。non_interactive=True 时不询问。
     装完返回 has_bun() 结果（true = 成功）。
@@ -451,6 +477,8 @@ def launcher_env(cfg: dict, cli_overrides: dict | None = None) -> dict:
         env["OCX_SYNC_ROUTED_MODELS"] = "true" if overrides["sync_routed_models"] else "false"
     if overrides.get("sync_native_openai_models") is not None:
         env["OCX_SYNC_NATIVE_OPENAI_MODELS"] = "true" if overrides["sync_native_openai_models"] else "false"
+    if overrides.get("hostname"):
+        env["OCX_HOSTNAME"] = str(overrides["hostname"])
     return env
 
 
@@ -475,6 +503,9 @@ def run_cli(*args: str, env_overrides: dict | None = None, no_bootstrap: bool = 
             return 127
     if not ensure_deps_installed():
         print("[err] 依赖装不上，请先手动跳 `bun install` 再重试。", file=sys.stderr)
+        return 127
+    if not ensure_gui_built():
+        print("[err] GUI build 不上，请先手动跳 `bun run build:gui` 再重试。", file=sys.stderr)
         return 127
     cmd = [bun_exe, "run", "src/cli/index.ts", *args]
     print(f"[run] {' '.join(cmd)}", file=sys.stderr)
@@ -768,6 +799,9 @@ def build_cli_overrides(args: argparse.Namespace) -> dict:
     nm = parse_bool_arg(getattr(args, "sync_native_openai_models", None))
     if nm is not None:
         o["sync_native_openai_models"] = nm
+    host = getattr(args, "hostname", None)
+    if host:
+        o["hostname"] = str(host)
     return o
 
 
@@ -793,6 +827,7 @@ def main() -> int:
     parser.add_argument("--launcher-mode", help="覆盖 enableCodexLauncherMode（true/false）")
     parser.add_argument("--sync-routed-models", help="覆盖 syncRoutedModels（true/false）")
     parser.add_argument("--sync-native-openai-models", help="覆盖 syncNativeOpenaiModels（true/false）")
+    parser.add_argument("--hostname", "--bind", dest="hostname", help="bind 地址（默认 127.0.0.1；需要其他 IP 访问请设 0.0.0.0）")
     parser.add_argument("--bootstrap", action="store_true",
                         help="首次装机（克隆 repo + 装依赖 + init + 后台启动）")
     parser.add_argument("--bootstrap-repo", help="覆盖默认 repo URL（仅 --bootstrap 生效）")

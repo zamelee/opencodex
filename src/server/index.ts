@@ -188,7 +188,10 @@ export function startServer(port?: number) {
   // resolves localhost→127.0.0.1): on Windows `localhost` resolves ::1-first, but the injected URL
   // is 127.0.0.1, so binding literal "localhost" would reintroduce the F4 refusal. Wildcards
   // (0.0.0.0/::) and specific hosts are left untouched so intentional exposure is preserved.
-  const bindHost = /^localhost$/i.test(config.hostname ?? "") ? "127.0.0.1" : (config.hostname ?? "127.0.0.1");
+  // OCX_HOSTNAME env override lets ocx-start.py --hostname / --bind expose the proxy
+  // without permanently writing config.hostname (no surprise exposure on next start).
+  const effectiveHostname = process.env.OCX_HOSTNAME ?? config.hostname ?? "127.0.0.1";
+  const bindHost = /^localhost$/i.test(effectiveHostname) ? "127.0.0.1" : effectiveHostname;
 
   const server: Server<WsData> = Bun.serve<WsData>({
     port: listenPort,
