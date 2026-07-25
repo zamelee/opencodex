@@ -287,10 +287,20 @@ export interface OcxConfig {
    * - "v2": force ALL models to v2 surface (override upstream pins)
    */
   multiAgentMode?: "v1" | "default" | "v2";
-  /** Provider-level Codex-visible context caps. Values only lower known model context windows. */
-  providerContextCaps?: Record<string, number>;
-  /** Global Codex-visible context cap value (tokens). Falls back to DEFAULT_PROVIDER_CONTEXT_CAP. */
-  contextCapValue?: number;
+  /** Provider-level Codex-visible context caps. Boolean toggle: true=on, false=off. */
+  providerContextCaps?: Record<string, boolean>;
+  /**
+   * Per-provider default cap value (tokens). Can also be a single number (the legacy global form,
+   * treated as the "__default" key for backwards compatibility). When both forms appear, per-provider
+   * entries win. Falls back to DEFAULT_PROVIDER_CONTEXT_CAP.
+   */
+  contextCapValue?: number | Record<string, number>;
+  /**
+   * Per-model cap override. Key is a namespaced model id ("<provider>/<model>"). Number sets the
+   * cap; `false` explicitly opts the model out of any cap (catalog value wins). Missing key falls
+   * through to the provider toggle.
+   */
+  modelContextOverrides?: Record<string, number | false>;
   /** Bind hostname. Default "127.0.0.1" (loopback only). Set "0.0.0.0" to expose on all interfaces. */
   hostname?: string;
   /**
@@ -318,6 +328,39 @@ export interface OcxConfig {
    * `ocx stop` / `ocx restore`. Set false to opt out of history remapping.
    */
   syncResumeHistory?: boolean;
+  /**
+   * When true (default), opencodex acts as a Codex launcher: it injects a [model_providers.opencodex]
+   * block (or openai base_url override) into ~/.codex/config.toml, rewrites model_provider tags in
+   * ~/.codex/state_5.sqlite + sessions/<id>/rollout-<id>.jsonl, and writes the opencodex-journal.json
+   * crash-recovery blob. When false, opencodex is a pure HTTP proxy - it does NOT touch any file
+   * under ~/.codex/. CodexPlusPlus or another launcher is then responsible for keeping
+   * ~/.codex/config.toml in sync.
+   */
+  enableCodexLauncherMode?: boolean;
+  /**
+   * When true (default), routed upstream models (e.g. minimax.chat/abab6.5-chat) are written into
+   * the injected Codex model catalog as namespaced provider/model entries. Set false to
+   * leave the routed catalog empty so a per-profile CodexPlusPlus catalog (or another launcher)
+   * is the single source of truth.
+   */
+  syncRoutedModels?: boolean;
+  /**
+   * When true (default), Codex native OpenAI model list (bare slugs like gpt-5.5, gpt-5.4, ...)
+   * is preserved in the injected catalog via a baseline backup of the pristine pre-opencodex
+   * catalog. Set false to strip the OpenAI baseline and let only routed entries remain.
+   */
+  syncNativeOpenaiModels?: boolean;
+  /**
+   * Optional named preset that materializes enableCodexLauncherMode + syncRoutedModels +
+   * syncNativeOpenaiModels atomically. When set, the three booleans below are FORBIDDEN
+   * together - the preset is the single source of truth and the CLI/GUI rejects any conflicting
+   * boolean. Unset = per-flag control only.
+   *
+   * - launcher (default):         launcher=true,  routed=true,  native=true   - backward-compatible
+   * - proxy-only:                 launcher=false, routed=false, native=true   - CodexPlusPlus owns routed models
+   * - full-pass-through:          launcher=false, routed=false, native=false  - CodexPlusPlus owns everything
+   */
+  preset?: "launcher" | "proxy-only" | "full-pass-through";
   /** Freshness window (ms) for the per-provider live `/models` cache. Defaults to 5 min. */
   modelCacheTtlMs?: number;
   /** Anthropic prompt-cache retention: "short" = 5-min ephemeral (default), "long" = 1-hour extended, "none" = disabled. */

@@ -681,7 +681,7 @@ describe("server local API auth", () => {
         body: JSON.stringify({ provider: "openai", enabled: true }),
       });
       expect(enabled.status).toBe(200);
-      expect(await enabled.json()).toMatchObject({ ok: true, caps: { openai: 350_000 } });
+      expect(await enabled.json()).toMatchObject({ ok: true, caps: { openai: true } });
 
       const models = await fetch(new URL("/api/models", server.url));
       expect(models.status).toBe(200);
@@ -760,7 +760,8 @@ describe("server local API auth", () => {
         body: JSON.stringify({ value: 500_000 }),
       });
       expect(valued.status).toBe(200);
-      expect(await valued.json()).toMatchObject({ ok: true, value: 500_000, caps: { openai: 500_000 } });
+      // Path C: value is now a per-provider record; the global default lives under "__default".
+      expect(await valued.json()).toMatchObject({ ok: true, value: 500_000, values: { __default: 500_000 }, caps: { openai: true } });
 
       // Enabling another provider now uses the current global value, not the constant.
       const enabledAfter = await fetch(new URL("/api/provider-context-caps", server.url), {
@@ -768,7 +769,7 @@ describe("server local API auth", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ provider: "other", enabled: true }),
       });
-      expect(await enabledAfter.json()).toMatchObject({ caps: { openai: 500_000, other: 500_000 } });
+      expect(await enabledAfter.json()).toMatchObject({ caps: { openai: true, other: true } });
 
       // Catalog reflects the global value.
       const models = await fetch(new URL("/api/models", server.url));
@@ -789,7 +790,7 @@ describe("server local API auth", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ setAll: true }),
       });
-      expect(await all.json()).toMatchObject({ ok: true, caps: { openai: 500_000, other: 500_000 } });
+      expect(await all.json()).toMatchObject({ ok: true, caps: { openai: true, other: true } });
 
       // Invalid global value is rejected.
       const bad = await fetch(new URL("/api/provider-context-caps", server.url), {

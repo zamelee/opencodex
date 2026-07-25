@@ -266,7 +266,11 @@ describe("opencodex config defaults", () => {
       providerContextCaps: { custom: 350_000 },
     });
 
-    expect(loadConfig().providerContextCaps).toEqual({ custom: 350_000 });
+    const loaded = loadConfig();
+    expect(loaded.providerContextCaps).toEqual({ custom: true });
+    // Legacy number caps are absorbed into contextCapValue under the provider key; no __default
+    // appears because the user did not set a global value in the old config.
+    expect(loaded.contextCapValue).toEqual({ custom: 350_000 });
 
     rmSync(testDir, { recursive: true, force: true });
     mkdirSync(testDir, { recursive: true });
@@ -296,7 +300,7 @@ describe("opencodex config defaults", () => {
       contextCapValue: 500_000,
     });
 
-    expect(loadConfig().contextCapValue).toBe(500_000);
+    expect(loadConfig().contextCapValue).toEqual({ __default: 500_000 });
 
     rmSync(testDir, { recursive: true, force: true });
     mkdirSync(testDir, { recursive: true });

@@ -22,7 +22,7 @@ import { removeCredential } from "../oauth/store";
 import { enrichProviderFromCatalog, listKeyLoginProviders } from "../oauth/key-providers";
 import { deriveProviderPresets } from "../providers/derive";
 import { fetchProviderQuotaReports } from "../providers/quota";
-import { DEFAULT_PROVIDER_CONTEXT_CAP, globalContextCapValue, providerContextCap, providerContextCaps, setAllProviderContextCaps, setGlobalContextCapValue, setProviderContextCap } from "../providers/context-cap";
+import { DEFAULT_CONTEXT_CAP_KEY, DEFAULT_PROVIDER_CONTEXT_CAP, contextCapValueRecord, globalContextCapValue, modelContextOverrides, providerContextCap, providerContextCaps, setAllProviderContextCaps, setGlobalContextCapValue, setModelContextOverride, setProviderCapValue, setProviderContextCap } from "../providers/context-cap";
 import { readUsageEntries } from "../usage/log";
 import { getUsageDebugLogEntries } from "../usage/debug";
 import { parseRange, summarizeUsage } from "../usage/summary";
@@ -112,6 +112,108 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
     config.codexAutoStart = body.codexAutoStart;
     saveConfig(config);
     return jsonResponse({ ok: true, codexAutoStart: codexAutoStartEnabled(config) });
+  }
+
+  // Phase 5: opencodex-only launcher-mode settings. Read returns the current effective values;
+  // write returns updated values. The endpoint never exposes providers / api keys / headers /
+  // cookie tokens — only the four launcher-related fields. Default values are mirrored back
+  // so the GUI can render switches in their effective state.
+  if (url.pathname === "/api/opencodex/config" && req.method === "GET") {
+    return jsonResponse({
+      enableCodexLauncherMode: config.enableCodexLauncherMode !== false,
+      syncRoutedModels: config.syncRoutedModels !== false,
+      syncNativeOpenaiModels: config.syncNativeOpenaiModels !== false,
+      preset: config.preset ?? null,
+    });
+  }
+
+  if (url.pathname === "/api/opencodex/config" && req.method === "PUT") {
+    let body: {
+      enableCodexLauncherMode?: unknown;
+      syncRoutedModels?: unknown;
+      syncNativeOpenaiModels?: unknown;
+      preset?: unknown;
+    };
+    try { body = await req.json(); } catch { return jsonResponse({ error: "invalid JSON body" }, 400); }
+    const ALLOWED_PRESETS = new Set(["launcher", "proxy-only", "full-pass-through"]);
+    const updates: Partial<typeof config> = {};
+    let conflictReason: string | null = null;
+    const presetProvided = body.preset !== undefined && body.preset !== null;
+    const boolProvided = body.enableCodexLauncherMode !== undefined
+      || body.syncRoutedModels !== undefined
+      || body.syncNativeOpenaiModels !== undefined;
+    if (presetProvided) {
+      if (typeof body.preset !== "string" || !ALLOWED_PRESETS.has(body.preset)) {
+        return jsonResponse({ error: "preset must be one of: launcher, proxy-only, full-pass-through (or null to clear)" }, 400);
+      }
+      if (boolProvided) {
+        conflictReason = "preset must not be combined with the three boolean fields; pick one shape";
+      } else {
+        updates.preset = body.preset as "launcher" | "proxy-only" | "full-pass-through";
+      }
+    }
+    if (!conflictReason) {
+      for (const [k, raw] of [
+        ["enableCodexLauncherMode", body.enableCodexLauncherMode],
+        ["syncRoutedModels", body.syncRoutedModels],
+        ["syncNativeOpenaiModels", body.syncNativeOpenaiModels],
+      ] as const) {
+        if (raw === undefined) continue;
+        if (typeof raw !== "boolean") {
+          conflictReason = `${k} must be a boolean`;
+          break;
+        }
+        (updates as Record<string, unknown>)[k] = raw;
+      }
+    }
+    if (conflictReason) {
+      return jsonResponse({ error: conflictReason }, 400);
+    }
+    // Apply atomically. saveConfig uses atomicWriteFile under the hood.
+    Object.assign(config, updates);
+    saveConfig(config);
+    return jsonResponse({
+      ok: true,
+      enableCodexLauncherMode: config.enableCodexLauncherMode !== false,
+      syncRoutedModels: config.syncRoutedModels !== false,
+      syncNativeOpenaiModels: config.syncNativeOpenaiModels !== false,
+      preset: config.preset ?? null,
+    });
+  }
+
+  // Phase-7: POST /api/proxy/restart — spawns detached `ocx restart` subprocess,
+  // returns immediately with {ok, initiated, pid}. The child does handleStop + handleEnsure;
+  // by the time it actually kills the proxy, this response has already been flushed.
+  // Falls back gracefully if Bun spawn fails (we keep the current proxy up and surface the error).
+  if (url.pathname === "/api/proxy/restart" && req.method === "POST") {
+    try {
+      const { spawn } = await import("node:child_process");
+      const { fileURLToPath } = await import("node:url");
+      const { dirname, resolve } = await import("node:path");
+      const here = dirname(fileURLToPath(import.meta.url));
+      const projectRoot = resolve(here, "../..");
+      const spawnOpts: Record<string, unknown> = {
+        cwd: projectRoot,
+        detached: true,
+        stdio: "ignore" as const,
+        env: process.env,
+      };
+      if (process.platform === "win32") {
+        spawnOpts.windowsHide = true;
+      }
+      // Tiny grace delay so the parent proxy flushes this response before the child stops it.
+      const child = spawn("bun", ["run", "src/cli/index.ts", "restart"], spawnOpts);
+      child.unref();
+      return jsonResponse({
+        ok: true,
+        initiated: true,
+        pid: child.pid,
+        note: "Restart scheduled; this proxy will stop momentarily. The GUI will reconnect after the new instance comes up on the same port.",
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return jsonResponse({ ok: false, error: `failed to spawn restart: ${msg}` }, 500);
+    }
   }
 
   if (url.pathname === "/api/diagnostics/project-config" && req.method === "GET") {
@@ -371,15 +473,32 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
   }
 
   if (url.pathname === "/api/provider-context-caps" && req.method === "GET") {
-    return jsonResponse({ cap: DEFAULT_PROVIDER_CONTEXT_CAP, value: globalContextCapValue(config), caps: providerContextCaps(config) });
+    const record = contextCapValueRecord(config.contextCapValue);
+    return jsonResponse({
+      cap: DEFAULT_PROVIDER_CONTEXT_CAP,
+      value: record[DEFAULT_CONTEXT_CAP_KEY] ?? DEFAULT_PROVIDER_CONTEXT_CAP,
+      values: record,
+      caps: providerContextCaps(config),
+      modelOverrides: modelContextOverrides(config),
+    });
   }
 
   if (url.pathname === "/api/provider-context-caps" && req.method === "PUT") {
-    let body: { provider?: unknown; enabled?: unknown; value?: unknown; setAll?: unknown };
+    let body: { provider?: unknown; enabled?: unknown; value?: unknown; setAll?: unknown; providerValue?: unknown; modelOverrides?: unknown };
     try { body = await req.json(); } catch { return jsonResponse({ error: "invalid JSON body" }, 400); }
     const { saveConfig: save } = await import("../config");
     const { clearModelCache } = await import("../codex/model-cache");
-    const respond = () => jsonResponse({ ok: true, cap: DEFAULT_PROVIDER_CONTEXT_CAP, value: globalContextCapValue(config), caps: providerContextCaps(config) });
+    const respond = () => {
+      const record = contextCapValueRecord(config.contextCapValue);
+      return jsonResponse({
+        ok: true,
+        cap: DEFAULT_PROVIDER_CONTEXT_CAP,
+        value: record[DEFAULT_CONTEXT_CAP_KEY] ?? DEFAULT_PROVIDER_CONTEXT_CAP,
+        values: record,
+        caps: providerContextCaps(config),
+        modelOverrides: modelContextOverrides(config),
+      });
+    };
 
     // Branch 1: set the global cap value and re-point every enabled provider to it.
     if (body.value !== undefined) {
@@ -408,7 +527,59 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
       return respond();
     }
 
-    // Branch 3: existing per-provider toggle (enable writes the current global value).
+    // Branch 3: per-model cap override (number sets cap, false opts out, null clears).
+    if (body.modelOverrides !== undefined) {
+      if (!body.modelOverrides || typeof body.modelOverrides !== "object" || Array.isArray(body.modelOverrides)) {
+        return jsonResponse({ error: "modelOverrides must be an object" }, 400);
+      }
+      const affected = new Set<string>();
+      for (const [rawModelId, raw] of Object.entries(body.modelOverrides as Record<string, unknown>)) {
+        const modelId = rawModelId.trim();
+        if (!modelId) return jsonResponse({ error: "modelOverrides key must be a non-empty namespaced model id" }, 400);
+        if (raw === null) {
+          setModelContextOverride(config, modelId, null);
+        } else if (raw === false) {
+          setModelContextOverride(config, modelId, false);
+        } else if (typeof raw === "number" && Number.isFinite(raw) && raw > 0) {
+          setModelContextOverride(config, modelId, Math.floor(raw));
+        } else {
+          return jsonResponse({ error: `modelOverrides["${modelId}"] must be a positive number, false, or null` }, 400);
+        }
+        const slash = modelId.indexOf("/");
+        if (slash > 0) affected.add(modelId.slice(0, slash));
+      }
+      save(config);
+      for (const provider of affected) clearModelCache(provider);
+      refreshCodexCatalogBestEffort();
+      return respond();
+    }
+
+    // Branch 4: per-provider cap value (write to contextCapValue[provider]).
+    if (body.providerValue !== undefined) {
+      if (typeof body.provider !== "string") {
+        return jsonResponse({ error: "provider string is required with providerValue" }, 400);
+      }
+      const provider = body.provider.trim();
+      if (!isValidProviderName(provider)) {
+        return jsonResponse({ error: "provider name must use letters, numbers, dot, underscore, or hyphen and cannot be a reserved object key" }, 400);
+      }
+      if (!hasOwnProvider(config.providers, provider)) {
+        return jsonResponse({ error: "unknown provider" }, 404);
+      }
+      if (body.providerValue === null) {
+        setProviderCapValue(config, provider, null);
+      } else if (typeof body.providerValue !== "number" || !Number.isFinite(body.providerValue) || body.providerValue <= 0) {
+        return jsonResponse({ error: "providerValue must be a positive number or null" }, 400);
+      } else {
+        setProviderCapValue(config, provider, body.providerValue);
+      }
+      save(config);
+      clearModelCache(provider);
+      refreshCodexCatalogBestEffort();
+      return respond();
+    }
+
+    // Branch 5: existing per-provider toggle (enable writes the current global value).
     if (typeof body.provider !== "string" || typeof body.enabled !== "boolean") {
       return jsonResponse({ error: "provider string and enabled boolean are required" }, 400);
     }

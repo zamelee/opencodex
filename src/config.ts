@@ -37,6 +37,16 @@ function resolveConfigDir(): string {
   return path;
 }
 
+/**
+ * Test-only escape hatch: drop the cached OPENCODEX_HOME resolution so the next `loadConfig()` /
+ * `getConfigDir()` re-reads the current process env. Multi-file test suites leak OPENCODEX_HOME
+ * between describe blocks via the module-level cache; calling this from each suite’s
+ * `beforeEach` keeps config-dir lookups honest.
+ */
+export function clearResolvedConfigDirCache(): void {
+  resolvedConfigDirCache = null;
+}
+
 function resolveConfigPath(): string {
   return join(resolveConfigDir(), "config.json");
 }
@@ -109,9 +119,43 @@ const configSchema = z.object({
   port: z.number().int().min(0).max(65535).default(10100),
   providers: z.record(z.string(), providerConfigSchema),
   defaultProvider: z.string().min(1).default("openai"),
-  providerContextCaps: z.record(z.string(), z.number().int().positive()).optional(),
-  contextCapValue: z.number().int().positive().optional(),
-}).passthrough().superRefine((config, ctx) => {
+  providerContextCaps: z.record(z.string(), z.union([z.boolean(), z.number().int().positive()])).optional(),
+  contextCapValue: z.union([z.number().int().positive(), z.record(z.string(), z.number().int().positive())]).optional(),
+  modelContextOverrides: z.record(z.string(), z.union([z.number().int().positive(), z.literal(false)])).optional(),
+}).passthrough().transform((config) => {
+  // Path C: legacy number-valued providerContextCaps entries (e.g. { anthropic: 200000 }) are
+  // promoted to boolean on/off toggles, with the per-provider number absorbed into
+  // contextCapValue so the user’s chosen cap is preserved across the schema upgrade.
+  if (config.providerContextCaps) {
+    const normalized: Record<string, boolean> = {};
+    const perProvider: Record<string, number> = {};
+    let dirty = false;
+    for (const [k, v] of Object.entries(config.providerContextCaps)) {
+      if (typeof v === "number") {
+        normalized[k] = true;
+        perProvider[k] = v;
+        dirty = true;
+      } else {
+        normalized[k] = v;
+      }
+    }
+    if (dirty) {
+      config.providerContextCaps = normalized;
+      const existing = config.contextCapValue;
+      if (existing === undefined) {
+        config.contextCapValue = perProvider;
+      } else if (typeof existing === "object") {
+        config.contextCapValue = { ...perProvider, ...existing };
+      } else {
+        config.contextCapValue = { __default: existing, ...perProvider };
+      }
+    }
+  }
+  if (typeof config.contextCapValue === "number") {
+    config.contextCapValue = { __default: config.contextCapValue };
+  }
+  return config;
+}).superRefine((config, ctx) => {
   for (const name of Object.keys(config.providers)) {
     if (!isValidProviderName(name)) {
       ctx.addIssue({

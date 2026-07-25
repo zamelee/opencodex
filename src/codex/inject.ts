@@ -365,6 +365,14 @@ export async function injectCodexConfig(port: number, config?: OcxConfig, option
     return { success: false, message: `Codex config not found at ${CODEX_CONFIG_PATH}. Is Codex installed?` };
   }
 
+  // Phase 5 launcher-mode flag: when enableCodexLauncherMode=false, do NOT touch ~/.codex/config.toml
+  // AND do NOT write the journal. Returning early here (before writeJournal) keeps the journal write
+  // symmetric with the journal.ts[3/10] guards. CodexPlusPlus or another launcher owns config.toml in this mode.
+  const cfg = config ?? loadConfig();
+  if (cfg.enableCodexLauncherMode === false) {
+    return { success: true, message: "Skipped: enable_codex_launcher_mode=false (opencodex acts as pure HTTP proxy)." };
+  }
+
   writeJournal();
   const rawContent = readFileSync(CODEX_CONFIG_PATH, "utf-8");
   // EOL boundary: transforms below are LF-pure; preserve the file's dominant ending on write.
@@ -552,9 +560,15 @@ export function restoreNativeCodex(): { success: boolean; message: string } {
   // no-op with a readonly probe instead of write-opening a DB the Codex app may hold
   // (Windows: WAL writer lock -> seconds of stalling + a false warning on every stop).
   // Legacy (non-loopback) installs keep the unconditional write-open restore.
+  // Phase 5 launcher-mode flag: when enableCodexLauncherMode=false the inject is a no-op
+  // (early-return at the top of injectCodexConfig[4/10]) so the history restore is also pure no-op.
+  // We still run conservative syncCodexHistoryProvider so any orphaned provider-tag
+  // rows from a prior launcher_mode=true era get folded back to openai, but with
+  // skipWhenProvablyNoop=true to avoid the write-open SQLite probe on Windows.
   let skipWhenProvablyNoop = false;
   try {
-    skipWhenProvablyNoop = !shouldInjectApiAuthHeader(loadConfig());
+    const activeCfg = loadConfig();
+    skipWhenProvablyNoop = !shouldInjectApiAuthHeader(activeCfg) || activeCfg.enableCodexLauncherMode === false;
   } catch { /* unreadable config: keep the conservative write-open restore */ }
   const history = syncCodexHistoryProvider("openai", undefined, undefined, { skipWhenProvablyNoop });
   const msg = cat.removed > 0

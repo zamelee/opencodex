@@ -32,10 +32,23 @@ import { startHistoryMigrationGuardian } from "../codex/history-migration-guardi
 import { maybeShowStarPrompt } from "./star-prompt";
 import { maybeShowUpdatePrompt } from "../update/notify";
 import { syncModelsToCodex } from "../codex/sync";
+import { applyLauncherFlagsToConfig, formatLauncherFlags, getLauncherFlagsFromArgv, getLauncherFlagsFromEnv, mergeLauncherFlags } from "./launcher-flags";
 import { normalizeUpdateChannel, runGuiUpdateWorker } from "../update/job";
 
 const args = process.argv.slice(2);
 const command = args[0];
+
+// Phase 5 launcher-flag log: surface any non-default launcher-mode override for visibility.
+{
+  const cliFlags = getLauncherFlagsFromArgv(process.argv);
+  const envFlags = getLauncherFlagsFromEnv();
+  const merged = mergeLauncherFlags(cliFlags, envFlags);
+  if (merged.launcherMode !== "auto" || merged.syncRoutedModels !== "auto" ||
+      merged.syncNativeOpenaiModels !== "auto" || merged.preset !== "auto") {
+    console.log(`[ocx] launcher-mode flags active: ${formatLauncherFlags(merged)}`);
+  }
+}
+
 
 if (command === "--version" || command === "-v" || command === "version") {
   printVersion();
@@ -97,6 +110,10 @@ async function chooseListenPort(requestedPort?: number): Promise<number> {
 
 async function handleStart(options: { block?: boolean } = {}) {
   const requestedPort = parsePortOption();
+  // Phase 5 launcher-mode flags: apply env + argv overrides to loadConfig() so the
+  // reconciler / injector / history-guardian all see a coherent mutated config.
+  const liveCfg = loadConfig();
+  applyLauncherFlagsToConfig(liveCfg, mergeLauncherFlags(getLauncherFlagsFromArgv(process.argv), getLauncherFlagsFromEnv()));
   reconcileJournal();
   const existingPid = readPid();
   if (existingPid) {
@@ -203,6 +220,7 @@ async function handleStart(options: { block?: boolean } = {}) {
 async function handleEnsure() {
   reconcileJournal();
   const config = loadConfig();
+  applyLauncherFlagsToConfig(config, mergeLauncherFlags(getLauncherFlagsFromArgv(process.argv), getLauncherFlagsFromEnv()));
   if (!codexAutoStartEnabled(config)) {
     console.log("Codex autostart is disabled.");
     return;

@@ -11,7 +11,7 @@ import { modelInList } from "../types";
 import { CODEX_REASONING_LEVELS, configuredReasoningEfforts, modelRecordValue, sanitizeCodexReasoningEfforts } from "../reasoning-effort";
 import { getJawcodeModelMetadata, getJawcodeModelMetadataCaseInsensitive, listJawcodeModelMetadata, resolveJawcodeProvider } from "../generated/jawcode-model-metadata";
 import { enrichProviderFromRegistry, shouldCaseFoldMetadataModelId } from "../providers/derive";
-import { applyProviderContextCap, providerContextCap } from "../providers/context-cap";
+import { applyProviderContextCap, providerContextCap, resolveEffectiveContextCap } from "../providers/context-cap";
 import { CODEX_GPT5_IDENTITY_LINE } from "../adapters/identity";
 import { filterCursorConfiguredModelsByLiveDiscovery } from "../adapters/cursor/discovery";
 import { fetchCursorUsableModels } from "../adapters/cursor/live-models";
@@ -295,6 +295,12 @@ export interface CatalogModel {
   contextWindow?: number;
   contextCap?: number;
   contextCapped?: boolean;
+  /** Catalog-native (pre-cap) context window. */
+  nativeContextWindow?: number;
+  /** Effective context window after cap is applied. */
+  effectiveContextWindow?: number;
+  /** Which layer of the priority chain produced the effective value. */
+  capSource?: "override_value" | "override_exempt" | "provider" | "none";
   inputModalities?: string[];
   /** Provider opted into parallel tool calls (OcxProviderConfig.parallelToolCalls). */
   parallelToolCalls?: boolean;
@@ -1007,7 +1013,7 @@ function configuredInputModalities(prov: OcxProviderConfig, id: string): string[
   return Array.isArray(modalities) && modalities.length > 0 ? [...modalities] : undefined;
 }
 
-export function applyProviderConfigHints(name: string, prov: OcxProviderConfig, model: CatalogModel, providerCap?: number): CatalogModel {
+export function applyProviderConfigHints(name: string, prov: OcxProviderConfig, model: CatalogModel, providerCap?: number, modelOverrides?: Record<string, number | false>): CatalogModel {
   void name;
   const configuredCap = configuredContextWindow(prov, model.id);
   let inputModalities = configuredInputModalities(prov, model.id);
@@ -1037,21 +1043,40 @@ export function applyProviderConfigHints(name: string, prov: OcxProviderConfig, 
       ? { parallelToolCalls: true }
       : {}),
   };
-  const capped = applyProviderContextCap(hinted.contextWindow, providerCap);
-  if (providerCap !== undefined && capped !== hinted.contextWindow) {
-    return { ...hinted, contextWindow: capped, contextCap: providerCap, contextCapped: true };
+  const resolved = resolveEffectiveContextCap(
+    hinted.id,
+    hinted.provider,
+    typeof hinted.contextWindow === "number" ? hinted.contextWindow : undefined,
+    {
+      providerContextCaps: providerCap !== undefined ? { [name]: true } : undefined,
+      contextCapValue: providerCap !== undefined ? providerCap : undefined,
+      modelContextOverrides: modelOverrides,
+    },
+  );
+  const next: CatalogModel = { ...hinted };
+  if (resolved.native !== undefined) next.nativeContextWindow = resolved.native;
+  if (resolved.effective !== undefined) {
+    next.effectiveContextWindow = resolved.effective;
+    // Backwards compat: when a native catalog window exists, `contextWindow` stays the post-cap
+    // value. When the model had no native window at all, leave `contextWindow` undefined so
+    // downstream code can tell "this model has no advertised context" apart from "this model has
+    // an explicitly capped context".
+    if (resolved.native !== undefined) next.contextWindow = resolved.effective;
   }
-  return providerCap !== undefined ? { ...hinted, contextCap: providerCap, contextCapped: false } : hinted;
+  if (resolved.cap !== undefined) next.contextCap = resolved.cap;
+  next.contextCapped = resolved.capped;
+  next.capSource = resolved.source;
+  return next;
 }
 
-function catalogHintsFromProviderConfig(name: string, prov: OcxProviderConfig, id: string, contextCap?: number): Partial<CatalogModel> {
-  const hinted = applyProviderConfigHints(name, prov, { id, provider: name }, contextCap);
+function catalogHintsFromProviderConfig(name: string, prov: OcxProviderConfig, id: string, contextCap?: number, modelOverrides?: Record<string, number | false>): Partial<CatalogModel> {
+  const hinted = applyProviderConfigHints(name, prov, { id, provider: name }, contextCap, modelOverrides);
   const { provider: _provider, id: _id, ...hints } = hinted;
   return hints;
 }
 
-function applyConfigHintsToCachedModels(name: string, prov: OcxProviderConfig, models: CatalogModel[], contextCap?: number): CatalogModel[] {
-  return models.map(model => applyProviderConfigHints(name, prov, model, contextCap));
+function applyConfigHintsToCachedModels(name: string, prov: OcxProviderConfig, models: CatalogModel[], contextCap?: number, modelOverrides?: Record<string, number | false>): CatalogModel[] {
+  return models.map(model => applyProviderConfigHints(name, prov, model, contextCap, modelOverrides));
 }
 
 /**
@@ -1112,13 +1137,13 @@ function catalogHintsFromModelsApiItem(providerName: string, item: ProviderModel
  * blip doesn't drop its models), else the static config list. This is the per-provider half of
  * jawcode's "always latest" resolver.
  */
-async function fetchProviderModels(name: string, prov: OcxProviderConfig, ttlMs: number, contextCap?: number): Promise<CatalogModel[]> {
+async function fetchProviderModels(name: string, prov: OcxProviderConfig, ttlMs: number, contextCap?: number, modelOverrides?: Record<string, number | false>): Promise<CatalogModel[]> {
   if (prov.authMode === "forward") return []; // ChatGPT backend has no /models
   const apiKey = await resolveModelsAuthToken(name, prov);
   const configured: CatalogModel[] = (prov.models ?? []).map(id => ({
     id,
     provider: name,
-    ...catalogHintsFromProviderConfig(name, prov, id, contextCap),
+    ...catalogHintsFromProviderConfig(name, prov, id, contextCap, modelOverrides),
   }));
   if (prov.adapter === "cursor") {
     if (prov.liveModels === false || !apiKey) return configured;
@@ -1127,7 +1152,7 @@ async function fetchProviderModels(name: string, prov: OcxProviderConfig, ttlMs:
     // suffix) but filter the static seed to the bases the account actually has — so models not on the
     // plan (e.g. claude-fable-5) drop out instead of failing ERROR_BAD_MODEL_NAME. Fall back to the seed.
     const cachedCursor = getFreshCached(name, ttlMs);
-    if (cachedCursor) return applyConfigHintsToCachedModels(name, prov, cachedCursor);
+    if (cachedCursor) return applyConfigHintsToCachedModels(name, prov, cachedCursor, contextCap, modelOverrides);
     const liveResult = await fetchCursorUsableModels({ apiKey, baseUrl: prov.baseUrl });
     if (liveResult.ok) {
       const available = filterCursorConfiguredModelsByLiveDiscovery(configured, liveResult.models);
@@ -1139,19 +1164,19 @@ async function fetchProviderModels(name: string, prov: OcxProviderConfig, ttlMs:
       `[opencodex] Cursor model discovery for "${name}" failed [${liveResult.error}]${liveResult.detail ? `: ${liveResult.detail}` : ""}; using stale/static catalog degradation.`,
     );
     const staleCursor = getStaleCached(name);
-    return staleCursor ? applyConfigHintsToCachedModels(name, prov, staleCursor) : configured;
+    return staleCursor ? applyConfigHintsToCachedModels(name, prov, staleCursor, contextCap, modelOverrides) : configured;
   }
   if (prov.authMode === "oauth" && !apiKey) return []; // not logged in → skip
   if (prov.liveModels === false) {
     return configured;
   }
   const fresh = getFreshCached(name, ttlMs);
-  if (fresh) return applyConfigHintsToCachedModels(name, prov, fresh, contextCap); // dedups Codex's frequent /v1/models polling within the TTL
+  if (fresh) return applyConfigHintsToCachedModels(name, prov, fresh, contextCap, modelOverrides); // dedups Codex's frequent /v1/models polling within the TTL
   if (isModelsFetchCoolingDown(name)) {
     // A recently-failed provider (unreachable API, missing proxy, bad key) must not re-pay the
     // fetch timeout on every catalog poll — the dashboard polls this path per page load.
     const stale = getStaleCached(name);
-    return stale ? applyConfigHintsToCachedModels(name, prov, stale, contextCap) : configured;
+    return stale ? applyConfigHintsToCachedModels(name, prov, stale, contextCap, modelOverrides) : configured;
   }
   const { url, headers } = buildModelsRequest(prov, apiKey, name);
   try {
@@ -1159,7 +1184,7 @@ async function fetchProviderModels(name: string, prov: OcxProviderConfig, ttlMs:
     if (!res.ok) {
       markModelsFetchFailure(name);
       const stale = getStaleCached(name);
-      return stale ? applyConfigHintsToCachedModels(name, prov, stale, contextCap) : configured;
+      return stale ? applyConfigHintsToCachedModels(name, prov, stale, contextCap, modelOverrides) : configured;
     }
     const json = await res.json() as unknown;
     const data = json !== null && typeof json === "object" && !Array.isArray(json)
@@ -1171,7 +1196,7 @@ async function fetchProviderModels(name: string, prov: OcxProviderConfig, ttlMs:
         `[opencodex] Provider model discovery for "${name}" returned malformed 2xx data; using stale/static catalog degradation.`,
       );
       const stale = getStaleCached(name);
-      return stale ? applyConfigHintsToCachedModels(name, prov, stale, contextCap) : configured;
+      return stale ? applyConfigHintsToCachedModels(name, prov, stale, contextCap, modelOverrides) : configured;
     }
     const items = data;
     const live = items.map(m => applyProviderConfigHints(name, prov, {
@@ -1179,7 +1204,7 @@ async function fetchProviderModels(name: string, prov: OcxProviderConfig, ttlMs:
       provider: name,
       owned_by: m.owned_by,
       ...catalogHintsFromModelsApiItem(name, m),
-    }, contextCap));
+    }, contextCap, modelOverrides));
     const liveIds = new Set(live.map(m => m.id));
     // Dated-release aliases (Anthropic pattern): older models may appear in the live catalog
     // ONLY under their dated id (claude-haiku-4-5-20251001) while the config names the
@@ -1192,7 +1217,7 @@ async function fetchProviderModels(name: string, prov: OcxProviderConfig, ttlMs:
       const dated = live.find(l => isDatedVariantId(l.id, m.id));
       if (dated) {
         // Reapply config hints so alias-keyed overrides (modelContextWindows etc.) win.
-        live.push(applyProviderConfigHints(name, prov, { ...dated, id: m.id }, contextCap));
+        live.push(applyProviderConfigHints(name, prov, { ...dated, id: m.id }, contextCap, modelOverrides));
       } else {
         droppedConfiguredIds.push(m.id);
       }
@@ -1209,7 +1234,7 @@ async function fetchProviderModels(name: string, prov: OcxProviderConfig, ttlMs:
   } catch {
     markModelsFetchFailure(name);
     const stale = getStaleCached(name);
-    return stale ? applyConfigHintsToCachedModels(name, prov, stale, contextCap) : configured;
+    return stale ? applyConfigHintsToCachedModels(name, prov, stale, contextCap, modelOverrides) : configured;
   }
 }
 
@@ -1259,7 +1284,7 @@ export async function gatherRoutedModels(config: OcxConfig): Promise<CatalogMode
       return [name, enriched];
     });
   const lists = await Promise.all(
-    activeProviders.map(([name, prov]) => fetchProviderModels(name, prov, ttlMs, providerContextCap(config, name))),
+    activeProviders.map(([name, prov]) => fetchProviderModels(name, prov, ttlMs, providerContextCap(config, name), config.modelContextOverrides)),
   );
   const all = augmentRoutedModelsWithJawcodeMetadata(lists.flat(), activeProviders.map(([name]) => name), config.providers, config)
     // Drop image/video generation models (e.g. Grok image/video) by default. Cursor's static catalog
@@ -1274,7 +1299,7 @@ export function augmentRoutedModelsWithJawcodeMetadata(
   models: CatalogModel[],
   providerNames: string[],
   providers?: Record<string, OcxProviderConfig>,
-  caps?: Pick<OcxConfig, "providerContextCaps">,
+  caps?: Pick<OcxConfig, "providerContextCaps" | "modelContextOverrides">,
 ): CatalogModel[] {
   const out = [...models];
   const seen = new Set(out.map(m => `${m.provider}/${m.id}`));
@@ -1297,7 +1322,7 @@ export function augmentRoutedModelsWithJawcodeMetadata(
       };
       out.push({
         ...model,
-        ...(providers?.[provider] ? applyProviderConfigHints(provider, providers[provider], model, contextCap) : {}),
+        ...(providers?.[provider] ? applyProviderConfigHints(provider, providers[provider], model, contextCap, caps && 'modelContextOverrides' in caps ? (caps as any).modelContextOverrides : undefined) : {}),
       });
     }
   }
@@ -1452,13 +1477,22 @@ export function mergeCatalogEntriesForSync(
  * No-op if the catalog file does not exist.
  */
 export async function syncCatalogModels(config: OcxConfig): Promise<{ added: number; path: string }> {
+  // Phase 5 launcher-mode flags: opt-out of routed-model injection and/or native-baseline
+  // preservation independently. Default true so this stays backward-compatible.
+  // - syncRoutedModels=false   -> orderedGoModels forced to [] (no namespaced entries)
+  // - syncNativeOpenaiModels=false -> readNativeBaseline returns empty Map (no native priority merge)
+  // - enableCodexLauncherMode=false still allows this catalog write so CodexPlusPlus can pick up
+  //   the bare native slugs from this file via its custom_catalog_path.
+  const syncRouted = config.syncRoutedModels !== false;
+  const syncNative = config.syncNativeOpenaiModels !== false;
+
   const catalogPath = readCodexCatalogPath();
   const catalog = loadCatalogForSync(catalogPath);
   if (!catalog) return { added: 0, path: catalogPath };
 
   const template = findNativeTemplate(catalog);
 
-  const goModels = await gatherRoutedModels(config);
+  const goModels = syncRouted ? await gatherRoutedModels(config) : [];
   try {
     // Once-only: preserve the PRISTINE pre-opencodex catalog as the native-priority baseline
     // (later syncs would otherwise overwrite it with featured-modified priorities).
@@ -1475,7 +1509,7 @@ export async function syncCatalogModels(config: OcxConfig): Promise<{ added: num
   // Keep genuine native entries (gpt-*, codex-*) with their real per-model fields and append
   // routed providers as namespaced slugs. Cursor and other adopted providers can expose model ids
   // like `gpt-5.5`; those must not delete the native OpenAI/Codex base row.
-  const baseline = readNativeBaseline(catalogPath);
+  const baseline = syncNative ? readNativeBaseline(catalogPath) : new Map<string, number>();
   const goIds = new Set(enabledGo.map(m => m.id));
   const gatheredProviderNames = new Set(
     Object.entries(config.providers ?? {})
