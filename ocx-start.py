@@ -306,7 +306,22 @@ def resolve_runtime_port(port: int, max_attempts: int = 3, timeout_sec: int = 30
 
 
 def has_bun() -> bool:
-    return shutil.which(BUN) is not None
+    return find_bun_exe() is not None
+
+
+def find_bun_exe() -> str | None:
+    """Return absolute path to bun executable (resolved through PATHEXT),
+    or None if not found. Windows .cmd shims cannot always be invoked directly
+    by subprocess with list args + no shell=True, so we resolve first and
+    pass the absolute path as cmd[0].
+    """
+    p = shutil.which(BUN)
+    if p is None:
+        return None
+    try:
+        return str(Path(p).resolve())
+    except OSError:
+        return p
 
 
 def try_bootstrap_bun(non_interactive: bool = False) -> bool:
@@ -423,10 +438,15 @@ def warn_if_proxy_mode(cfg: dict) -> None:
 
 
 def run_cli(*args: str, env_overrides: dict | None = None, no_bootstrap: bool = False) -> int:
-    if not has_bun():
+    bun_exe = find_bun_exe()
+    if bun_exe is None:
         if not try_bootstrap_bun(non_interactive=no_bootstrap):
             return 127
-    cmd = [BUN, "run", "src/cli/index.ts", *args]
+        bun_exe = find_bun_exe()
+        if bun_exe is None:
+            print("[err] bun 装完后 PATH 仍找不到。请重新打开 PowerShell 让 PATH 生效，或手动检查 bun 安装位置。", file=sys.stderr)
+            return 127
+    cmd = [bun_exe, "run", "src/cli/index.ts", *args]
     print(f"[run] {' '.join(cmd)}", file=sys.stderr)
     env = None
     if env_overrides:
@@ -436,6 +456,9 @@ def run_cli(*args: str, env_overrides: dict | None = None, no_bootstrap: bool = 
         return subprocess.call(cmd, cwd=str(ROOT), env=env)
     except KeyboardInterrupt:
         return 0
+    except FileNotFoundError:
+        print("[err] bun 路径解析后仍无法启动。请重新打开 PowerShell 后重试。", file=sys.stderr)
+        return 127
 
 
 def run_init() -> int:
@@ -490,11 +513,16 @@ def run_background(port: int, cli_overrides: dict | None = None, no_bootstrap: b
     env.update(launcher_env_vars)
 
     try:
-        if not has_bun():
+        bun_exe = find_bun_exe()
+        if bun_exe is None:
             if not try_bootstrap_bun(non_interactive=no_bootstrap):
                 return 127
+            bun_exe = find_bun_exe()
+            if bun_exe is None:
+                print("[err] bun 装后 PATH 仍找不到。请重新打开 PowerShell。", file=sys.stderr)
+                return 127
         proc = subprocess.Popen(
-            [BUN, "run", "src/cli/index.ts", "start", "--port", str(effective_port)],
+            [bun_exe, "run", "src/cli/index.ts", "start", "--port", str(effective_port)],
             cwd=str(ROOT),
             stdout=out_fp,
             stderr=err_fp,

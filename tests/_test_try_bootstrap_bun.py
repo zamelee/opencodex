@@ -110,5 +110,77 @@ class TryBootstrapBunTests(unittest.TestCase):
         self.assertIn("[bootstrap] bun 安装成功", err)
 
 
+
+
+class FindBunExeTests(unittest.TestCase):
+    def setUp(self):
+        self._orig_which = mod.shutil.which
+    def tearDown(self):
+        mod.shutil.which = self._orig_which
+
+    def test_find_bun_exe_returns_none_when_no_bun(self):
+        mod.shutil.which = lambda name: None
+        self.assertIsNone(mod.find_bun_exe())
+
+    def test_find_bun_exe_returns_resolved_absolute(self):
+        mod.shutil.which = lambda name: "C:/Users/X/AppData/Roaming/npm/bun.cmd"
+        result = mod.find_bun_exe()
+        self.assertIsInstance(result, str)
+        self.assertTrue(result.endswith("bun.cmd"))
+
+
+class RunCliPathResolutionTests(unittest.TestCase):
+    def setUp(self):
+        self._orig_find = mod.find_bun_exe
+        self._orig_call = mod.subprocess.call
+    def tearDown(self):
+        mod.find_bun_exe = self._orig_find
+        mod.subprocess.call = self._orig_call
+
+    def test_run_cli_uses_absolute_bun_path_in_cmd(self):
+        mod.find_bun_exe = lambda: "C:/some/path/bun.exe"
+        captured = {}
+        def fake_call(cmd, **kw):
+            captured["cmd0"] = cmd[0]
+            return 0
+        mod.subprocess.call = fake_call
+        import io, contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            rc = mod.run_cli("init")
+        self.assertEqual(rc, 0)
+        self.assertEqual(captured["cmd0"], "C:/some/path/bun.exe")
+        self.assertIn("C:/some/path/bun.exe run src/cli/index.ts init", buf.getvalue())
+        self.assertNotIn("'bun' run", buf.getvalue())
+
+    def test_run_cli_no_bun_after_bootstrap_returns_127(self):
+        mod.find_bun_exe = lambda: None
+        orig_tbb = mod.try_bootstrap_bun
+        mod.try_bootstrap_bun = lambda non_interactive=False: False
+        try:
+            import io, contextlib
+            buf = io.StringIO()
+            with contextlib.redirect_stderr(buf):
+                rv = mod.run_cli("init")
+        finally:
+            mod.try_bootstrap_bun = orig_tbb
+        self.assertEqual(rv, 127)
+
+    def test_run_cli_post_install_path_disappeared(self):
+        seq = ["C:/path/bun.exe", None]
+        mod.find_bun_exe = lambda: seq.pop(0) if seq else None
+        orig_tbb = mod.try_bootstrap_bun
+        mod.try_bootstrap_bun = lambda non_interactive=False: True
+        try:
+            import io, contextlib
+            buf = io.StringIO()
+            with contextlib.redirect_stderr(buf):
+                rv = mod.run_cli("init")
+        finally:
+            mod.try_bootstrap_bun = orig_tbb
+        self.assertEqual(rv, 127)
+        self.assertIn("\u65e0\u6cd5\u542f\u52a8", buf.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2, exit=False)
