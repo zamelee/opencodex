@@ -420,6 +420,8 @@ def try_bootstrap_bun(non_interactive: bool = False) -> bool:
             print(f"         {cmd}", file=sys.stderr)
     return False
 
+
+def launcher_env(cfg: dict, cli_overrides: dict | None = None) -> dict:
     """根据 config + CLI overrides 计算要 spawn 给 bun 子进程的 launcher-mode env vars。
     cli_overrides 形状（任意字段可缺省）：
       {"preset": "proxy-only" | "launcher" | "full-pass-through" | None,
@@ -505,12 +507,11 @@ def run_start(port: int, cli_overrides: dict | None = None, no_bootstrap: bool =
 
 def run_background(port: int, cli_overrides: dict | None = None, no_bootstrap: bool = False) -> int:
     print("[bg] 后台启动中...", file=sys.stderr)
+    # Config is OPTIONAL. The proxy itself can run with an empty ~/.opencodex/config.json;
+    # providers / API keys / launcher-mode are managed via the web GUI (http://localhost:<port>).
+    # Users who want a CLI-driven first run can pick [5] in the menu, or pass --init / --init-and-start.
     if not is_initialized():
-        print("[bg] 未发现 config.json，先 init...", file=sys.stderr)
-        rc = run_init()
-        if rc != 0 or not is_initialized():
-            print(f"[bg] init 失败 (exit={rc})", file=sys.stderr)
-            return rc or 1
+        print("[bg] 未发现 config.json：以空配置启动，请到 http://localhost:<port> 的网页设置 provider / env。", file=sys.stderr)
 
     # Phase-6A: probe-and-prompt loop pre-spawn; on bail returns original port
     effective_port = resolve_runtime_port(port)

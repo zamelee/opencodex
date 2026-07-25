@@ -288,5 +288,45 @@ class EnsureDepsInstalledTests(unittest.TestCase):
                 mod.ROOT = orig_root
 
 
+
+
+class LauncherEnvTests(unittest.TestCase):
+    def test_launcher_env_empty_cfg_returns_empty(self):
+        env = mod.launcher_env({}, None)
+        self.assertIsInstance(env, dict)
+        self.assertEqual(env, {})
+
+    def test_launcher_env_proxy_only(self):
+        env = mod.launcher_env({"preset": "proxy-only"}, {})
+        self.assertEqual(env.get("OCX_PRESET"), "proxy-only")
+        self.assertEqual(env.get("OCX_LAUNCHER_MODE"), "false")
+        self.assertEqual(env.get("OCX_SYNC_ROUTED_MODELS"), "false")
+        self.assertEqual(env.get("OCX_SYNC_NATIVE_OPENAI_MODELS"), "true")
+
+    def test_launcher_env_launcher_preset(self):
+        env = mod.launcher_env({"preset": "launcher"}, {})
+        self.assertEqual(env.get("OCX_PRESET"), "launcher")
+        self.assertEqual(env.get("OCX_LAUNCHER_MODE"), "true")
+        self.assertEqual(env.get("OCX_SYNC_ROUTED_MODELS"), "true")
+        self.assertEqual(env.get("OCX_SYNC_NATIVE_OPENAI_MODELS"), "true")
+
+    def test_launcher_env_full_pass_through(self):
+        env = mod.launcher_env({"preset": "full-pass-through"}, {})
+        self.assertEqual(env.get("OCX_PRESET"), "full-pass-through")
+        self.assertEqual(env.get("OCX_LAUNCHER_MODE"), "false")
+        self.assertEqual(env.get("OCX_SYNC_ROUTED_MODELS"), "false")
+        self.assertEqual(env.get("OCX_SYNC_NATIVE_OPENAI_MODELS"), "false")
+
+    def test_launcher_env_cli_overrides_take_precedence(self):
+        env = mod.launcher_env({"preset": "launcher"}, {"preset": "proxy-only"})
+        self.assertEqual(env.get("OCX_PRESET"), "proxy-only")
+        self.assertEqual(env.get("OCX_LAUNCHER_MODE"), "false")
+
+    def test_launcher_env_per_flag_overrides(self):
+        env = mod.launcher_env({}, {"launcher_mode": True, "sync_routed_models": False})
+        self.assertEqual(env.get("OCX_LAUNCHER_MODE"), "true")
+        self.assertEqual(env.get("OCX_SYNC_ROUTED_MODELS"), "false")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2, exit=False)
