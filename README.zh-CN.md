@@ -93,6 +93,32 @@ npm install -g @bitkyc08/opencodex   # 不要加 --ignore-scripts、--omit=optio
 
 </details>
 
+## 开发者：从源码 fork 迁移到另一台机器
+
+如果你在维护本仓库的 fork（含 `ocx-start.py` 启动器、Phase-6A 端口冲突回退提示、Phase-6B 首次装机自动化等本地定制），推荐用 `ocx-start.py --bootstrap` 一条命令搞定：
+
+```powershell
+# 在目标机上，从 GitHub raw URL 单文件拉 ocx-start.py（无需先 git clone）：
+irm https://raw.githubusercontent.com/zamelee/opencodex/main/scripts/migrate.ps1 | iex
+# migrate.ps1 是 thin shim：fetch ocx-start.py → exec python --bootstrap
+# 内部自动：装 Bun（如缺）→ git clone 到 $HOME\opencodex → bun install → init → 后台启动
+```
+
+或者你已经把 `ocx-start.py` 拷到了目标机，直接：
+
+```powershell
+python ocx-start.py --bootstrap            # out-of-tree: 全流程
+python ocx-start.py                        # 已在 clone 内：日常菜单
+```
+
+**菜单版**（无参数进入时）：菜单 [1] 在 out-of-tree 状态下就是「首次装机」入口；在 in-tree 时是「前台运行」。两条路径用 `in_tree = (ROOT / "package.json").exists()` 区分（见 `ocx-start.py` 的 `main_menu`）。
+
+`~/.opencodex/config.json`（含 API key）和 `~/.codex/opencodex-catalog.json` 是机器本地的，**不会**被迁移；首次 init 时填一次 API key 即可。
+
+如果目标机不能访问 GitHub，可先在有网机器上 `git clone` 后打包 zip（**排除** `node_modules/` `dist/` `gui/dist/` `tmp/` `*.bak-*` `__pycache__/` `.codex-session*.json`），传过去手动 `bun install`。
+
+> `scripts/install.ps1` / `scripts/install.sh` 是**装 npm 发行版** `@bitkyc08/opencodex` 用的，**不**含本 fork 的本地定制；两条路径互补，按需选择。
+
 ## 亮点
 
 - **在 Codex 中使用任意 LLM。** 5 种协议 adapter 覆盖 Anthropic Messages、Google Gemini、Azure、OpenAI Responses 直通，以及所有 OpenAI 兼容 Chat Completions 端点 —— 即开箱即用的 **40+ provider**。
