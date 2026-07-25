@@ -356,15 +356,48 @@ def ensure_gui_built(quiet: bool = False) -> bool:
     if not gui_pkg.exists():
         return True  # out-of-tree / no gui subdir
     gui_index = ROOT / "gui" / "dist" / "index.html"
-    if gui_index.exists():
-        return True  # already built
+    gui_src = ROOT / "gui" / "src"
+
+    needs_rebuild = False
+    reason = "gui/dist 缺失"
+    if not gui_index.exists():
+        needs_rebuild = True
+    else:
+        # Compare mtime: any gui/src file newer than gui/dist/index.html?
+        # Without this check, a git pull that only updates gui/src/*.tsx
+        # leaves the user running the old bundle (broken clipboard fix,
+        # missing auth prompt, etc.) because the dist still exists.
+        try:
+            dist_mtime = gui_index.stat().st_mtime
+            newest_src = 0.0
+            newest_path = None
+            for src_file in gui_src.rglob("*"):
+                if not src_file.is_file():
+                    continue
+                if "node_modules" in src_file.parts:
+                    continue
+                mt = src_file.stat().st_mtime
+                if mt > newest_src:
+                    newest_src = mt
+                    newest_path = src_file
+            if newest_src > dist_mtime:
+                needs_rebuild = True
+                rel = newest_path.relative_to(ROOT) if newest_path else None
+                reason = "源码更新（" + str(rel) + "）比 dist 新"
+        except OSError as e:
+            needs_rebuild = True
+            reason = "stat 失败：" + str(e)
+
+    if not needs_rebuild:
+        return True  # up to date
+
     bun = find_bun_exe()
     if bun is None:
         if not quiet:
-            print("[gui] gui/dist 缺失，bun 也找不到。跳过自动 build GUI。", file=sys.stderr)
+            print("[gui] 需要 rebuild 但 bun 找不到。跳过自动 build GUI。", file=sys.stderr)
         return False
     if not quiet:
-        print("[gui] gui/dist 缺失，跳 `bun run build:gui` ...", file=sys.stderr)
+        print("[gui] " + reason + "，跳 `bun run build:gui` ...", file=sys.stderr)
     rc = subprocess.call([bun, "run", "build:gui"], cwd=str(ROOT))
     if rc != 0:
         if not quiet:
