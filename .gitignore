@@ -13,3 +13,15 @@ devlog/
 
 # Test-generated artifacts
 tests/.tmp-*/
+
+# Codex session state (per AGENTS.md §0d.0 v9 schema - do NOT commit)
+.codex-session*.json
+
+# Pre-write backup snapshots (per AGENTS.md §7.0 - keep on disk, do NOT commit)
+*.bak-*
+
+# Python bytecode caches
+__pycache__/
+
+# Local scratch / transient scripts (ocx-start.py helpers, patches, etc.)
+tmp/
