@@ -600,7 +600,25 @@ export default function Launcher() {
             console.error("[Launcher] mermaid render failed for node", i, msg);
 
 
-            el.innerHTML = `<pre class="mermaid-error">Mermaid parse error:\n${msg.slice(0, 400)}</pre>`;
+            // Preserve the source code so the user can see what they wrote AND the
+            // mermaid-side error message in one place - no more "diagram disappears,
+            // I have to go find what I typed elsewhere". HTML-escape the source so it
+            // renders as <pre> text rather than being re-interpreted as markup.
+            const source = el.textContent ?? "";
+            const escaped = source
+              .replace(/&/g, "&amp;")
+              .replace(/</g, "&lt;")
+              .replace(/>/g, "&gt;");
+            el.innerHTML = `
+              <div class="mermaid-error">
+                <div class="mermaid-error-title">⚠ Mermaid 渲染失败</div>
+                <pre class="mermaid-error-code">${escaped.slice(0, 800)}</pre>
+                <details class="mermaid-error-detail">
+                  <summary>mermaid 报错</summary>
+                  <pre class="mermaid-error-msg">${msg.slice(0, 400)}</pre>
+                </details>
+              </div>
+            `;
 
 
             el.dataset.mermaidRendered = "error"; // also mark so we don't re-parse the error msg

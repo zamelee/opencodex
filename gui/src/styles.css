@@ -1618,7 +1618,7 @@ select.input { appearance: none; }
 
 .mermaid-error {
 
-  color: var(--muted);
+  color: var(--text);
 
   background: var(--bg);
 
@@ -1630,9 +1630,85 @@ select.input { appearance: none; }
 
   font-size: 12px;
 
+  margin: 6px 0;
+
+}
+
+.mermaid-error-title {
+
+  font-weight: 600;
+
+  color: #c44;
+
+  margin-bottom: 8px;
+
+}
+
+.mermaid-error-code {
+
+  margin: 0 0 8px;
+
+  padding: 8px;
+
+  background: var(--rail);
+
+  border: 1px solid var(--border-soft);
+
+  border-radius: 4px;
+
+  font-family: ui-monospace, monospace;
+
+  font-size: 11px;
+
   white-space: pre-wrap;
 
-  margin: 6px 0;
+  overflow-x: auto;
+
+  max-height: 320px;
+
+  overflow-y: auto;
+
+}
+
+.mermaid-error-detail {
+
+  margin-top: 4px;
+
+  font-size: 11px;
+
+}
+
+.mermaid-error-detail > summary {
+
+  cursor: pointer;
+
+  color: var(--muted);
+
+  user-select: none;
+
+  padding: 2px 0;
+
+}
+
+.mermaid-error-msg {
+
+  margin: 4px 0 0;
+
+  padding: 8px;
+
+  background: var(--rail);
+
+  border: 1px solid var(--border-soft);
+
+  border-radius: 4px;
+
+  font-family: ui-monospace, monospace;
+
+  font-size: 11px;
+
+  white-space: pre-wrap;
+
+  color: #c44;
 
 }
 
