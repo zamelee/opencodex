@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { IconPlus, IconX, IconCheck, IconEye, IconEyeOff, IconCopy } from "../icons";
 import { useI18n, LOCALES } from "../i18n";
+import { copyToClipboard } from "../clipboard";
 
 interface ApiKeyEntry {
   id: string;
@@ -92,11 +93,14 @@ export default function ApiKeys({ apiBase }: { apiBase: string }) {
     fetchKeys();
   };
 
-  const copyKey = () => {
-    if (newKey) {
-      navigator.clipboard.writeText(newKey);
+  const copyKey = async () => {
+    if (!newKey) return;
+    const ok = await copyToClipboard(newKey);
+    if (ok) {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
+    } else {
+      setRevealError(t("apiKeys.copyError"));
     }
   };
 
@@ -168,11 +172,11 @@ export default function ApiKeys({ apiBase }: { apiBase: string }) {
       const timer = scheduleRevealCollapse(id);
       setRevealed(prev => ({ ...prev, [id]: { key, timer } }));
     }
-    try {
-      await navigator.clipboard.writeText(key);
+    const ok = await copyToClipboard(key);
+    if (ok) {
       setCopiedId(id);
       window.setTimeout(() => setCopiedId(prev => prev === id ? null : prev), COPY_FEEDBACK_MS);
-    } catch {
+    } else {
       setRevealError(t("apiKeys.copyError"));
     }
   };

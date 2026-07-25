@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { IconGlobe, IconLink } from "../icons";
 import { useT } from "../i18n";
+import { copyToClipboard } from "../clipboard";
 
 export default function AddCodexAccountModal({
   apiBase, onClose, onAdded,
@@ -53,22 +54,11 @@ export default function AddCodexAccountModal({
 
   const copyLoginLink = async () => {
     if (!authUrl) return;
-    try {
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(authUrl);
-      } else {
-        const input = document.createElement("textarea");
-        input.value = authUrl;
-        input.style.position = "fixed";
-        input.style.opacity = "0";
-        document.body.appendChild(input);
-        input.select();
-        document.execCommand("copy");
-        document.body.removeChild(input);
-      }
+    const ok = await copyToClipboard(authUrl);
+    if (ok) {
       setCopied(true);
       setTimeout(() => { if (aliveRef.current) setCopied(false); }, 2500);
-    } catch {
+    } else {
       setError(t("codexAuth.loginLinkCopyFailed"));
     }
   };

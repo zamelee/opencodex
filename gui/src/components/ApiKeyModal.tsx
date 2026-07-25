@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useT, Trans } from "../i18n";
 import { IconKey, IconAlert, IconCheck } from "../icons";
+import { copyToClipboard } from "../clipboard";
 
 interface ApiKeyModalProps {
   open: boolean;
@@ -33,12 +34,14 @@ export default function ApiKeyModal({ open, onSubmit, onCancel, error }: ApiKeyM
   const [value, setValue] = useState("");
   const [show, setShow] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState<string | undefined>(undefined);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (!open) return;
     setValue("");
     setShow(false);
+    setCopyError(undefined);
     const t = window.setTimeout(() => inputRef.current?.focus(), 30);
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onCancel(); };
     window.addEventListener("keydown", onKey);
@@ -53,11 +56,13 @@ export default function ApiKeyModal({ open, onSubmit, onCancel, error }: ApiKeyM
   };
 
   const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(CURL_COPY_PS);
+    const ok = await copyToClipboard(CURL_COPY_PS);
+    if (ok) {
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1500);
-    } catch { /* ignore */ }
+    } else {
+      setCopyError(t("apiKeys.copyError"));
+    }
   };
 
   return (
@@ -78,6 +83,12 @@ export default function ApiKeyModal({ open, onSubmit, onCancel, error }: ApiKeyM
           <div className="notice notice-err" style={{ marginBottom: 12 }}>
             <IconAlert width={14} />
             <span>{error}</span>
+          </div>
+        )}
+        {copyError && (
+          <div className="notice notice-err" style={{ marginBottom: 12, fontSize: 12 }}>
+            <IconAlert width={14} />
+            <span>{copyError}</span>
           </div>
         )}
 
