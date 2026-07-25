@@ -311,7 +311,13 @@ def has_bun() -> bool:
 
 def try_bootstrap_bun(non_interactive: bool = False) -> bool:
     """尝试自动装 bun。顺序探测 npm / pnpm / yarn。non_interactive=True 时不询问。
-    装完返回 has_bun() 结果（true = 成功）。"""
+    装完返回 has_bun() 结果（true = 成功）。
+
+    失败时退到官方备用命令（手动装）：
+      winget install --id=Oven-sh.Bun -e
+      irm bun.sh/install.ps1 | iex
+      scoop install bun
+    """
     if has_bun():
         return True
     if non_interactive:
@@ -319,29 +325,61 @@ def try_bootstrap_bun(non_interactive: bool = False) -> bool:
               file=sys.stderr)
         return False
     print("[bootstrap] 未检测到 bun，尝试自动安装 ...", file=sys.stderr)
+
+    # Phase 7: 退到官方备用命令（随场景调整提示）
+    fallback_cmds = [
+        "winget install --id=Oven-sh.Bun -e",
+        "irm bun.sh/install.ps1 | iex",
+        "scoop install bun",
+    ]
+
+    found_mgr = False        # 是否有任一个包管理器被检测到
+    attempted_any = False    # 是否至少跳了一次 subprocess.call
+    last_failed_mgr = None   # 最后一次走到 subprocess.call 但失败的包管器
+
     for mgr in ("npm", "pnpm", "yarn"):
-        if shutil.which(mgr) is not None:
-            try:
-                if mgr == "npm":
-                    print("[bootstrap] npm install -g bun", file=sys.stderr)
-                    rc = subprocess.call([mgr, "install", "-g", "bun"])
-                elif mgr == "pnpm":
-                    print("[bootstrap] pnpm add -g bun", file=sys.stderr)
-                    rc = subprocess.call([mgr, "add", "-g", "bun"])
-                else:
-                    print("[bootstrap] yarn global add bun", file=sys.stderr)
-                    rc = subprocess.call([mgr, "global", "add", "bun"])
-                if rc == 0 and has_bun():
-                    print("[bootstrap] bun 安装成功", file=sys.stderr)
-                    return True
-                print(f"[bootstrap] {mgr} 装 bun 返 exit={rc}", file=sys.stderr)
-            except FileNotFoundError:
-                continue
+        if shutil.which(mgr) is None:
+            continue
+        found_mgr = True
+        try:
+            if mgr == "npm":
+                print("[bootstrap] npm install -g bun", file=sys.stderr)
+                rc = subprocess.call([mgr, "install", "-g", "bun"])
+            elif mgr == "pnpm":
+                print("[bootstrap] pnpm add -g bun", file=sys.stderr)
+                rc = subprocess.call([mgr, "add", "-g", "bun"])
+            else:
+                print("[bootstrap] yarn global add bun", file=sys.stderr)
+                rc = subprocess.call([mgr, "global", "add", "bun"])
+            attempted_any = True
+            if rc == 0 and has_bun():
+                print("[bootstrap] bun 安装成功", file=sys.stderr)
+                return True
+            print(f"[bootstrap] {mgr} 装 bun 返 exit={rc}", file=sys.stderr)
+            last_failed_mgr = mgr
+        except FileNotFoundError:
+            continue
+
+    # 所有路径都走完，还是不成功 → 错误诊断
     print("[err] 自动安装 bun 失败。请手动安装 Bun: https://bun.sh", file=sys.stderr)
+    if not found_mgr:
+        # 场景 1: Node.js 未装 / npm 不在 PATH
+        print("[hint] 未检测到任何 Node 包管理器（npm / pnpm / yarn）。", file=sys.stderr)
+        print("       可能是 Node.js 未装、或 npm 未加入 PATH。", file=sys.stderr)
+        print("       推荐先装 Node.js LTS（自带 npm）：", file=sys.stderr)
+        print("         winget install --id=OpenJS.NodeJS.LTS -e", file=sys.stderr)
+        print("       或直接用官方命令装 bun（不需要 npm）：", file=sys.stderr)
+        for cmd in fallback_cmds:
+            print(f"         {cmd}", file=sys.stderr)
+    elif attempted_any and last_failed_mgr is not None:
+        # 场景 2: 有 npm/pnpm/yarn 但装不上（网络 / 权限 / 镜像问题）
+        print(f"[hint] {last_failed_mgr} 存在但装 bun 失败。", file=sys.stderr)
+        print("       可能是网络问题、权限不足、或 npm registry 镜像不可达。", file=sys.stderr)
+        print("       可试以下官方备用命令（跳过 npm）：", file=sys.stderr)
+        for cmd in fallback_cmds:
+            print(f"         {cmd}", file=sys.stderr)
     return False
 
-
-def launcher_env(cfg: dict, cli_overrides: dict | None = None) -> dict:
     """根据 config + CLI overrides 计算要 spawn 给 bun 子进程的 launcher-mode env vars。
     cli_overrides 形状（任意字段可缺省）：
       {"preset": "proxy-only" | "launcher" | "full-pass-through" | None,
