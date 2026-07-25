@@ -9,14 +9,15 @@ import Usage from "./pages/Usage";
 import CodexAuth from "./pages/CodexAuth";
 import ApiKeyModal from "./components/ApiKeyModal";
 import ApiKeys from "./pages/ApiKeys";
+import Launcher from "./pages/Launcher";
 import { IconGrid, IconServer, IconBoxes, IconBot, IconList, IconTerminal, IconActivity, IconKey, IconLock, IconGithub, IconSun, IconMoon, IconMonitor, IconGlobe, IconPower } from "./icons";
 import { useI18n, useT, LOCALES, type Locale, type TKey } from "./i18n";
 import { Select } from "./ui";
 import { installApiAuthFetch, registerApiKeyPrompt } from "./api";
 installApiAuthFetch();
-type Page = "dashboard" | "providers" | "models" | "subagents" | "logs" | "debug" | "usage" | "codex-auth" | "api";
+type Page = "dashboard" | "providers" | "models" | "subagents" | "logs" | "debug" | "usage" | "codex-auth" | "api" | "launcher";
 type Theme = "light" | "dark" | "system";
-const VALID_PAGES = new Set<Page>(["dashboard", "providers", "models", "subagents", "logs", "debug", "usage", "codex-auth", "api"]);
+const VALID_PAGES = new Set<Page>(["dashboard", "providers", "models", "subagents", "logs", "debug", "usage", "codex-auth", "api", "launcher"]);
 function readPageFromHash(): Page {
   const raw = location.hash.replace(/^#\/?/, "");
   return VALID_PAGES.has(raw as Page) ? (raw as Page) : "dashboard";
@@ -33,6 +34,8 @@ const NAV: { id: Page; tkey: TKey; Icon: typeof IconGrid }[] = [
   { id: "usage", tkey: "nav.usage", Icon: IconActivity },
   { id: "codex-auth", tkey: "nav.codexAuth", Icon: IconKey },
   { id: "api", tkey: "nav.api", Icon: IconGlobe },
+  // Phase-7 rename: visible name = launcher settings; "nav.settings" key namespace preserved intentionally.
+  { id: "launcher", tkey: "nav.settings", Icon: IconMonitor },
 ];
 const THEME_ICON = { light: IconSun, dark: IconMoon, system: IconMonitor } as const;
 const THEME_TKEY: Record<Theme, TKey> = { light: "theme.light", dark: "theme.dark", system: "theme.system" };
@@ -249,6 +252,7 @@ export default function App() {
           {page === "usage" && <Usage apiBase={API_BASE} />}
           {page === "codex-auth" && <CodexAuth apiBase={API_BASE} />}
           {page === "api" && <ApiKeys apiBase={API_BASE} />}
+          {page === "launcher" && <Launcher />}
         </div>
       </main>
     </div>

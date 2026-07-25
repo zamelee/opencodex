@@ -78,3 +78,104 @@ export function installApiAuthFetch(): void {
     return retry;
   };
 }
+// Phase 5 launcher-mode settings. Narrow DTO so we never accidentally
+// surface api keys / headers / cookies through the dashboard.
+export type OpenCodexPreset = "launcher" | "proxy-only" | "full-pass-through" | null;
+
+export interface OpenCodexConfigPayload {
+  enableCodexLauncherMode: boolean;
+  syncRoutedModels: boolean;
+  syncNativeOpenaiModels: boolean;
+  preset: OpenCodexPreset;
+}
+
+export interface OpenCodexConfigUpdate {
+  enableCodexLauncherMode?: boolean;
+  syncRoutedModels?: boolean;
+  syncNativeOpenaiModels?: boolean;
+  preset?: OpenCodexPreset;
+}
+
+const API_BASE_FOR_CONFIG =
+  (typeof window !== "undefined" ? (window as unknown as { __OCX_API_BASE__?: string }).__OCX_API_BASE__ : "")
+  || ((import.meta as unknown as { env?: Record<string, string> }).env?.VITE_API_BASE ?? "")
+  || "";
+
+function configUrl(path: string): string {
+  const base = API_BASE_FOR_CONFIG.replace(/\/$/, "");
+  return `${base}/api/opencodex/config${path}`;
+}
+
+export async function fetchOpenCodexConfig(): Promise<OpenCodexConfigPayload> {
+  const res = await fetch(configUrl(""), { headers: { Accept: "application/json" } });
+  if (!res.ok) throw new Error(`fetchOpenCodexConfig failed: HTTP ${res.status}`);
+  return (await res.json()) as OpenCodexConfigPayload;
+}
+
+export type RestartStatus = "restarting" | "healthy" | "failed";
+
+export interface RestartResult {
+  status: RestartStatus;
+  elapsedMs: number;
+  error?: string;
+}
+
+/**
+ * Initiate proxy restart and wait for /healthz to come back up.
+ *
+ * POST /api/proxy/restart fires-and-forgets a detached spawn of `ocx restart`.
+ * The current proxy stops momentarily, so this client must poll /healthz with
+ * exponential backoff to know when the new instance has bound the same port.
+ *
+ * Returns: { status: "healthy" } once /healthz returns 2xx, or
+ *          { status: "failed", error } on POST failure or timeout.
+ */
+export async function restartProxy(opts: {
+  initialDelayMs?: number;
+  timeoutMs?: number;
+} = {}): Promise<RestartResult> {
+  const initialDelayMs = opts.initialDelayMs ?? 200;
+  const timeoutMs = opts.timeoutMs ?? 30_000;
+  const start = Date.now();
+  // Step 1: fire the restart POST. This either succeeds (proxy scheduled to die)
+  // or fails outright (in which case the existing proxy is still alive).
+  let postRes: Response;
+  try {
+    postRes = await fetch("/api/proxy/restart", { method: "POST" });
+  } catch (e) {
+    return { status: "failed", elapsedMs: Date.now() - start, error: e instanceof Error ? e.message : String(e) };
+  }
+  if (!postRes.ok) {
+    const text = await postRes.text().catch(() => "");
+    return { status: "failed", elapsedMs: Date.now() - start, error: `POST HTTP ${postRes.status} ${text}` };
+  }
+  // Step 2: poll /healthz with exponential backoff. The proxy is most likely down
+  // for a few seconds, so we start at 200ms and cap at 2s, with a 30s overall timeout.
+  let delay = initialDelayMs;
+  while (Date.now() - start < timeoutMs) {
+    await new Promise(r => setTimeout(r, delay));
+    delay = Math.min(delay * 2, 2000);
+    try {
+      const healthRes = await fetch("/healthz", { cache: "no-store" });
+      if (healthRes.ok) {
+        return { status: "healthy", elapsedMs: Date.now() - start };
+      }
+    } catch {
+      // Connection refused etc. — proxy is still down, keep polling.
+    }
+  }
+  return { status: "failed", elapsedMs: Date.now() - start, error: `proxy did not come back within ${timeoutMs}ms` };
+}
+
+export async function saveOpenCodexConfig(update: OpenCodexConfigUpdate): Promise<OpenCodexConfigPayload> {
+  const res = await fetch(configUrl(""), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify(update),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`saveOpenCodexConfig failed: HTTP ${res.status} ${text}`);
+  }
+  return (await res.json()) as OpenCodexConfigPayload;
+}
