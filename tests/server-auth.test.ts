@@ -15,8 +15,10 @@ import {
   assertServerAuthConfig,
   corsHeaders,
   disableResponsesRequestTimeout,
+  effectiveBindHostname,
   hasValidApiAuth,
   isApiAuthRequired,
+  isApiAuthRequiredForRequest,
   isLoopbackHostname,
   resolveGuiFilePath,
   rootFallbackPayload,
@@ -27,6 +29,7 @@ import type { OcxConfig } from "../src/types";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "./helpers/isolated-codex-home";
 
 const previousApiToken = process.env.OPENCODEX_API_AUTH_TOKEN;
+const previousOcxHostname = process.env.OCX_HOSTNAME;
 const previousOpencodexHome = process.env.OPENCODEX_HOME;
 const TEST_DIR = join(import.meta.dir, ".tmp-server-auth-test");
 let isolatedCodexHome: IsolatedCodexHome | null = null;
@@ -57,6 +60,8 @@ afterEach(() => {
   else process.env.OPENCODEX_API_AUTH_TOKEN = previousApiToken;
   if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = previousOpencodexHome;
+  if (previousOcxHostname === undefined) delete process.env.OCX_HOSTNAME;
+  else process.env.OCX_HOSTNAME = previousOcxHostname;
   isolatedCodexHome?.restore();
   isolatedCodexHome = null;
   clearCodexUpstreamHealth();
@@ -98,6 +103,43 @@ describe("server local API auth", () => {
     expect(isLoopbackHostname("::1")).toBe(true);
     expect(isApiAuthRequired(config())).toBe(false);
     expect(isApiAuthRequired(config("127.0.0.1"))).toBe(false);
+  });
+
+  test("OCX_HOSTNAME env override flips auth requirement without touching config.hostname", () => {
+    expect(isApiAuthRequired(config())).toBe(false);
+    process.env.OCX_HOSTNAME = "0.0.0.0";
+    expect(isApiAuthRequired(config())).toBe(true);
+    expect(effectiveBindHostname(config())).toBe("0.0.0.0");
+    process.env.OCX_HOSTNAME = "::";
+    expect(isApiAuthRequired(config())).toBe(true);
+    expect(effectiveBindHostname(config())).toBe("::");
+    delete process.env.OCX_HOSTNAME;
+    expect(effectiveBindHostname(config("127.0.0.1"))).toBe("127.0.0.1");
+    expect(isApiAuthRequired(config("127.0.0.1"))).toBe(false);
+    process.env.OCX_HOSTNAME = "0.0.0.0";
+    expect(effectiveBindHostname(config("127.0.0.1"))).toBe("0.0.0.0");
+    expect(isApiAuthRequired(config("127.0.0.1"))).toBe(true);
+  });
+
+  test("isApiAuthRequiredForRequest honors OCX_HOSTNAME override alongside source IP", () => {
+    const cfg = config();
+    process.env.OCX_HOSTNAME = "0.0.0.0";
+    expect(isApiAuthRequiredForRequest(
+      new Request("http://192.168.0.10/api/keys"),
+      cfg,
+      "127.0.0.1",
+    )).toBe(false);
+    expect(isApiAuthRequiredForRequest(
+      new Request("http://192.168.0.10/api/keys"),
+      cfg,
+      "192.168.0.10",
+    )).toBe(true);
+    delete process.env.OCX_HOSTNAME;
+    expect(isApiAuthRequiredForRequest(
+      new Request("http://192.168.0.10/api/keys"),
+      cfg,
+      "192.168.0.10",
+    )).toBe(false);
   });
 
   test("non-loopback binding requires env token before startup", () => {

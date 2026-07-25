@@ -142,22 +142,33 @@ export default function App() {
     //    proxy host itself".
     const hostIsLoopback = /^(localhost|127\.|::1|\[::1\])$/i.test(location.hostname);
     if (hostIsLoopback) { setAuthUnlocked(true); return; }
+
+    // 1b. Non-loopback host: open the modal right away. If the proxy actually
+    //     admits this caller (LAN-IP with same-machine loopback source IP), the
+    //     probe below unlocks immediately and the user never sees the modal.
+    //     If the proxy requires auth (LAN bind, no loopback bypass), the user
+    //     sees an input field instead of staring at "this proxy requires API key"
+    //     with nowhere to paste the key.
+    setAuthPromptOpen(true);
+
     // 3. Network probe — runs after the loopback / stored-key shortcuts.
     const probe = () => fetch(`${API_BASE}/api/keys`)
       .then((r) => {
         if (cancelled) return;
         if (r.ok) {
           setAuthUnlocked(true);
+          setAuthPromptOpen(false);
+          setAuthError(undefined);
         } else if (r.status === 401) {
-          setAuthPromptOpen(true);
+          // Modal already open from the non-loopback short-circuit above.
+          // Don't clobber any error message already set by submitApiKey
+          // (e.g. authKey.errorRejected after a bad key submission).
         } else {
-          setAuthPromptOpen(true);
           setAuthError(tRef.current("authKey.errorUnexpected").replace("{status}", String(r.status)));
         }
       })
       .catch(() => {
         if (cancelled) return;
-        setAuthPromptOpen(true);
         setAuthError(tRef.current("authKey.errorNetwork"));
       });
     // 2. Reuse a key the user already validated in this tab. Without this, every

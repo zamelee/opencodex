@@ -107,6 +107,20 @@ export function isLoopbackHostname(hostname: string | undefined): boolean {
   return normalized === "" || normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1" || normalized === "[::1]";
 }
 
+/**
+ * The hostname the proxy actually bound to. Honors the OCX_HOSTNAME env override
+ * (set by ocx-start.py --hostname / --bind) so auth checks track runtime binds
+ * even when the user didn't persist the change to config.hostname.
+ *
+ * Without this, ocx-start.py --bind 0.0.0.0 exposes the proxy on every interface
+ * but auth-cors still treats it as loopback, so CORS preflights from LAN clients
+ * get rejected and the GUI sees every request hang (the "submit has no response"
+ * symptom on LAN access).
+ */
+export function effectiveBindHostname(config: OcxConfig): string {
+  return process.env.OCX_HOSTNAME?.trim() || config.hostname || "127.0.0.1";
+}
+
 /** True if the TCP source is on the loopback interface — i.e. the same machine. */
 export function isLoopbackSourceIp(ip: string | null | undefined): boolean {
   if (!ip) return false;
@@ -116,13 +130,13 @@ export function isLoopbackSourceIp(ip: string | null | undefined): boolean {
 
 /** Runtime check: requires API auth only when bind is non-loopback AND request source is non-loopback. */
 export function isApiAuthRequiredForRequest(req: Request, config: OcxConfig, sourceIp: string | null): boolean {
-  if (isLoopbackHostname(config.hostname)) return false;
+  if (isLoopbackHostname(effectiveBindHostname(config))) return false;
   if (isLoopbackSourceIp(sourceIp)) return false;
   return true;
 }
 
 export function isApiAuthRequired(config: OcxConfig): boolean {
-  return !isLoopbackHostname(config.hostname);
+  return !isLoopbackHostname(effectiveBindHostname(config));
 }
 
 export function assertServerAuthConfig(config: OcxConfig): void {

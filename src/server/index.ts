@@ -96,9 +96,11 @@ export {
 import {
   assertServerAuthConfig,
   corsHeaders,
+  effectiveBindHostname,
   hasValidApiAuth,
   isAllowedRequestOrigin,
   isApiAuthRequired,
+  isApiAuthRequiredForRequest,
   isLoopbackHostname,
   jsonResponse,
   requireApiAuth,
@@ -109,8 +111,10 @@ import {
 export {
   assertServerAuthConfig,
   corsHeaders,
+  effectiveBindHostname,
   hasValidApiAuth,
   isApiAuthRequired,
+  isApiAuthRequiredForRequest,
   isLoopbackHostname,
   jsonResponse,
   safeConfigDTO,
