@@ -4,11 +4,14 @@ import { getValidAccessToken } from "../oauth";
 import { getCredential } from "../oauth/store";
 import { antigravityUserAgent } from "../adapters/client-fingerprint";
 import { getProviderRegistryEntry } from "./registry";
+import { getMinimaxRuntime, isMinimaxRuntimeAvailable } from "./playwright-runtime";
 import type { OcxConfig, OcxProviderConfig } from "../types";
 
 const CACHE_TTL_MS = 5 * 60_000;
 const REQUEST_TIMEOUT_MS = 8_000;
 const REFRESH_SKEW_MS = 60_000;
+const MINIMAX_PROBE_TIMEOUT_MS = 25_000;
+const MINIMAX_LOGIN_WAIT_MS = 8_000;
 
 export interface ProviderQuotaWindow {
   label: string;
@@ -102,6 +105,15 @@ function isBuiltInChatGptForwardProvider(name: string, provider: OcxProviderConf
     && provider.adapter === "openai-responses"
     && provider.authMode === "forward"
     && base === "https://chatgpt.com/backend-api/codex";
+}
+
+/**
+ * Detect a minimax.chat reverse proxy. We don't hardcode the provider id because users
+ * pick any name when adding a custom provider; the most reliable signal is the baseUrl.
+ */
+function isMinimaxChatReverseProxy(name: string, provider: OcxProviderConfig): boolean {
+  const base = (provider.baseUrl ?? "").toLowerCase();
+  return base.includes("minnimax.chat");
 }
 
 function report(provider: string, source: string, quota: ProviderQuota): ProviderQuotaReport | null {
@@ -312,6 +324,7 @@ async function maybeFetchProviderQuota(
   if (provider.disabled === true) return null;
   try {
     if (isBuiltInChatGptForwardProvider(name, provider)) return fetchChatGptForwardQuota(config, name, forceRefresh);
+    if (isMinimaxChatReverseProxy(name, provider)) return fetchMinimaxChatQuota(name, provider);
     if (provider.authMode === "oauth" && name === "xai") return fetchXaiQuota(name);
     if (provider.authMode === "oauth" && name === "anthropic") return fetchAnthropicQuota(name);
     if (provider.authMode === "oauth" && name === "google-antigravity") return fetchAntigravityQuota(name, provider);
@@ -319,6 +332,107 @@ async function maybeFetchProviderQuota(
   } catch {
     return null;
   }
+}
+
+/**
+ * Pull quota from the minimax.chat user panel. The site has no public REST API, so we
+ * headless-load the SPA, fill the API key, click save, and read the rendered DOM.
+ *
+ * Cost:
+ *   - First call (cold): ~1s (browser launch + SPA mount + wait for quota numbers).
+ *   - Subsequent calls (warm): ~440ms (SPA reload + DOM scrape).
+ *   - Cache TTL: 5 minutes (the global CACHE_TTL_MS already applied by fetchProviderQuotaReports).
+ *
+ * Failures degrade silently: returns null so the caller simply omits this provider
+ * from the report (matching the behavior of all other fetch* functions above).
+ */
+async function fetchMinimaxChatQuota(provider: string, prov: OcxProviderConfig): Promise<ProviderQuotaReport | null> {
+  const apiKey = prov.apiKey;
+  if (!apiKey) return null;
+  if (!(await isMinimaxRuntimeAvailable())) return null;
+
+  const ctx = await getMinimaxRuntime();
+  const page = await ctx.newPage();
+  try {
+    const probe = await Promise.race([
+      scrapeMinimaxQuota(page, apiKey),
+      Bun.sleep(MINIMAX_PROBE_TIMEOUT_MS).then(() => null),
+    ]);
+    if (!probe) return null;
+    return report(provider, "minimax-chat:playwright-spa-scrape", probe);
+  } finally {
+    await page.close().catch(() => { /* best-effort */ });
+  }
+}
+
+async function scrapeMinimaxQuota(page: import("playwright").Page, apiKey: string): Promise<ProviderQuota | null> {
+  await page.goto("https://minnimax.chat/", { waitUntil: "domcontentloaded", timeout: 15_000 });
+
+  const passwordInput = page.locator('input[type="password"]');
+  await passwordInput.waitFor({ timeout: 10_000 });
+
+  // The SPA may auto-fill if the key is already in cookies — only type when empty to
+  // avoid triggering React's controlled-input reset which would clear the field.
+  const currentValue = await passwordInput.inputValue().catch(() => "");
+  if (currentValue !== apiKey) {
+    await passwordInput.fill(apiKey);
+  }
+
+  const saveBtn = page.locator("button", { hasText: "保存" }).first();
+  await saveBtn.click();
+
+  // Wait for the 5h quota number "<used> / <total>" (e.g. "522 / 2,500") to render.
+  // After login the SPA fetches quota and re-renders the panel within a few seconds.
+  await page.waitForFunction(
+    () => /\d{1,3}(?:,\d{3})?\s*\/\s*\d{1,3}(?:,\d{3})?/.test(document.body.innerText || ""),
+    { timeout: 15_000 },
+  );
+  // Tiny settle so trailing percentages / reset timestamps finish rendering.
+  await Bun.sleep(200);
+
+  return await page.evaluate(() => {
+    const text = document.body.innerText || "";
+    const grabPct = (label: string): { pct?: number; resetAt?: number } | null => {
+      const re = new RegExp(label + "[\\s\\S]{0,120}?([\\d,]+)\\s*\\/\\s*([\\d,]+)", "i");
+      const m = text.match(re);
+      if (!m) return null;
+      const used = Number(m[1].replace(/,/g, ""));
+      const total = Number(m[2].replace(/,/g, ""));
+      if (!Number.isFinite(used) || !Number.isFinite(total) || total <= 0) return null;
+      return { pct: Math.max(0, Math.min(100, (used / total) * 100)) };
+    };
+
+    const fiveHour = grabPct("5 小时额度");
+    const weekly = grabPct("本周额度");
+
+    // Reset timestamps:
+    //   5h:  "最早释放 08/02 00:33"  -> next 5h boundary from oldest call
+    //   week: "每周一 00:00 重置 · 下次 08/03 00:00" -> next Monday 00:00
+    const weeklyResetMatch = text.match(/下次\s*(\d{1,2}\/\d{1,2}\s+\d{1,2}:\d{2})/);
+    let weeklyResetAt: number | undefined;
+    if (weeklyResetMatch) {
+      const m = weeklyResetMatch[1].match(/(\d{1,2})\/(\d{1,2})\s+(\d{1,2}):(\d{2})/);
+      if (m) {
+        const now = new Date();
+        const month = Number(m[1]);
+        const day = Number(m[2]);
+        const hour = Number(m[3]);
+        const minute = Number(m[4]);
+        // Assume current year; if month/day already passed, roll to next year.
+        const candidate = new Date(now.getFullYear(), month - 1, day, hour, minute);
+        if (candidate.getTime() < now.getTime()) candidate.setFullYear(now.getFullYear() + 1);
+        weeklyResetAt = candidate.getTime();
+      }
+    }
+
+    if (!fiveHour && !weekly) return null;
+    return {
+      ...(fiveHour?.pct !== undefined ? { fiveHourPercent: fiveHour.pct } : {}),
+      ...(weekly?.pct !== undefined ? { weeklyPercent: weekly.pct } : {}),
+      ...(weeklyResetAt !== undefined ? { weeklyResetAt } : {}),
+      updatedAt: Date.now(),
+    } as ProviderQuota;
+  });
 }
 
 export async function fetchProviderQuotaReports(config: OcxConfig, forceRefresh = false): Promise<ProviderQuotaResponse> {

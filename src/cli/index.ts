@@ -27,6 +27,7 @@ import { findLiveProxy, probeHostname, type LiveProxy } from "../server/proxy-li
 import { stopProxy } from "../lib/process-control";
 import { serviceCommand, serviceStatusSummary, stopServiceIfInstalled, uninstallServiceIfInstalled } from "../service";
 import { drainAndShutdown, startServer } from "../server";
+import { closeMinimaxRuntime } from "../providers/playwright-runtime";
 import { startTokenGuardian } from "../oauth/token-guardian";
 import { startHistoryMigrationGuardian } from "../codex/history-migration-guardian";
 import { maybeShowStarPrompt } from "./star-prompt";
@@ -172,6 +173,10 @@ async function handleStart(options: { block?: boolean } = {}) {
     cleaned = true;
     try { guardian.stop(); } catch { /* best-effort */ }
     try { historyGuardian?.stop(); } catch { /* best-effort */ }
+    // Close the lazy Playwright runtime that backs minimax.chat quota scraping.
+    // Fire-and-forget: shutdown is already racing the user, we just need to make
+    // sure we don't leak Chromium child processes.
+    closeMinimaxRuntime().catch(() => { /* best-effort */ });
     removePid(process.pid);
     removeRuntimePort(process.pid);
     if (!process.env.OCX_SERVICE) { try { restoreNativeCodex(); } catch { /* best-effort restore */ } }
