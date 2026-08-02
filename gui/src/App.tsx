@@ -178,8 +178,13 @@ export default function App() {
       fetch(`${API_BASE}/api/keys`, { headers: { "X-OpenCodex-API-Key": storedKey } })
         .then((r) => {
           if (cancelled) return;
-          if (r.ok) setAuthUnlocked(true);
-          else probe();
+          if (r.ok) {
+            setAuthUnlocked(true);
+            setAuthPromptOpen(false);
+            setAuthError(undefined);
+          } else {
+            probe();
+          }
         })
         .catch(() => { if (!cancelled) probe(); });
     } else {
