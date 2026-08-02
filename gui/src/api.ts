@@ -1,4 +1,18 @@
 const TOKEN_KEY = "opencodex-api-token";
+// Persist across browser restarts: LAN users tend to come back to the dashboard hours/days
+// later in the same browser, and re-pasting the key each time is friction. sessionStorage
+// was per-tab and disappeared on tab close; localStorage survives browser restart. The
+// key is still scoped to the dashboard origin, so it doesn't leak across apps.
+const STORAGE: Storage = (() => {
+  try {
+    const k = "__ocx_probe__";
+    localStorage.setItem(k, "1");
+    localStorage.removeItem(k);
+    return localStorage;
+  } catch {
+    return sessionStorage;
+  }
+})();
 
 let installed = false;
 let promptInFlight: Promise<string | null> | null = null;
@@ -25,7 +39,7 @@ function needsApiAuth(input: RequestInfo | URL): boolean {
 
 function readToken(): string | null {
   try {
-    const token = sessionStorage.getItem(TOKEN_KEY)?.trim();
+    const token = STORAGE.getItem(TOKEN_KEY)?.trim();
     return token || null;
   } catch {
     return null;
@@ -33,11 +47,11 @@ function readToken(): string | null {
 }
 
 function storeToken(token: string): void {
-  try { sessionStorage.setItem(TOKEN_KEY, token); } catch { /* session storage may be disabled */ }
+  try { STORAGE.setItem(TOKEN_KEY, token); } catch { /* storage may be disabled */ }
 }
 
 function clearToken(): void {
-  try { sessionStorage.removeItem(TOKEN_KEY); } catch { /* session storage may be disabled */ }
+  try { STORAGE.removeItem(TOKEN_KEY); } catch { /* storage may be disabled */ }
 }
 
 function withToken(input: RequestInfo | URL, init: RequestInit | undefined, token: string): [RequestInfo | URL, RequestInit | undefined] {

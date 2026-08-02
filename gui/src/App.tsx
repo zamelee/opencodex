@@ -70,7 +70,7 @@ export default function App() {
     fetch(`${API_BASE}/api/keys`, { headers: { "X-OpenCodex-API-Key": key } })
       .then((r) => {
         if (r.ok) {
-          try { sessionStorage.setItem(TOKEN_KEY, key); } catch {}
+          try { localStorage.setItem(TOKEN_KEY, key); } catch {}
           setAuthUnlocked(true);
           setAuthPromptOpen(false);
           setAuthError(undefined);
@@ -173,7 +173,7 @@ export default function App() {
       });
     // 2. Reuse a key the user already validated in this tab. Without this, every
     //    page reload re-prompts even though the previous submission succeeded.
-    const storedKey = (() => { try { return sessionStorage.getItem(TOKEN_KEY); } catch { return null; } })();
+    const storedKey = (() => { try { return localStorage.getItem(TOKEN_KEY); } catch { return null; } })();
     if (storedKey) {
       fetch(`${API_BASE}/api/keys`, { headers: { "X-OpenCodex-API-Key": storedKey } })
         .then((r) => {
