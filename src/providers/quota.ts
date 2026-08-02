@@ -31,6 +31,12 @@ export interface ProviderQuotaKey {
   weeklyResetAt?: number;
   expiresAt?: number;
   planLabel?: string;
+  /** Raw count + limit for the 5h window (when the upstream returns them). */
+  fiveHourUsed?: number;
+  fiveHourLimit?: number;
+  /** Raw count + limit for the weekly window. */
+  weeklyUsed?: number;
+  weeklyLimit?: number;
   source: string;
   updatedAt: number;
 }
@@ -414,12 +420,31 @@ async function fetchMinimaxChatQuota(provider: string, prov: OcxProviderConfig):
   if (keys.length === 0) return null;
 
   // Provider-level rollup mirrors the ACTIVE key (or the only key).
+  // Provider-level rollup:
+  //   - 5h: each key has its OWN rolling 5h window (independent trigger times), so we
+  //     cannot simply sum used values. Provider-level 5h mirrors the ACTIVE key instead.
+  //   - weekly: calendar-week window resets at Monday 00:00 across ALL keys, so used
+  //     values sum cleanly. weeklyLimit likewise sums; weeklyPercent is recomputed.
+  //   - expiresAt + planLabel: each key has its own; provider mirrors the active one.
   const active = keys.find(k => k.active) ?? keys[0];
+  let totalWeeklyUsed = 0;
+  let totalWeeklyLimit = 0;
+  let anyWeekly = false;
+  for (const k of keys) {
+    if (k.weeklyUsed !== undefined && k.weeklyLimit !== undefined) {
+      totalWeeklyUsed += k.weeklyUsed;
+      totalWeeklyLimit += k.weeklyLimit;
+      anyWeekly = true;
+    }
+  }
+  const summedWeeklyPct = anyWeekly && totalWeeklyLimit > 0
+    ? Math.max(0, Math.min(100, (totalWeeklyUsed / totalWeeklyLimit) * 100))
+    : undefined;
   const quota: ProviderQuota = {
     updatedAt: Date.now(),
     ...(active.fiveHourPercent !== undefined ? { fiveHourPercent: active.fiveHourPercent } : {}),
     ...(active.fiveHourResetAt !== undefined ? { fiveHourResetAt: active.fiveHourResetAt } : {}),
-    ...(active.weeklyPercent !== undefined ? { weeklyPercent: active.weeklyPercent } : {}),
+    ...(summedWeeklyPct !== undefined ? { weeklyPercent: summedWeeklyPct } : {}),
     ...(active.weeklyResetAt !== undefined ? { weeklyResetAt: active.weeklyResetAt } : {}),
     ...(active.planLabel ? { planLabel: active.planLabel } : {}),
     ...(active.expiresAt !== undefined ? { expiresAt: active.expiresAt } : {}),
@@ -439,6 +464,11 @@ function parseMinimaxUsageForKey(
 
   const fiveHourPct = toWindowPercent(rollingRec);
   const weeklyPct = toWindowPercent(weeklyRec);
+  const fiveHourUsed = toFiniteNumber(rollingRec?.["used"]);
+  const fiveHourLimit = toFiniteNumber(rollingRec?.["limit"]);
+  const fiveHourResetAt = normalizeResetAt(rollingRec?.["window_end"]);
+  const weeklyUsed = toFiniteNumber(weeklyRec?.["used"]);
+  const weeklyLimit = toFiniteNumber(weeklyRec?.["limit"]);
   const weeklyResetAt = normalizeResetAt(weeklyRec?.["resets_at"]);
   const expiresAt = normalizeResetAt(payload["expires_at"]);
   const planLabel = typeof payload["plan_name"] === "string" ? (payload["plan_name"] as string) : undefined;
@@ -455,10 +485,14 @@ function parseMinimaxUsageForKey(
     updatedAt: Date.now(),
     ...(entry.label !== undefined ? { label: entry.label } : {}),
     ...(fiveHourPct !== undefined ? { fiveHourPercent: fiveHourPct } : {}),
-    ...(weeklyResetAt !== undefined ? { fiveHourResetAt: weeklyResetAt } : {}),
+    ...(fiveHourResetAt !== undefined ? { fiveHourResetAt } : {}),
     ...(weeklyPct !== undefined ? { weeklyPercent: weeklyPct } : {}),
     ...(expiresAt !== undefined ? { expiresAt } : {}),
     ...(planLabel !== undefined ? { planLabel } : {}),
+    ...(fiveHourUsed !== undefined ? { fiveHourUsed } : {}),
+    ...(fiveHourLimit !== undefined ? { fiveHourLimit } : {}),
+    ...(weeklyUsed !== undefined ? { weeklyUsed } : {}),
+    ...(weeklyLimit !== undefined ? { weeklyLimit } : {}),
   };
   return result;
 }

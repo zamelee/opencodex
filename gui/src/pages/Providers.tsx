@@ -4,6 +4,7 @@ import { Notice } from "../ui";
 import { IconPlus, IconTrash, IconLock, IconExternal, IconPower, IconChevron } from "../icons";
 import { useT } from "../i18n";
 import type { AccountQuota } from "../codex-quota-utils";
+import { formatRelativeTime } from "../codex-quota-utils";
 import QuotaBars from "../components/QuotaBars";
 import KeyPoolPanel from "../components/KeyPoolPanel";
 import { providerIconSrc } from "../provider-icons";
@@ -416,7 +417,7 @@ export default function Providers({ apiBase }: { apiBase: string }) {
             const isKeyAuth = prov.authMode !== "oauth" && prov.authMode !== "forward";
             const keyPool = isKeyAuth && prov.hasApiKey ? (keyPools[name] ?? []) : [];
             const showAccounts = (!!accountSet && accountSet.accounts.length > 0) || keyPool.length > 0;
-            const accountsOpen = openAccounts[name] === true;
+            const accountsOpen = openAccounts[name] !== false;
             const dropdownCount = accountSet?.accounts.length ?? keyPool.length;
             return (
               <div key={name} className={`card prov-card${isDisabled ? " prov-card-disabled" : ""}`}>
@@ -455,19 +456,44 @@ export default function Providers({ apiBase }: { apiBase: string }) {
                   </div>
                 </div>
                 {quota && <QuotaBars quota={quota} threshold={80} t={t} className="provider-quota" />}
-                {quota && <KeyPoolPanel quota={quota} t={t} />}
+                {quota && (
+                  <div className="muted" style={{ fontSize: 12, display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center", marginTop: 4 }}>
+                    {quota.planLabel && <span><strong>{quota.planLabel}</strong></span>}
+                    {quota.expiresAt !== undefined && (
+                      <span>{t("prov.expiresIn", { n: String(Math.max(0, Math.ceil((quota.expiresAt - Date.now()) / (24 * 60 * 60 * 1000))))})}</span>
+                    )}
+                    <span>· {formatRelativeTime(quota.updatedAt)}</span>
+                  </div>
+                )}
                 {showAccounts && (
                   <>
-                    <button
-                      className={`prov-accounts-toggle${accountsOpen ? " open" : ""}`}
-                      onClick={() => setOpenAccounts(prev => ({ ...prev, [name]: !accountsOpen }))}
-                      aria-expanded={accountsOpen}
-                      aria-label={t("prov.accountsAria", { name })}
-                    >
-                      {t("prov.accounts", { n: String(dropdownCount) })}
-                      <span className="chev"><IconChevron /></span>
-                    </button>
-                    {accountsOpen && (
+                    <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                      <button
+                        className={`prov-accounts-toggle${accountsOpen ? " open" : ""}`}
+                        onClick={() => setOpenAccounts(prev => ({ ...prev, [name]: !accountsOpen }))}
+                        aria-expanded={accountsOpen !== false}
+                        aria-label={t("prov.accountsAria", { name })}
+                      >
+                        {t("prov.accounts", { n: String(dropdownCount) })}
+                        <span className="chev"><IconChevron /></span>
+                      </button>
+                      {isKeyAuth ? (
+                        addingKeyFor === name ? (
+                          <button className="btn btn-ghost btn-sm" onClick={() => { setAddingKeyFor(null); setNewKeyValue(""); }}>
+                            {t("common.cancel")}
+                          </button>
+                        ) : (
+                          <button
+                            className="btn btn-primary btn-sm"
+                            onClick={() => { setAddingKeyFor(name); setNewKeyValue(""); }}
+                            title={t("prov.keyAddTitle")}
+                          >
+                            <IconPlus style={{ width: 12, height: 12 }} />{t("prov.keyAdd")}
+                          </button>
+                        )
+                      ) : null}
+                    </div>
+                    {accountsOpen !== false && (
                       <div className="prov-accounts-list">
                         {(accountSet?.accounts ?? []).map(account => (
                           <button
@@ -490,7 +516,27 @@ export default function Providers({ apiBase }: { apiBase: string }) {
                             </span>
                           </button>
                         ))}
-                        {keyPool.map(entry => (
+                        {(quota?.keys ?? []).map((qk, idx) => {
+                          const entry = keyPool.find(k => k.id === qk.id);
+                          if (!entry) return null;
+                          const onSwitch = () => switchApiKey(name, entry);
+                          const onRemove = (e: React.MouseEvent) => { e.stopPropagation(); removeApiKey(name, entry); };
+                          return (
+                            <KeyPoolPanel
+                              key={qk.id}
+                              quota={{
+                                ...qk,
+                                label: qk.label ?? entry.label,
+                              }}
+                              index={idx}
+                              active={entry.active}
+                              onSwitch={entry.active ? undefined : onSwitch}
+                              onRemove={onRemove}
+                              t={t}
+                            />
+                          );
+                        })}
+                        {keyPool.filter(entry => !(quota?.keys ?? []).some(qk => qk.id === entry.id)).map(entry => (
                           <button
                             key={entry.id}
                             className={`prov-account-row${entry.active ? " active" : ""}`}

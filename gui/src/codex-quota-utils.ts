@@ -1,3 +1,22 @@
+/** Per-key quota entry (one entry per apiKeyPool key). Shared by AccountQuota.keys[] and KeyPoolPanel. */
+export interface KeyQuota {
+  id: string;
+  label?: string;
+  masked: string;
+  active: boolean;
+  weeklyPercent?: number;
+  weeklyResetAt?: number;
+  fiveHourPercent?: number;
+  fiveHourResetAt?: number;
+  weeklyUsed?: number;
+  weeklyLimit?: number;
+  fiveHourUsed?: number;
+  fiveHourLimit?: number;
+  expiresAt?: number;
+  planLabel?: string;
+  updatedAt: number;
+}
+
 export interface AccountQuota {
   weeklyPercent?: number;
   fiveHourPercent?: number;
@@ -12,19 +31,7 @@ export interface AccountQuota {
   /** Plan expiry timestamp (ms since epoch). Provider-specific. */
   expiresAt?: number;
   /** Per-key quota breakdown when the provider has multiple keys (apiKeyPool). */
-  keys?: Array<{
-    id: string;
-    label?: string;
-    masked: string;
-    active: boolean;
-    weeklyPercent?: number;
-    weeklyResetAt?: number;
-    fiveHourPercent?: number;
-    fiveHourResetAt?: number;
-    expiresAt?: number;
-    planLabel?: string;
-    updatedAt: number;
-  }>;
+  keys?: KeyQuota[];
   updatedAt: number;
 }
 

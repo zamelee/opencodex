@@ -172,6 +172,7 @@ export const ko: Record<TKey, string> = {
   "prov.refreshMinutesAgo": "{n}분 전 새로고침",
   "prov.refreshHoursAgo": "{n}시간 전 새로고침",
   "prov.keys": "API 키 ({n})",
+  "prov.keyAddTitle": "풀에 새 API 키 추가",
 
   // models
   "models.subtitle": "Codex가 보는 모델을 켜고 끕니다 — 네이티브 GPT passthrough와 라우팅된 모델을 프로바이더별로 묶어 보여줍니다(헤더를 클릭하면 접힘). 비활성화된 모델은 카탈로그와 모델 선택기에서 숨겨집니다. 변경 사항은 다음 Codex 턴에 적용됩니다 — opencodex가 Codex의 5분 모델 캐시를 무효화하므로 재시작이 필요 없습니다.",

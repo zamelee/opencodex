@@ -166,6 +166,7 @@ export const de = {
   "prov.refreshMinutesAgo": "vor {n}m aktualisiert",
   "prov.refreshHoursAgo": "vor {n}h aktualisiert",
   "prov.keys": "API-Schlüssel ({n})",
+  "prov.keyAddTitle": "Neuen API-Schlüssel zum Pool hinzufügen",
   "models.subtitle": "Steuere, welche Modelle Codex sieht — natives GPT-Passthrough und geroutete Anbieter, nach Anbieter gruppiert (Kopfzeile zum Einklappen anklicken). Deaktivierte Modelle sind im Katalog und in der Modellauswahl verborgen. Änderungen gelten bei der nächsten Codex-Runde — opencodex invalidiert Codex 5-Minuten-Modell-Cache, kein Neustart nötig.",
   "models.nativeGroupLabel": "OpenAI nativ",
   "models.nativeHint": "Passthrough-Modelle über deinen ChatGPT-Login. Ausblenden entfernt sie aus der Codex-Auswahl (Katalogeintrag bleibt, Reaktivierung stellt exakt wieder her).",
