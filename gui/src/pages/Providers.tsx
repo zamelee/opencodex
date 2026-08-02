@@ -5,6 +5,7 @@ import { IconPlus, IconTrash, IconLock, IconExternal, IconPower, IconChevron } f
 import { useT } from "../i18n";
 import type { AccountQuota } from "../codex-quota-utils";
 import QuotaBars from "../components/QuotaBars";
+import KeyPoolPanel from "../components/KeyPoolPanel";
 import { providerIconSrc } from "../provider-icons";
 
 interface Config {
@@ -454,6 +455,7 @@ export default function Providers({ apiBase }: { apiBase: string }) {
                   </div>
                 </div>
                 {quota && <QuotaBars quota={quota} threshold={80} t={t} className="provider-quota" />}
+                {quota && <KeyPoolPanel quota={quota} t={t} />}
                 {showAccounts && (
                   <>
                     <button

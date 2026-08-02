@@ -164,6 +164,14 @@ export const zh: Record<TKey, string> = {
   "prov.enableAria": "启用提供方 {name}",
   "prov.disableAria": "禁用提供方 {name}",
   "prov.defaultCannotDisable": "默认提供方不能被禁用",
+  "prov.plan": "套餐: {plan}",
+  "prov.expiresIn": "{n} 天后到期",
+  "prov.expiresAt": "到期: {date}",
+  "prov.refreshJustNow": "刚刚刷新",
+  "prov.refreshSecondsAgo": "{n} 秒前刷新",
+  "prov.refreshMinutesAgo": "{n} 分钟前刷新",
+  "prov.refreshHoursAgo": "{n} 小时前刷新",
+  "prov.keys": "API Key ({n})",
 
   // models
   "models.subtitle": "开关 Codex 可见的模型 — 原生 GPT passthrough 与已路由模型按提供方分组（点击标题可折叠）。已禁用的模型会从目录和模型选择器中隐藏。更改在下一个 Codex 回合生效 — opencodex 会使 Codex 的 5 分钟模型缓存失效，因此无需重启。",

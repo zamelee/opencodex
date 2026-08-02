@@ -164,6 +164,14 @@ export const en = {
   "prov.enableAria": "Enable provider {name}",
   "prov.disableAria": "Disable provider {name}",
   "prov.defaultCannotDisable": "Default provider can't be disabled",
+  "prov.plan": "Plan: {plan}",
+  "prov.expiresIn": "expires in {n} day(s)",
+  "prov.expiresAt": "expires: {date}",
+  "prov.refreshJustNow": "refreshed just now",
+  "prov.refreshSecondsAgo": "refreshed {n}s ago",
+  "prov.refreshMinutesAgo": "refreshed {n}m ago",
+  "prov.refreshHoursAgo": "refreshed {n}h ago",
+  "prov.keys": "API Keys ({n})",
 
   // models
   "models.subtitle": "Toggle which models Codex sees — native GPT passthrough and routed providers, grouped by provider (click a header to collapse). Disabled models are hidden from the catalog + model picker. Changes apply on the next Codex turn — opencodex invalidates Codex's 5-min model cache so no restart is needed.",

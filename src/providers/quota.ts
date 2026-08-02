@@ -18,6 +18,23 @@ export interface ProviderQuotaWindow {
   resetAt?: number;
 }
 
+/** Per-key quota report (for providers with apiKeyPool). Mirrors the provider-level
+ * ProviderQuota fields but scoped to one key. */
+export interface ProviderQuotaKey {
+  id: string;
+  label?: string;
+  masked: string;
+  active: boolean;
+  fiveHourPercent?: number;
+  fiveHourResetAt?: number;
+  weeklyPercent?: number;
+  weeklyResetAt?: number;
+  expiresAt?: number;
+  planLabel?: string;
+  source: string;
+  updatedAt: number;
+}
+
 export interface ProviderQuota {
   fiveHourPercent?: number;
   fiveHourResetAt?: number;
@@ -26,6 +43,12 @@ export interface ProviderQuota {
   monthlyPercent?: number;
   monthlyResetAt?: number;
   customWindows?: ProviderQuotaWindow[];
+  /** Per-key quota breakdown when the provider has multiple keys (apiKeyPool). */
+  keys?: ProviderQuotaKey[];
+  /** Plan display label (e.g. "旗舰版・69.9 元"). Provider-specific. */
+  planLabel?: string;
+  /** Plan expiry timestamp. Provider-specific. */
+  expiresAt?: number;
   updatedAt: number;
 }
 
@@ -341,42 +364,74 @@ async function maybeFetchProviderQuota(
  *     weekly:    { limit, used, resets_at, week_start },
  *     plan_name, expires_at, allowed_models, daily_counts, best_practices }
  *
- * Cost: one HTTPS round-trip (~100-300ms). No browser, no Playwright, no SPA mount.
+ * When the provider has multiple keys (apiKeyPool), every key's quota is fetched in
+ * parallel. Per-key results land in quota.keys[]. The provider-level rollup mirrors
+ * the ACTIVE key (or the only key) so existing badges still work for single-key setups.
+ *
+ * Cost per key: one HTTPS round-trip (~100-300ms). No browser, no Playwright.
  * Cache TTL: 5 minutes via the global CACHE_TTL_MS already applied by
  * fetchProviderQuotaReports.
  *
- * Failures degrade silently: returns null so the caller simply omits this provider
- * from the report (matching the behavior of all other fetch* functions above).
+ * Failures degrade silently: any single key that errors out is omitted from keys[],
+ * and the whole call returns null only if zero keys returned data.
  */
 async function fetchMinimaxChatQuota(provider: string, prov: OcxProviderConfig): Promise<ProviderQuotaReport | null> {
-  const apiKey = prov.apiKey;
-  if (!apiKey) return null;
   const baseUrl = (prov.baseUrl ?? "").replace(/\/+$/, "");
   if (!baseUrl) return null;
 
-  let payload: Record<string, unknown>;
-  try {
-    const res = await fetch(`${baseUrl}/v1/usage`, {
-      headers: {
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-        "User-Agent": MINIMAX_USER_AGENT,
-        Accept: "application/json",
-      },
-      signal: AbortSignal.timeout(MINIMAX_USAGE_TIMEOUT_MS),
-    });
-    if (!res.ok) return null;
-    payload = await res.json() as Record<string, unknown>;
-  } catch {
-    return null;
+  // Collect all keys: prefer apiKeyPool (multi-key), fall back to legacy single apiKey.
+  const pool: Array<{ key: string; id: string; label?: string; active: boolean }> = [];
+  if (prov.apiKeyPool && prov.apiKeyPool.length > 0) {
+    const activeKey = prov.apiKey ?? prov.apiKeyPool[0]?.key ?? "";
+    for (const entry of prov.apiKeyPool) {
+      pool.push({ key: entry.key, id: entry.id, label: entry.label, active: entry.key === activeKey });
+    }
+  } else if (prov.apiKey) {
+    pool.push({ key: prov.apiKey, id: sha8(prov.apiKey), active: true });
   }
+  if (pool.length === 0) return null;
 
-  const quota = parseMinimaxUsage(payload);
-  if (!quota) return null;
+  // Fetch every key in parallel. One key's failure does not poison the others.
+  const perKey = await Promise.all(pool.map(async (entry) => {
+    try {
+      const res = await fetch(`${baseUrl}/v1/usage`, {
+        headers: {
+          "x-api-key": entry.key,
+          "anthropic-version": "2023-06-01",
+          "User-Agent": MINIMAX_USER_AGENT,
+          Accept: "application/json",
+        },
+        signal: AbortSignal.timeout(MINIMAX_USAGE_TIMEOUT_MS),
+      });
+      if (!res.ok) return null;
+      const payload = await res.json() as Record<string, unknown>;
+      return parseMinimaxUsageForKey(entry, payload);
+    } catch {
+      return null;
+    }
+  }));
+  const keys = perKey.filter((k): k is ProviderQuotaKey => k !== null);
+  if (keys.length === 0) return null;
+
+  // Provider-level rollup mirrors the ACTIVE key (or the only key).
+  const active = keys.find(k => k.active) ?? keys[0];
+  const quota: ProviderQuota = {
+    updatedAt: Date.now(),
+    ...(active.fiveHourPercent !== undefined ? { fiveHourPercent: active.fiveHourPercent } : {}),
+    ...(active.fiveHourResetAt !== undefined ? { fiveHourResetAt: active.fiveHourResetAt } : {}),
+    ...(active.weeklyPercent !== undefined ? { weeklyPercent: active.weeklyPercent } : {}),
+    ...(active.weeklyResetAt !== undefined ? { weeklyResetAt: active.weeklyResetAt } : {}),
+    ...(active.planLabel ? { planLabel: active.planLabel } : {}),
+    ...(active.expiresAt !== undefined ? { expiresAt: active.expiresAt } : {}),
+    keys,
+  };
   return report(provider, "minimax-chat:/v1/usage", quota);
 }
 
-function parseMinimaxUsage(payload: Record<string, unknown>): ProviderQuota | null {
+function parseMinimaxUsageForKey(
+  entry: { key: string; id: string; label?: string; active: boolean },
+  payload: Record<string, unknown>,
+): ProviderQuotaKey | null {
   const rolling = payload["rolling_5h"];
   const weekly = payload["weekly"];
   const rollingRec = rolling && typeof rolling === "object" ? rolling as Record<string, unknown> : null;
@@ -385,13 +440,39 @@ function parseMinimaxUsage(payload: Record<string, unknown>): ProviderQuota | nu
   const fiveHourPct = toWindowPercent(rollingRec);
   const weeklyPct = toWindowPercent(weeklyRec);
   const weeklyResetAt = normalizeResetAt(weeklyRec?.["resets_at"]);
+  const expiresAt = normalizeResetAt(payload["expires_at"]);
+  const planLabel = typeof payload["plan_name"] === "string" ? (payload["plan_name"] as string) : undefined;
 
-  if (fiveHourPct === undefined && weeklyPct === undefined && weeklyResetAt === undefined) return null;
-  const quota: ProviderQuota = { updatedAt: Date.now() };
-  if (fiveHourPct !== undefined) quota.fiveHourPercent = fiveHourPct;
-  if (weeklyPct !== undefined) quota.weeklyPercent = weeklyPct;
-  if (weeklyResetAt !== undefined) quota.weeklyResetAt = weeklyResetAt;
-  return quota;
+  if (
+    fiveHourPct === undefined && weeklyPct === undefined && weeklyResetAt === undefined &&
+    expiresAt === undefined && planLabel === undefined
+  ) return null;
+  const result: ProviderQuotaKey = {
+    id: entry.id,
+    masked: maskApiKeyForDisplay(entry.key),
+    active: entry.active,
+    source: "minimax-chat:/v1/usage",
+    updatedAt: Date.now(),
+    ...(entry.label !== undefined ? { label: entry.label } : {}),
+    ...(fiveHourPct !== undefined ? { fiveHourPercent: fiveHourPct } : {}),
+    ...(weeklyResetAt !== undefined ? { fiveHourResetAt: weeklyResetAt } : {}),
+    ...(weeklyPct !== undefined ? { weeklyPercent: weeklyPct } : {}),
+    ...(expiresAt !== undefined ? { expiresAt } : {}),
+    ...(planLabel !== undefined ? { planLabel } : {}),
+  };
+  return result;
+}
+
+function maskApiKeyForDisplay(value: string): string {
+  if (value.length <= 8) return "****";
+  return `${value.slice(0, 4)}****${value.slice(-4)}`;
+}
+
+function sha8(s: string): string {
+  // Cheap content-derived id for legacy single-key entries (no entry.id).
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
+  return h.toString(16).padStart(8, "0").slice(0, 8);
 }
 
 function toWindowPercent(rec: Record<string, unknown> | null): number | undefined {
