@@ -113,7 +113,11 @@ jobs:
 
       - name: Install globally (downloads bundled bun)
         shell: bash
-        run: npm install -g ./bitkyc08-opencodex-*.tgz
+        # Match any scope-prefixed opencodex tarball produced by `npm pack`. Upstream's package
+        # name is @bitkyc08/opencodex (tarball: bitkyc08-opencodex-*); forks may publish under a
+        # different scope (e.g. @zamelee/opencodex -> zamelee-opencodex-*). The glob stays in
+        # scope of npm pack output regardless of scope, so this works for both.
+        run: npm install -g ./*-opencodex-*.tgz
 
       - name: ocx help via bundled bun
         run: ocx help
