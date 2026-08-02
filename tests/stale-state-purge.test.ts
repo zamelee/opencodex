@@ -67,7 +67,11 @@ describe("snapshot-guarded stale-state purge", () => {
 
   test("gui opens the actual bind host and recover-history surfaces a locked DB", () => {
     const cliSource = readFileSync(join(import.meta.dir, "..", "src", "cli", "index.ts"), "utf8");
-    expect(cliSource).toContain("const guiHost = probeHostname(live?.hostname ?? config.hostname)");
+    // Source now derives `effectiveHost` from `live?.hostname ?? config.hostname` (with an
+    // OCX_HOSTNAME env override that may prefix the chain). probeHostname(effectiveHost)
+    // preserves the bind-host probing behavior.
+    expect(cliSource).toMatch(/effectiveHost[^=\n]*=[\s\S]{0,80}live\?\.hostname[^=\n]*\?\?[\s\S]{0,40}config\.hostname/);
+    expect(cliSource).toContain("const guiHost = probeHostname(effectiveHost)");
     const recoverFn = cliSource.slice(cliSource.indexOf("function handleRecoverHistory()"), cliSource.indexOf("switch (command)"));
     expect(recoverFn).toContain("if (r.failed)");
     expect(recoverFn).toContain("process.exit(1)");
