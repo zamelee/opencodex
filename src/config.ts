@@ -364,6 +364,10 @@ export function getDefaultConfig(): OcxConfig {
   // Fresh-install default: works out of the box with Codex's ChatGPT OAuth (no API key).
   // gpt-* requests forward the caller's incoming OAuth headers to the ChatGPT backend.
   // Adding extra providers (e.g. opencode-go) and switching defaultProvider is a user/runtime choice.
+  //
+  // preset: full-pass-through is the safe default — it never writes ~/.codex/config.toml,
+  // state_5.sqlite, or journal.json. Users who want launcher-mode (OpenCodeX boots Codex
+  // itself) can switch via ocx-start.py preset picker or by editing config.json after init.
   return {
     port: 10100,
     providers: {
@@ -377,6 +381,7 @@ export function getDefaultConfig(): OcxConfig {
     subagentModels: [...DEFAULT_SUBAGENT_MODELS],
     websockets: false,
     codexAutoStart: true,
+    preset: "full-pass-through",
   };
 }
 

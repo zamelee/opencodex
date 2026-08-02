@@ -4,14 +4,13 @@ import { getValidAccessToken } from "../oauth";
 import { getCredential } from "../oauth/store";
 import { antigravityUserAgent } from "../adapters/client-fingerprint";
 import { getProviderRegistryEntry } from "./registry";
-import { getMinimaxRuntime, isMinimaxRuntimeAvailable } from "./playwright-runtime";
 import type { OcxConfig, OcxProviderConfig } from "../types";
 
 const CACHE_TTL_MS = 5 * 60_000;
 const REQUEST_TIMEOUT_MS = 8_000;
 const REFRESH_SKEW_MS = 60_000;
-const MINIMAX_PROBE_TIMEOUT_MS = 25_000;
-const MINIMAX_LOGIN_WAIT_MS = 8_000;
+const MINIMAX_USAGE_TIMEOUT_MS = 15_000;
+const MINIMAX_USER_AGENT = "opencodex-quota-probe/0.1 (cli)";
 
 export interface ProviderQuotaWindow {
   label: string;
@@ -335,13 +334,16 @@ async function maybeFetchProviderQuota(
 }
 
 /**
- * Pull quota from the minimax.chat user panel. The site has no public REST API, so we
- * headless-load the SPA, fill the API key, click save, and read the rendered DOM.
+ * Pull quota from the minimax.chat reverse proxy via GET /v1/usage. The endpoint requires
+ * the same x-api-key header the user already configured in OpenCodeX for routing, so no
+ * extra credentials live in this codebase. Response is JSON shaped like:
+ *   { rolling_5h: { limit, used, window_start, window_end },
+ *     weekly:    { limit, used, resets_at, week_start },
+ *     plan_name, expires_at, allowed_models, daily_counts, best_practices }
  *
- * Cost:
- *   - First call (cold): ~1s (browser launch + SPA mount + wait for quota numbers).
- *   - Subsequent calls (warm): ~440ms (SPA reload + DOM scrape).
- *   - Cache TTL: 5 minutes (the global CACHE_TTL_MS already applied by fetchProviderQuotaReports).
+ * Cost: one HTTPS round-trip (~100-300ms). No browser, no Playwright, no SPA mount.
+ * Cache TTL: 5 minutes via the global CACHE_TTL_MS already applied by
+ * fetchProviderQuotaReports.
  *
  * Failures degrade silently: returns null so the caller simply omits this provider
  * from the report (matching the behavior of all other fetch* functions above).
@@ -349,90 +351,55 @@ async function maybeFetchProviderQuota(
 async function fetchMinimaxChatQuota(provider: string, prov: OcxProviderConfig): Promise<ProviderQuotaReport | null> {
   const apiKey = prov.apiKey;
   if (!apiKey) return null;
-  if (!(await isMinimaxRuntimeAvailable())) return null;
+  const baseUrl = (prov.baseUrl ?? "").replace(/\/+$/, "");
+  if (!baseUrl) return null;
 
-  const ctx = await getMinimaxRuntime();
-  const page = await ctx.newPage();
+  let payload: Record<string, unknown>;
   try {
-    const probe = await Promise.race([
-      scrapeMinimaxQuota(page, apiKey),
-      Bun.sleep(MINIMAX_PROBE_TIMEOUT_MS).then(() => null),
-    ]);
-    if (!probe) return null;
-    return report(provider, "minimax-chat:playwright-spa-scrape", probe);
-  } finally {
-    await page.close().catch(() => { /* best-effort */ });
+    const res = await fetch(`${baseUrl}/v1/usage`, {
+      headers: {
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "User-Agent": MINIMAX_USER_AGENT,
+        Accept: "application/json",
+      },
+      signal: AbortSignal.timeout(MINIMAX_USAGE_TIMEOUT_MS),
+    });
+    if (!res.ok) return null;
+    payload = await res.json() as Record<string, unknown>;
+  } catch {
+    return null;
   }
+
+  const quota = parseMinimaxUsage(payload);
+  if (!quota) return null;
+  return report(provider, "minimax-chat:/v1/usage", quota);
 }
 
-async function scrapeMinimaxQuota(page: import("playwright").Page, apiKey: string): Promise<ProviderQuota | null> {
-  await page.goto("https://minnimax.chat/", { waitUntil: "domcontentloaded", timeout: 15_000 });
+function parseMinimaxUsage(payload: Record<string, unknown>): ProviderQuota | null {
+  const rolling = payload["rolling_5h"];
+  const weekly = payload["weekly"];
+  const rollingRec = rolling && typeof rolling === "object" ? rolling as Record<string, unknown> : null;
+  const weeklyRec = weekly && typeof weekly === "object" ? weekly as Record<string, unknown> : null;
 
-  const passwordInput = page.locator('input[type="password"]');
-  await passwordInput.waitFor({ timeout: 10_000 });
+  const fiveHourPct = toWindowPercent(rollingRec);
+  const weeklyPct = toWindowPercent(weeklyRec);
+  const weeklyResetAt = normalizeResetAt(weeklyRec?.["resets_at"]);
 
-  // The SPA may auto-fill if the key is already in cookies — only type when empty to
-  // avoid triggering React's controlled-input reset which would clear the field.
-  const currentValue = await passwordInput.inputValue().catch(() => "");
-  if (currentValue !== apiKey) {
-    await passwordInput.fill(apiKey);
-  }
+  if (fiveHourPct === undefined && weeklyPct === undefined && weeklyResetAt === undefined) return null;
+  const quota: ProviderQuota = { updatedAt: Date.now() };
+  if (fiveHourPct !== undefined) quota.fiveHourPercent = fiveHourPct;
+  if (weeklyPct !== undefined) quota.weeklyPercent = weeklyPct;
+  if (weeklyResetAt !== undefined) quota.weeklyResetAt = weeklyResetAt;
+  return quota;
+}
 
-  const saveBtn = page.locator("button", { hasText: "保存" }).first();
-  await saveBtn.click();
-
-  // Wait for the 5h quota number "<used> / <total>" (e.g. "522 / 2,500") to render.
-  // After login the SPA fetches quota and re-renders the panel within a few seconds.
-  await page.waitForFunction(
-    () => /\d{1,3}(?:,\d{3})?\s*\/\s*\d{1,3}(?:,\d{3})?/.test(document.body.innerText || ""),
-    { timeout: 15_000 },
-  );
-  // Tiny settle so trailing percentages / reset timestamps finish rendering.
-  await Bun.sleep(200);
-
-  return await page.evaluate(() => {
-    const text = document.body.innerText || "";
-    const grabPct = (label: string): { pct?: number; resetAt?: number } | null => {
-      const re = new RegExp(label + "[\\s\\S]{0,120}?([\\d,]+)\\s*\\/\\s*([\\d,]+)", "i");
-      const m = text.match(re);
-      if (!m) return null;
-      const used = Number(m[1].replace(/,/g, ""));
-      const total = Number(m[2].replace(/,/g, ""));
-      if (!Number.isFinite(used) || !Number.isFinite(total) || total <= 0) return null;
-      return { pct: Math.max(0, Math.min(100, (used / total) * 100)) };
-    };
-
-    const fiveHour = grabPct("5 小时额度");
-    const weekly = grabPct("本周额度");
-
-    // Reset timestamps:
-    //   5h:  "最早释放 08/02 00:33"  -> next 5h boundary from oldest call
-    //   week: "每周一 00:00 重置 · 下次 08/03 00:00" -> next Monday 00:00
-    const weeklyResetMatch = text.match(/下次\s*(\d{1,2}\/\d{1,2}\s+\d{1,2}:\d{2})/);
-    let weeklyResetAt: number | undefined;
-    if (weeklyResetMatch) {
-      const m = weeklyResetMatch[1].match(/(\d{1,2})\/(\d{1,2})\s+(\d{1,2}):(\d{2})/);
-      if (m) {
-        const now = new Date();
-        const month = Number(m[1]);
-        const day = Number(m[2]);
-        const hour = Number(m[3]);
-        const minute = Number(m[4]);
-        // Assume current year; if month/day already passed, roll to next year.
-        const candidate = new Date(now.getFullYear(), month - 1, day, hour, minute);
-        if (candidate.getTime() < now.getTime()) candidate.setFullYear(now.getFullYear() + 1);
-        weeklyResetAt = candidate.getTime();
-      }
-    }
-
-    if (!fiveHour && !weekly) return null;
-    return {
-      ...(fiveHour?.pct !== undefined ? { fiveHourPercent: fiveHour.pct } : {}),
-      ...(weekly?.pct !== undefined ? { weeklyPercent: weekly.pct } : {}),
-      ...(weeklyResetAt !== undefined ? { weeklyResetAt } : {}),
-      updatedAt: Date.now(),
-    } as ProviderQuota;
-  });
+function toWindowPercent(rec: Record<string, unknown> | null): number | undefined {
+  if (!rec) return undefined;
+  const limit = toFiniteNumber(rec["limit"]);
+  const used = toFiniteNumber(rec["used"]);
+  if (limit === undefined || used === undefined || limit <= 0) return undefined;
+  return normalizePercent((used / limit) * 100);
 }
 
 export async function fetchProviderQuotaReports(config: OcxConfig, forceRefresh = false): Promise<ProviderQuotaResponse> {
