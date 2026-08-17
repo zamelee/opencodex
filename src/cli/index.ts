@@ -161,8 +161,17 @@ async function handleStart(options: { block?: boolean } = {}) {
   const guardian = startTokenGuardian();
   // Design B upgrade path: keep retrying the one-time opencodex→openai history migration in the
   // background — the first `ocx start` after an update usually races the Codex app's DB lock.
-  // Loopback-only (legacy mode still forward-tags) and respects syncResumeHistory opt-out.
-  const historyGuardian = !shouldInjectApiAuthHeader(config) && config.syncResumeHistory !== false
+  // Loopback-only (legacy mode still forward-tags) and respects both opt-outs:
+  //   - syncResumeHistory=false → user explicitly opted out of history remapping
+  //   - enableCodexLauncherMode=false → preset=full-pass-through contract: opencodex is a
+  //     pure HTTP proxy and must not touch ~/.codex/state_5.sqlite on any tick. Without this
+  //     gate the guardian wakes every 60s, opens sqlite readonly, and bumps the DB mtime even
+  //     when there is zero pending work — visible as "opencodex is still touching Codex files"
+  //     during normal idle. The inject guard (inject.ts:372) is already keyed on
+  //     enableCodexLauncherMode; this aligns the guardian with the same contract.
+  const historyGuardian = !shouldInjectApiAuthHeader(config)
+    && config.syncResumeHistory !== false
+    && config.enableCodexLauncherMode !== false
     ? startHistoryMigrationGuardian()
     : undefined;
 
