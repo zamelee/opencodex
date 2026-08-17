@@ -13,6 +13,12 @@ interface ModelRow {
   contextWindow?: number;
   contextCap?: number;
   contextCapped?: boolean;
+  /**
+   * Per-model override returned by /api/models. Mirrors config.modelContextOverrides:
+   * `number` = hard cap that wins over the provider cap, `false` = this model opts out of
+   * the provider cap entirely. `undefined` (omitted) = follow provider cap.
+   */
+  modelOverride?: number | false;
 }
 
 interface ProviderContextCapsResponse {
@@ -36,6 +42,91 @@ const PAGE = 60; // rows rendered per provider before a "show more" (keeps 1000s
 function fmtK(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return String(n);
   return n % 1000 === 0 ? `${n / 1000}k` : n.toLocaleString();
+}
+
+/**
+ * Compact per-model override Select. Options:
+ *   - "default" -> follow provider cap (key absent from modelContextOverrides).
+ *   - "opt-out" -> false (this model ignores the provider cap; upstream contextWindow wins).
+ *   - hard-coded preset numbers (CAP_OPTIONS) -> numeric override that beats the provider cap.
+ *   - "custom" -> inline input + apply button (re-uses the page-level customCap input style).
+ * The native ("openai") passthrough group never mounts this widget because it has no upstream cap.
+ */
+function PerModelCapSelect({
+  value,
+  providerCapValue,
+  providerCapOn,
+  disabled,
+  onPick,
+}: {
+  value: number | false | undefined;
+  providerCapValue: number;
+  providerCapOn: boolean;
+  disabled: boolean;
+  onPick: (v: number | false | null) => void;
+}) {
+  const t = useT();
+  const [customOpen, setCustomOpen] = useState(false);
+  const [customVal, setCustomVal] = useState("");
+  // When no override is set, the Select sits on "default" and shows the provider cap as a hint.
+  const isCustomNumeric = typeof value === "number" && !CAP_OPTIONS.includes(value);
+  const selectValue =
+    value === undefined ? "default"
+      : value === false ? "opt-out"
+      : isCustomNumeric ? "custom"
+      : String(value);
+  const handleChange = (raw: string) => {
+    if (raw === "custom") {
+      setCustomOpen(true);
+      setCustomVal(typeof value === "number" ? String(value) : "");
+      return;
+    }
+    setCustomOpen(false);
+    if (raw === "default") { onPick(null); return; }
+    if (raw === "opt-out") { onPick(false); return; }
+    const n = Number(raw);
+    if (Number.isFinite(n) && n > 0) onPick(Math.floor(n));
+  };
+  const submitCustom = () => {
+    const n = Number(customVal.replace(/[_,\s]/g, ""));
+    if (!Number.isFinite(n) || n <= 0) return;
+    setCustomOpen(false);
+    onPick(Math.floor(n));
+  };
+  return (
+    <>
+      <Select
+        value={selectValue}
+        options={[
+          { value: "default", label: providerCapOn
+              ? t("models.perModelCapDefault") + " (" + fmtK(providerCapValue) + ")"
+              : t("models.perModelCapDefault") },
+          ...CAP_OPTIONS.map(v => ({ value: String(v), label: fmtK(v) })),
+          ...(isCustomNumeric ? [{ value: "custom", label: fmtK(value as number) }] : []),
+          { value: "opt-out", label: t("models.perModelCapOptOut") },
+          { value: "custom", label: t("models.perModelCapCustom") },
+        ]}
+        onChange={handleChange}
+        disabled={disabled}
+        label={t("models.perModelCap")}
+      />
+      {customOpen && (
+        <>
+          <input
+            className="input"
+            style={{ width: 120 }}
+            inputMode="numeric"
+            placeholder={t("models.customPlaceholder")}
+            value={customVal}
+            onChange={e => setCustomVal(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter") submitCustom(); }}
+            disabled={disabled}
+          />
+          <button type="button" className="btn btn-ghost btn-sm" disabled={disabled} onClick={submitCustom}>{t("models.customApply")}</button>
+        </>
+      )}
+    </>
+  );
 }
 
 export default function Models({ apiBase }: { apiBase: string }) {
@@ -249,6 +340,35 @@ export default function Models({ apiBase }: { apiBase: string }) {
     [groups, contextCaps, contextCapValue],
   );
   const setAll = () => { void putCap({ setAll: !allCapped }); };
+
+  // Per-model override: PUT only the single changed entry. The backend re-reads
+  // config.modelContextOverrides and we re-fetch /api/models so the row reflects truth.
+  const applyModelOverride = async (namespaced: string, value: number | false | null) => {
+    setBusy(true);
+    busyRef.current = true;
+    setStatus("");
+    try {
+      const r = await fetch(`${apiBase}/api/provider-context-caps`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ modelOverrides: { [namespaced]: value } }),
+      });
+      if (r.ok) {
+        setOk(true);
+        setStatus(t("models.perModelCapApplied"));
+        await load();
+      } else {
+        setOk(false);
+        setStatus(t("models.capSaveFailed"));
+      }
+    } catch {
+      setOk(false);
+      setStatus(t("models.networkError"));
+    } finally {
+      setBusy(false);
+      busyRef.current = false;
+    }
+  };
 
   const setMultiAgentMode = async (mode: "v1" | "default" | "v2") => {
     if (!v2 || v2BusyRef.current) return;
@@ -504,6 +624,15 @@ export default function Models({ apiBase }: { apiBase: string }) {
                       <Switch on={!off} onClick={() => toggle(m.namespaced)} disabled={busy} label={m.id} />
                       <code className="mono" style={{ fontSize: 13, color: off ? "var(--faint)" : "var(--text)", textDecoration: off ? "line-through" : "none" }}>{modelLabel(m.id)}</code>
                       {m.contextCapped && <span className="muted mono" style={{ fontSize: 11, padding: "1px 6px", border: "1px solid var(--border)", borderRadius: 999 }}>{t("models.contextCappedValue", { value: fmtK(m.contextCap ?? contextCapValue) })}</span>}
+                      {!m.native && (
+                        <PerModelCapSelect
+                          value={m.modelOverride}
+                          providerCapValue={contextCapValue}
+                          providerCapOn={contextCaps[m.provider] === contextCapValue}
+                          disabled={busy}
+                          onPick={(v) => { void applyModelOverride(m.namespaced, v); }}
+                        />
+                      )}
                     </div>
                   );
                 })}

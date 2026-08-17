@@ -450,6 +450,11 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
   if (url.pathname === "/api/models" && req.method === "GET") {
     const models = await fetchAllModels(config);
     const disabled = new Set(config.disabledModels ?? []);
+    // Per-model context-cap override map (number = hard cap, false = opt-out of provider cap).
+    // Surfaced on each routed row so the GUI Models page can render a per-row Select without
+    // joining with /api/provider-context-caps. Native rows have no override (provider cap never
+    // applies to the openai passthrough).
+    const overrides = modelContextOverrides(config);
     // Native GPT passthrough rows lead (provider "openai", bare-slug namespaced ids): sourced
     // from the static supported set so a disabled model stays listed and re-enableable.
     const native = nativeModelRows(config).map(row => ({
@@ -463,11 +468,13 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
     return jsonResponse([...native, ...models.map(m => {
       const namespaced = `${m.provider}/${m.id}`;
       const contextCap = providerContextCap(config, m.provider);
+      const override = overrides[namespaced];
       return {
         ...m,
         namespaced,
         disabled: disabled.has(namespaced),
         ...(contextCap !== undefined ? { contextCap, contextCapped: m.contextCapped === true } : {}),
+        ...(override !== undefined ? { modelOverride: override } : {}),
       };
     })]);
   }
