@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { IconX, IconLock, IconKey, IconExternal } from "../icons";
+import { useT } from "../i18n";
 
 export interface ProviderConfig {
   adapter: string;
@@ -25,7 +26,11 @@ interface Preset {
 }
 
 const FALLBACK_PRESETS: Preset[] = [
-  { id: "custom", label: "Custom provider", adapter: "openai-chat", baseUrl: "", auth: "key" },
+  // Default the Custom form to the Anthropic adapter: the most common reverse-proxy use case
+  // is an Anthropic-protocol gateway (e.g. minimax.chat). The dropdown exposes every adapter,
+  // and each one has an inline "what is this for?" note, so this default just sets the first
+  // paint of the form. Users pick whichever fits their endpoint.
+  { id: "custom", label: "Custom provider", adapter: "anthropic", baseUrl: "", auth: "key" },
 ];
 
 interface FormState {
@@ -56,6 +61,10 @@ export default function AddProviderModal({
   const [presets, setPresets] = useState<Preset[]>(FALLBACK_PRESETS);
   const searchRef = useRef<HTMLInputElement>(null);
   const aliveRef = useRef(true);
+  // Track whether a mousedown started on the backdrop so we only close on a clean
+  // press-and-release on the backdrop, not a press inside the card that drags out.
+  const mouseDownOnOverlay = useRef(false);
+  const t = useT();
 
   useEffect(() => { searchRef.current?.focus(); }, []);
   useEffect(() => () => { aliveRef.current = false; }, []); // stop the OAuth poll if the modal unmounts
@@ -170,8 +179,25 @@ export default function AddProviderModal({
   const isLocal = form?.authMode === "local";
 
   return (
-    <div role="dialog" aria-modal="true" aria-label="Add provider" className="modal-overlay" onClick={onClose}>
+    <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Add provider"
+        className="modal-overlay"
+        onMouseDown={e => {
+          // Only treat backdrop clicks as "dismiss" if the press itself started on the backdrop.
+          // Without this guard, dragging a select/option or releasing a click outside the card
+          // (e.g. mouse pressed inside, released outside) would close the modal mid-action.
+          mouseDownOnOverlay.current = e.target === e.currentTarget;
+        }}
+        onClick={e => {
+          if (mouseDownOnOverlay.current && e.target === e.currentTarget) {
+            mouseDownOnOverlay.current = false;
+            onClose();
+          }
+        }}>
       <div className="modal-card" onClick={e => e.stopPropagation()}>
+        {mouseDownOnOverlay.current && null}
         <div className="modal-head">
           <h3>{preset ? `Add: ${preset.label}` : "Add provider"}</h3>
           <button className="btn btn-ghost btn-icon" aria-label="Close" onClick={onClose}><IconX /></button>
@@ -246,10 +272,35 @@ export default function AddProviderModal({
               </Field>
               {dup && <div style={{ fontSize: 12, color: "var(--amber)" }}>Provider "{form.name.trim()}" exists and will be overwritten.</div>}
               <Field label="Adapter">
-                <select className="input" value={form.adapter} onChange={e => setForm({ ...form, adapter: e.target.value })}>
-                  {["openai-responses", "openai-chat", "anthropic", "google", "azure-openai", "cursor"].map(a => <option key={a} value={a}>{a}</option>)}
-                </select>
-              </Field>
+                              <select className="input" value={form.adapter} onChange={e => setForm({ ...form, adapter: e.target.value })}>
+                                {["openai-responses", "openai-chat", "anthropic", "google", "azure-openai", "cursor"].map(a => <option key={a} value={a}>{a}</option>)}
+                              </select>
+                            </Field>
+                            <details className="setup-guide" style={{ marginTop: 4 }}>
+                              <summary style={{ fontSize: 12, color: "var(--muted)" }}>{t("prov.adapterHelpSummary")}</summary>
+                              <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 8 }}>
+                                {[
+                                  { id: "openai-responses", adapterKey: "openaiResponses" },
+                                  { id: "openai-chat", adapterKey: "openaiChat" },
+                                  { id: "anthropic", adapterKey: "anthropic" },
+                                  { id: "google", adapterKey: "google" },
+                                  { id: "azure-openai", adapterKey: "azureOpenAI" },
+                                  { id: "cursor", adapterKey: "cursor" },
+                                ].map(row => {
+                                  const active = form.adapter === row.id;
+                                  const adapterInfoKey = ("prov.adapterInfo." + row.adapterKey) as keyof typeof import("../i18n/en").en;
+                                  return (
+                                    <div key={row.id} style={{ padding: "6px 8px", borderRadius: 6, background: active ? "var(--accent-soft, rgba(99,102,241,0.10))" : "transparent", border: active ? "1px solid var(--accent-ring, rgba(99,102,241,0.35))" : "1px solid transparent" }}>
+                                      <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                                        <code className="chip" style={{ fontSize: 11 }}>{row.id}</code>
+                                        <span style={{ fontSize: 11, color: active ? "var(--accent-hover)" : "var(--muted)" }}>{active ? t("prov.adapterActive") : t("prov.adapterAvailable")}</span>
+                                      </div>
+                                      <div style={{ fontSize: 12, color: "var(--text)", marginTop: 4, lineHeight: 1.55 }}>{t(adapterInfoKey)}</div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </details>
               <Field label="Base URL">
                 <input className="input" value={form.baseUrl} onChange={e => setForm({ ...form, baseUrl: e.target.value })} placeholder="https://..." />
               </Field>
@@ -274,8 +325,20 @@ export default function AddProviderModal({
                 </>
               )}
               <Field label="Default model (optional)">
-                <input className="input" value={form.defaultModel} onChange={e => setForm({ ...form, defaultModel: e.target.value })} placeholder="e.g. gpt-5.5" />
-              </Field>
+                              <input className="input" value={form.defaultModel} onChange={e => setForm({ ...form, defaultModel: e.target.value })} placeholder="e.g. gpt-5.5" />
+                            </Field>
+                            {isCustom && (
+                              <div style={{ fontSize: 12, color: "var(--text)", background: "var(--accent-soft, rgba(99,102,241,0.08))", border: "1px solid var(--accent-ring, rgba(99,102,241,0.25))", borderRadius: "var(--radius-sm)", padding: "10px 12px", lineHeight: 1.65 }}>
+                                <div style={{ fontWeight: 600, marginBottom: 4 }}>{t("prov.customSpecialHeading")}</div>
+                                <div style={{ color: "var(--muted)" }}>{t("prov.customSpecialIntro")}</div>
+                                <ul style={{ margin: "6px 0 0", paddingLeft: 18, color: "var(--muted)" }}>
+                                  <li>{t("prov.customSpecialMinimaxChat")}</li>
+                                  <li>{t("prov.customSpecialAnthropicGateway")}</li>
+                                  <li>{t("prov.customSpecialOpenAIGateway")}</li>
+                                </ul>
+                                <div style={{ marginTop: 6, color: "var(--muted)" }}>{t("prov.customSpecialClosing")}</div>
+                              </div>
+                            )}
               {error && <div role="alert" style={{ fontSize: 13, color: "var(--red)" }}>{error}</div>}
               <div style={{ display: "flex", gap: 8, marginTop: 4, alignItems: "center" }}>
                 <button className="btn btn-primary" onClick={submit} disabled={saving}>{saving ? "Adding…" : "Add provider"}</button>
