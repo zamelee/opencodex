@@ -184,10 +184,11 @@ export const en = {
   "prov.adapterInfo.cursor": "Cursor static catalog seed (read-only). Live Cursor transport and native file/shell execution stay disabled unless enabled explicitly in config.",
   "prov.customSpecialHeading": "Reverse-proxy support",
   "prov.customSpecialIntro": "opencodex routes to several non-official endpoints through dedicated adapters. Match the wire protocol, not the brand name.",
-  "prov.customSpecialMinimaxChat": "minimax.chat is an Anthropic-protocol gateway. Use adapter anthropic, Base URL https://minnimax.chat/, paste your gw-* key. Models appear as minimax.chat/<model>.",
+  "prov.customSpecialMinimaxChat": "minimax.chat is an Anthropic-protocol gateway. Use adapter anthropic, Base URL https://minnimax.chat/, paste your gw-* key. Models appear as minimax.chat/<model>. If you have more than one gw-* key, add the same endpoint once and open the provider's API Keys tab to paste each key separately - the proxy rotates to the next key on 429 + Retry-After, cools the exhausted key for Retry-After seconds (capped at 10 minutes), and falls back automatically; cooldowns are in-memory and reset on proxy restart.",
   "prov.customSpecialAnthropicGateway": "Any Anthropic-protocol gateway (self-hosted Claude, private-cloud Claude, vendor reverse-proxy). Same shape: adapter anthropic, Base URL = your gateway's /v1, API key = your gateway token.",
   "prov.customSpecialOpenAIGateway": "OpenAI-protocol gateways that ship /v1/chat/completions but aren't OpenAI official. Use adapter openai-chat and the gateway's /v1 base URL.",
   "prov.customSpecialClosing": "Don't see your endpoint listed? Pick the adapter that matches the wire protocol it speaks, then point Base URL at the gateway.",
+  "prov.customSpecialKeyPoolClosing": "Single key is fine if you only have one. Add more only when you actually buy additional gw-* keys.",
 
   // models
   "models.subtitle": "Toggle which models Codex sees — native GPT passthrough and routed providers, grouped by provider (click a header to collapse). Disabled models are hidden from the catalog + model picker. Changes apply on the next Codex turn — opencodex invalidates Codex's 5-min model cache so no restart is needed.",

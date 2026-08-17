@@ -337,6 +337,7 @@ export default function AddProviderModal({
                                   <li>{t("prov.customSpecialOpenAIGateway")}</li>
                                 </ul>
                                 <div style={{ marginTop: 6, color: "var(--muted)" }}>{t("prov.customSpecialClosing")}</div>
+                                <div style={{ marginTop: 4, color: "var(--muted)" }}>{t("prov.customSpecialKeyPoolClosing")}</div>
                               </div>
                             )}
               {error && <div role="alert" style={{ fontSize: 13, color: "var(--red)" }}>{error}</div>}

@@ -184,10 +184,11 @@ export const zh: Record<TKey, string> = {
   "prov.adapterInfo.cursor": "Cursor 静态目录种子(只读)。除非在 config 中显式开启,Cursor 的实时传输以及原生 file/shell 执行保持禁用。",
   "prov.customSpecialHeading": "反代供应商支持",
   "prov.customSpecialIntro": "opencodex 通过专门的 adapter 转发到多个非官方接入端。按 wire 协议选,不要按品牌名选。",
-  "prov.customSpecialMinimaxChat": "minimax.chat 是 Anthropic 协议网关。adapter 选 anthropic,Base URL 填 https://minnimax.chat/,粘贴你的 gw-* key。模型显示为 minimax.chat/<model>。",
+  "prov.customSpecialMinimaxChat": "minimax.chat 是 Anthropic 协议网关。adapter 选 anthropic,Base URL 填 https://minnimax.chat/,粘贴你的 gw-* key。模型显示为 minimax.chat/<model>。如果你有多个 gw-* key,只需添加同一个接入端一次,然后到该接入端的 API Keys 标签里分别粘贴每个 - 代理在 429 + Retry-After 时自动轮换到下一个 key,把耗尽的 key 按 Retry-After 秒数冷却(最多 10 分钟),透明回退;冷却只存内存,代理重启即清零。",
   "prov.customSpecialAnthropicGateway": "任何 Anthropic 协议网关(自建 Claude、私有云 Claude、第三方反代)。同样:adapter anthropic,Base URL = 你的网关 /v1,API key = 网关 token。",
   "prov.customSpecialOpenAIGateway": "提供 /v1/chat/completions 但并非 OpenAI 官方的 OpenAI 协议网关。adapter 选 openai-chat,Base URL 填网关的 /v1。",
   "prov.customSpecialClosing": "没看到你的接入端?选它实际支持的 wire 协议对应的 adapter,再把 Base URL 指过去。",
+  "prov.customSpecialKeyPoolClosing": "只有一个 key 就够了。只有在你真的买了额外的 gw-* key 时再加。",
 
   // models
   "models.subtitle": "开关 Codex 可见的模型 — 原生 GPT passthrough 与已路由模型按提供方分组（点击标题可折叠）。已禁用的模型会从目录和模型选择器中隐藏。更改在下一个 Codex 回合生效 — opencodex 会使 Codex 的 5 分钟模型缓存失效，因此无需重启。",

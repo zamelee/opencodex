@@ -184,10 +184,11 @@ export const ko: Record<TKey, string> = {
   "prov.adapterInfo.cursor": "Cursor 정적 카탈로그 시드(read-only). 명시적으로 활성화하지 않는 한 Cursor 실시간 전송과 네이티브 파일/셸 실행은 비활성화 상태로 유지됩니다.",
   "prov.customSpecialHeading": "리버스 프록시 지원",
   "prov.customSpecialIntro": "opencodex는 전용 adapter를 통해 여러 비공식 엔드포인트로 라우팅합니다. 브랜드명이 아니라 wire 프로토콜로 선택하세요.",
-  "prov.customSpecialMinimaxChat": "minimax.chat은 Anthropic 프로토콜 게이트웨이입니다. adapter는 anthropic, Base URL은 https://minnimax.chat/, gw-* 키를 붙여넣으세요. 모델은 minimax.chat/<model>로 표시됩니다.",
+  "prov.customSpecialMinimaxChat": "minimax.chat은 Anthropic 프로토콜 게이트웨이입니다. adapter는 anthropic, Base URL은 https://minnimax.chat/, gw-* 키를 붙여넣으세요. 모델은 minimax.chat/<model>로 표시됩니다. gw-* 키가 여러 개 있다면 같은 엔드포인트를 한 번만 추가한 뒤, 해당 provider의 API Keys 탭에서 각 키를 따로 붙여넣으세요 - 프록시가 429 + Retry-After에서 다음 키로 회전하고 소진된 키를 Retry-After 만큼(최대 10분) 쿨다운한 뒤 자동으로 폴백합니다. 쿨다운은 메모리에만 저장되며 프록시 재시작 시 초기화됩니다.",
   "prov.customSpecialAnthropicGateway": "모든 Anthropic 프로토콜 게이트웨이(자체 호스팅 Claude, 프라이빗 클라우드 Claude, 공급자 리버스 프록시). 동일한 형태: adapter anthropic, Base URL = 게이트웨이의 /v1, API key = 게이트웨이 토큰.",
   "prov.customSpecialOpenAIGateway": "/v1/chat/completions을 제공하지만 OpenAI 공식이 아닌 OpenAI 프로토콜 게이트웨이. adapter openai-chat과 게이트웨이의 /v1 Base URL을 사용하세요.",
   "prov.customSpecialClosing": "엔드포인트가 목록에 없나요? wire 프로토콜에 맞는 adapter를 선택한 다음 Base URL을 가리키세요.",
+  "prov.customSpecialKeyPoolClosing": "키가 하나뿐이라면 그걸로도 됩니다. 실제로 gw-* 키를 추가로 구매했을 때만 더 추가하세요.",
 
   // models
   "models.subtitle": "Codex가 보는 모델을 켜고 끕니다 — 네이티브 GPT passthrough와 라우팅된 모델을 프로바이더별로 묶어 보여줍니다(헤더를 클릭하면 접힘). 비활성화된 모델은 카탈로그와 모델 선택기에서 숨겨집니다. 변경 사항은 다음 Codex 턴에 적용됩니다 — opencodex가 Codex의 5분 모델 캐시를 무효화하므로 재시작이 필요 없습니다.",
