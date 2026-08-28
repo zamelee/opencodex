@@ -41,6 +41,12 @@ import select
 import shutil
 import socket
 import subprocess
+
+try:
+    import ctypes  # AVX detection; Windows-only
+except ImportError:
+    ctypes = None  # type: ignore[assignment]
+
 import sys
 import time
 import urllib.request
@@ -49,6 +55,144 @@ from pathlib import Path
 ROOT   = Path(__file__).resolve().parent
 CONFIG = Path.home() / ".opencodex" / "config.json"
 BUN    = "bun"
+
+# --- AVX detection + node fallback (Patch 1) -------------------------------------
+# Bun v1.3.x on Windows without AVX runs the no_avx compat path, which can crash after
+# sustained socket pool use (~3-4h on Windows 10 19H1 + older CPU). Detect AVX once at
+# startup and route to Node (V8) as the runtime instead. Detection must NEVER block startup.
+PF_AVX_INSTRUCTIONS_AVAILABLE = 39
+PF_AVX2_INSTRUCTIONS_AVAILABLE = 40
+PF_XSAVE_ENABLED = 38
+NODE_BIN = "node"
+
+
+def _avx_detect_cpu_features():
+    feats = {"avx": True, "avx2": True, "xsave": True, "source": "default-true"}
+    if sys.platform == "win32" and ctypes is not None:
+        try:
+            k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            present = k32.IsProcessorFeaturePresent
+            try:
+                present.argtypes = [ctypes.c_uint]
+                present.restype = ctypes.c_bool
+            except (AttributeError, TypeError):
+                pass
+            feats["avx"] = bool(present(PF_AVX_INSTRUCTIONS_AVAILABLE))
+            feats["avx2"] = bool(present(PF_AVX2_INSTRUCTIONS_AVAILABLE))
+            feats["xsave"] = bool(present(PF_XSAVE_ENABLED))
+            feats["source"] = "kernel32!IsProcessorFeaturePresent"
+        except OSError as e:
+            feats["source"] = f"kernel32-error:{e.winerror if e.winerror else e}"
+        except Exception as e:
+            feats["source"] = f"kernel32-exception:{type(e).__name__}"
+    elif sys.platform.startswith("linux"):
+        try:
+            txt = Path("/proc/cpuinfo").read_text(encoding="utf-8", errors="ignore")
+            for line in txt.splitlines():
+                if line.lower().startswith("flags"):
+                    flags = line.split(":", 1)[1].split()
+                    feats["avx"] = "avx" in flags
+                    feats["avx2"] = "avx2" in flags
+                    feats["source"] = "linux-/proc/cpuinfo"
+                    break
+        except OSError as e:
+            feats["source"] = f"cpuinfo-error:{e}"
+    elif sys.platform == "darwin":
+        try:
+            out = subprocess.run(["sysctl", "-n", "machdep.cpu.features"],
+                                 capture_output=True, text=True, timeout=2).stdout.strip().lower()
+            feats["avx"] = "avx1.0" in out or "avx" in out
+            feats["avx2"] = "avx2" in out
+            feats["source"] = "darwin-sysctl"
+        except (OSError, subprocess.TimeoutExpired) as e:
+            feats["source"] = f"sysctl-error:{e}"
+    return feats
+
+
+_NODE_CACHE = None
+
+
+def _avx_find_node_exe():
+    global _NODE_CACHE
+    if _NODE_CACHE is not None:
+        return _NODE_CACHE
+    p = shutil.which(NODE_BIN)
+    if p:
+        _NODE_CACHE = str(Path(p).resolve())
+        return _NODE_CACHE
+    if sys.platform == "win32":
+        for raw in (r"C:\Program Files\nodejs\node.exe",
+                    r"C:\Program Files (x86)\nodejs\node.exe",
+                    r"D:\nodejs\node.exe"):
+            try:
+                c = Path(raw)
+                if c.exists() and c.is_file():
+                    _NODE_CACHE = str(c.resolve())
+                    return _NODE_CACHE
+            except OSError:
+                continue
+    return None
+
+
+def decide_runtime(force=None):
+    """Pick runtime command prefix. force: 'bun'|'node'|None.
+    Returns dict with runtime/reason/node_path/avx/node_cmd."""
+    feats = _avx_detect_cpu_features()
+    node_path = _avx_find_node_exe()
+    has_node = node_path is not None
+    info = {
+        "avx": bool(feats["avx"]),
+        "source": feats.get("source", ""),
+        "node_path": node_path,
+        "has_node": has_node,
+        "runtime": "bun",
+        "reason": "default",
+        "node_cmd": None,
+    }
+    if force == "bun":
+        info["reason"] = "forced"
+        return info
+    if force == "node":
+        if not has_node:
+            info["runtime"] = "bun"
+            info["reason"] = "node-forced-but-missing"
+        else:
+            info["runtime"] = "node"
+            info["reason"] = "forced"
+            info["node_cmd"] = [node_path, "run"]
+        return info
+    if not feats["avx"]:
+        if has_node:
+            info["runtime"] = "node"
+            info["reason"] = "no-avx-fallback"
+            info["node_cmd"] = [node_path, "run"]
+        else:
+            info["runtime"] = "bun"
+            info["reason"] = "no-avx-no-node-fallback"
+    return info
+
+
+def log_runtime_decision(decision):
+    avx = decision["avx"]
+    rt = decision["runtime"]
+    reason = decision["reason"]
+    RED = "\x1b[31m"
+    YELLOW = "\x1b[33m"
+    DIM = "\x1b[2m"
+    RESET = "\x1b[0m"
+    if not avx:
+        if rt == "node":
+            tag = f"{RED}NO_AVX{RESET}"
+            print(f"[avx] CPU feature detection: {tag}  -> falling back to node ({decision['node_path']})", file=sys.stderr)
+        else:
+            tag = f"{RED}NO_AVX{RESET}"
+            print(f"[avx] {tag}  WARNING: CPU lacks AVX and node is not on PATH; running bun anyway. Long uptimes (>3h) on Windows may crash.", file=sys.stderr)
+    else:
+        tag = f"{DIM}avx ok{RESET}"
+        print(f"[avx] CPU feature detection: {tag} ({decision.get('source','')})", file=sys.stderr)
+
+
+# --- end Patch 1 ---
 
 
 # Windows 控制台默认 GBK，会把脚本里的中文输出打乱。强制 stdout 走 UTF-8。
@@ -526,6 +670,12 @@ def warn_if_proxy_mode(cfg: dict) -> None:
 
 
 def run_cli(*args: str, env_overrides: dict | None = None, no_bootstrap: bool = False) -> int:
+    # Patch 1: AVX-driven runtime choice. Logs the decision every run so persistent
+    # no_avx shows up in operator stderr; no extra UI.
+    runtime_decision = decide_runtime()
+    log_runtime_decision(runtime_decision)
+    ocx_env_marker = runtime_decision.get("runtime", "bun")
+
     bun_exe = find_bun_exe()
     if bun_exe is None:
         if not try_bootstrap_bun(non_interactive=no_bootstrap):
@@ -540,7 +690,12 @@ def run_cli(*args: str, env_overrides: dict | None = None, no_bootstrap: bool = 
     if not ensure_gui_built():
         print("[err] GUI build 不上，请先手动跳 `bun run build:gui` 再重试。", file=sys.stderr)
         return 127
-    cmd = [bun_exe, "run", "src/cli/index.ts", *args]
+    # Pick runtime command. Node fallback only fires when bun's no_avx compat path would
+    # otherwise be used AND node is on PATH. Default = bun.
+    if ocx_env_marker == "node" and runtime_decision.get("node_cmd"):
+        cmd = list(runtime_decision["node_cmd"]) + ["src/cli/index.ts", *args]
+    else:
+        cmd = [bun_exe, "run", "src/cli/index.ts", *args]
     print(f"[run] {' '.join(cmd)}", file=sys.stderr)
     env = None
     if env_overrides:
@@ -614,8 +769,15 @@ def run_background(port: int, cli_overrides: dict | None = None, no_bootstrap: b
             if bun_exe is None:
                 print("[err] bun 装后 PATH 仍找不到。请重新打开 PowerShell。", file=sys.stderr)
                 return 127
+        # Patch 1: AVX-driven runtime choice (mirror run_cli)
+        runtime_decision = decide_runtime()
+        log_runtime_decision(runtime_decision)
+        if runtime_decision.get("runtime") == "node" and runtime_decision.get("node_cmd"):
+            spawn_cmd = list(runtime_decision["node_cmd"]) + ["src/cli/index.ts", "start", "--port", str(effective_port)]
+        else:
+            spawn_cmd = [bun_exe, "run", "src/cli/index.ts", "start", "--port", str(effective_port)]
         proc = subprocess.Popen(
-            [bun_exe, "run", "src/cli/index.ts", "start", "--port", str(effective_port)],
+            spawn_cmd,
             cwd=str(ROOT),
             stdout=out_fp,
             stderr=err_fp,
