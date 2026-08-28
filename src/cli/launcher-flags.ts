@@ -151,9 +151,11 @@ export function resolveLauncherFlags(flags: LauncherFlags, config: OcxConfig): L
   }
 
   // Step 2: explicit per-flag tri-bools override whatever preset set (or apply if no preset).
-  if (flags.launcherMode !== "auto") overlay.enableCodexLauncherMode = flags.launcherMode;
-  if (flags.syncRoutedModels !== "auto") overlay.syncRoutedModels = flags.syncRoutedModels;
-  if (flags.syncNativeOpenaiModels !== "auto") overlay.syncNativeOpenaiModels = flags.syncNativeOpenaiModels;
+  // Patch 2 bugfix: undefined !== "auto" is true, which would clobber preset-set values with undefined.
+  // Skip when the caller did not set the field at all.
+  if (flags.launcherMode !== "auto" && flags.launcherMode !== undefined) overlay.enableCodexLauncherMode = flags.launcherMode;
+  if (flags.syncRoutedModels !== "auto" && flags.syncRoutedModels !== undefined) overlay.syncRoutedModels = flags.syncRoutedModels;
+  if (flags.syncNativeOpenaiModels !== "auto" && flags.syncNativeOpenaiModels !== undefined) overlay.syncNativeOpenaiModels = flags.syncNativeOpenaiModels;
 
   // Step 3: default unset fields to config values (so we never clobber existing JSON with undefined).
   if (overlay.enableCodexLauncherMode === undefined) overlay.enableCodexLauncherMode = config.enableCodexLauncherMode;
@@ -182,4 +184,47 @@ export function formatLauncherFlags(flags: LauncherFlags): string {
   if (flags.syncRoutedModels !== "auto") parts.push(`sync-routed-models=${flags.syncRoutedModels}`);
   if (flags.syncNativeOpenaiModels !== "auto") parts.push(`sync-native-openai-models=${flags.syncNativeOpenaiModels}`);
   return parts.length > 0 ? parts.join(",") : "auto";
+}
+
+// --- Patch 2: Codex-write warning surface ---------------------------------------
+// The launcher-mode flag, when enabled, writes ~/.codex/config.toml,
+// ~/.codex/state_5.sqlite (model_provider tag), and rollout-*.jsonl files.
+// Anything that triggers that MUST emit a red stderr banner so the operator
+// is not silently surprised when Codex files move.
+
+/** True iff applying this overlay will cause opencodex to write Codex files. */
+export function wouldWriteCodex(overlay: LauncherModeOverlay | undefined | null): boolean {
+  if (!overlay) return false;
+  // enableCodexLauncherMode is the master switch; the sync flags are no-op
+  // when it is off, so checking the master is enough.
+  return overlay.enableCodexLauncherMode === true;
+}
+
+/** Format a red stderr banner announcing that Codex files will be modified. */
+export function formatCodexWriteBanner(overlay: LauncherModeOverlay | undefined | null): string {
+  if (!wouldWriteCodex(overlay)) return "";
+  // ANSI red. Kept portable: most modern Windows terminals + PowerShell 7+ honor it.
+  const RED = "\x1b[31m";
+  const YELLOW = "\x1b[33m";
+  const RESET = "\x1b[0m";
+  const lines = [
+    `${RED}[codex-write] WARNING${RESET}: launcher-mode is ON. opencodex will write to your Codex client:`,
+    `  - ~/.codex/config.toml            ([model_providers.opencodex] block)`,
+    `  - ~/.codex/state_5.sqlite         (model_provider tag)`,
+    `  - ~/.codex/sessions/*/rollout-*.jsonl  (provider field on new turns)`,
+    `${YELLOW}[codex-write] Tip${RESET}: pick preset=proxy-only or full-pass-through (or set --preset auto + --launcher-mode false) to make opencodex a pure HTTP relay.`,
+  ];
+  return lines.join("\n");
+}
+
+/** Convenience: print the banner if writing Codex files. Returns whether it printed.
+ * Test-only `stream` kwarg lets unit tests capture without touching the real stderr. */
+export function logCodexWriteBannerIfNeeded(
+  overlay: LauncherModeOverlay | undefined | null,
+  stream: { write: (s: string) => unknown } | NodeJS.WriteStream = process.stderr,
+): boolean {
+  const banner = formatCodexWriteBanner(overlay);
+  if (!banner) return false;
+  stream.write(banner + "\n");
+  return true;
 }

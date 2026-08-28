@@ -32,7 +32,7 @@ import { startHistoryMigrationGuardian } from "../codex/history-migration-guardi
 import { maybeShowStarPrompt } from "./star-prompt";
 import { maybeShowUpdatePrompt } from "../update/notify";
 import { syncModelsToCodex } from "../codex/sync";
-import { applyLauncherFlagsToConfig, formatLauncherFlags, getLauncherFlagsFromArgv, getLauncherFlagsFromEnv, mergeLauncherFlags } from "./launcher-flags";
+import { applyLauncherFlagsToConfig, formatLauncherFlags, getLauncherFlagsFromArgv, getLauncherFlagsFromEnv, logCodexWriteBannerIfNeeded, mergeLauncherFlags, resolveLauncherFlags } from "./launcher-flags";
 import { normalizeUpdateChannel, runGuiUpdateWorker } from "../update/job";
 
 const args = process.argv.slice(2);
@@ -47,6 +47,10 @@ const command = args[0];
       merged.syncNativeOpenaiModels !== "auto" || merged.preset !== "auto") {
     console.log(`[ocx] launcher-mode flags active: ${formatLauncherFlags(merged)}`);
   }
+  // Patch 2: emit red stderr banner when launcher-mode will actually write Codex files.
+  // Banner is gated by wouldWriteCodex() so it stays silent in the default safe config.
+  const _codexOverlay = resolveLauncherFlags(merged, loadConfig());
+  logCodexWriteBannerIfNeeded(_codexOverlay);
 }
 
 

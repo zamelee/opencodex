@@ -892,6 +892,11 @@ export default function Launcher() {
 
 
   const usingFlags = cfg.preset === null;
+  // Patch 2: render red warning whenever any preset/flag combo would write to ~/.codex.
+  // preset=launcher turns it on unconditionally; preset=auto + enableCodexLauncherMode=true too.
+  const codexWriting =
+    cfg.preset === "launcher" ||
+    (cfg.preset === null && cfg.enableCodexLauncherMode === true);
 
 
   const presetExplainKey: TKey =
@@ -1368,6 +1373,27 @@ export default function Launcher() {
         ))}
 
 
+        {codexWriting && (
+          <div role="alert" style={{
+            marginTop: 10,
+            padding: "10px 12px",
+            borderRadius: "var(--radius-sm)",
+            background: "var(--red-soft)",
+            border: "1px solid color-mix(in srgb, var(--red) 35%, transparent)",
+            color: "var(--red)",
+            fontSize: 13,
+            lineHeight: 1.55,
+          }}>
+            <div style={{ fontWeight: 600, marginBottom: 4 }}>
+              {"⚠️"} {t("settings.codexWriteWarning")}
+            </div>
+            <div style={{ color: "var(--text)" }}>{t("settings.codexWriteDetail")}</div>
+            <div style={{ marginTop: 4, fontSize: 12, color: "var(--muted)" }}>
+              <code style={{ color: "var(--red)" }}>{t("settings.codexWriteFiles")}</code>
+            </div>
+          </div>
+        )}
+
         <div className="settings-preset-explain">
 
 
@@ -1396,6 +1422,10 @@ export default function Launcher() {
 
 
         {FLAG_ROWS.map(({ key, labelKey, onKey, offKey }) => {
+          {key === "enableCodexLauncherMode" && cfg.enableCodexLauncherMode === true && cfg.preset === null && (
+            <span style={{ color: "var(--red)", fontSize: 11, marginLeft: 6 }} title={t("settings.codexWriteWarning")}>{"⚠️"}</span>
+          )}
+
 
 
           const v = cfg[key as FlagKey];
