@@ -123,6 +123,7 @@ import { disableResponsesRequestTimeout, handleResponses, handleResponsesCompact
 export { disableResponsesRequestTimeout, linkAbortSignal } from "./responses";
 import { handleImages } from "./images";
 import { handleSearch } from "./search";
+import { handleChatCompletions } from "./chat-completions";
 import { fetchAllModels, handleManagementAPI, VERSION } from "./management-api";
 
 const MAX_WS_FRAME_BYTES = 50 * 1024 * 1024;
@@ -367,7 +368,14 @@ export function startServer(port?: number) {
         return withCors(response, req, config);
       }
 
-      if (url.pathname === "/v1/responses" && req.method === "POST") {
+      // Patch 3a: Chat Completions API endpoint. Translates the Chat Completions request
+      // body into a Responses request, runs it through handleResponses, then re-wraps
+      // the SSE/JSON body into Chat Completions shape. Default route = openai-chat.
+      if (url.pathname === "/v1/chat/completions" && req.method === "POST") {
+        return withCors(await handleChatCompletions(req, config), req, config);
+      }
+
+            if (url.pathname === "/v1/responses" && req.method === "POST") {
         disableResponsesRequestTimeout(req, requestServer);
         if (isDraining()) {
           return new Response("Service shutting down", { status: 503, headers: { ...corsHeaders(req, config), "Retry-After": "5" } });
