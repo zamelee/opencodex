@@ -124,6 +124,7 @@ export { disableResponsesRequestTimeout, linkAbortSignal } from "./responses";
 import { handleImages } from "./images";
 import { handleSearch } from "./search";
 import { handleChatCompletions } from "./chat-completions";
+import { handleAnthropicMessages } from "./anthropic-messages";
 import { fetchAllModels, handleManagementAPI, VERSION } from "./management-api";
 
 const MAX_WS_FRAME_BYTES = 50 * 1024 * 1024;
@@ -373,6 +374,13 @@ export function startServer(port?: number) {
       // the SSE/JSON body into Chat Completions shape. Default route = openai-chat.
       if (url.pathname === "/v1/chat/completions" && req.method === "POST") {
         return withCors(await handleChatCompletions(req, config), req, config);
+      }
+
+            // Patch 3b: Anthropic Messages API endpoint. Lets Claude CLI / Anthropic SDK talk
+      // to opencodex using their native wire protocol — useful for Claude Code, claude-cli,
+      // or any tool that speaks /v1/messages directly.
+      if (url.pathname === "/v1/messages" && req.method === "POST") {
+        return withCors(await handleAnthropicMessages(req, config), req, config);
       }
 
             if (url.pathname === "/v1/responses" && req.method === "POST") {
