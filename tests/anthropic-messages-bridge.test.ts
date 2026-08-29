@@ -260,8 +260,12 @@ describe("Patch 3b: parseAnthropicStreamChunk", () => {
     expect(out[0]).toContain('"text":"Hello"');
   });
 
-  test("response.output_item.done (text) -> content_block_stop", () => {
+  test("response.output_item.done (text) -> content_block_stop when blockStarted", () => {
+    // When the bridge has emitted a content_block_start (because output_item.added
+    // preceded the done), the closing done emits the matching stop. The bridge only
+    // emits stop when blockStarted is true; without a preceding add, no stop leaks.
     const out = parseAnthropicStreamChunk([
+      { type: "response.output_item.added", output_index: 0, item: { type: "message", id: "msg_x" } },
       { type: "response.output_item.done", output_index: 0, item: { type: "message", id: "msg_x" } },
     ], "msg_3");
     const stop = out.find(s => s.includes('event: content_block_stop'));
@@ -325,5 +329,52 @@ describe("Patch 3b: parseAnthropicStreamChunk", () => {
       { type: "response.refusal.delta", delta: "..." },
     ], "msg_6");
     expect(out).toHaveLength(0);
+  });
+});
+
+
+describe("Patch 3d follow-up: response.incomplete and .arguments.done", () => {
+  test("response.incomplete closes block + emits message_delta + message_stop", () => {
+    const events = [
+      { type: "response.created", response: { id: "resp_i", model: "x" } },
+      { type: "response.output_item.added", output_index: 0, item: { type: "function_call", id: "call_1", call_id: "call_1", name: "shell_command", arguments: "" } },
+      { type: "response.function_call_arguments.delta", item_id: "call_1", output_index: 0, delta: "{\"command\":\"echo\"}" },
+      { type: "response.incomplete", response: { id: "resp_i", incomplete_details: { reason: "max_output_tokens" }, usage: { input_tokens: 5, output_tokens: 3 } } },
+    ];
+    const out = parseAnthropicStreamChunk(events, "msg-i1", "x");
+    const types = out.map(s => {
+      const m = s.match(/event: ([^\n]+)/);
+      return m ? m[1] : null;
+    }).filter(Boolean);
+    expect(types).toEqual([
+      "message_start",
+      "content_block_start",
+      "content_block_delta",
+      "content_block_stop",
+      "message_delta",
+      "message_stop",
+    ]);
+    // The chunk existence is verified by the event-order assertion above.
+    // stop_reason mapping is exercised by the live e2e test.
+  });
+
+  test("response.function_call_arguments.done closes tool_use content_block", () => {
+    const events = [
+      { type: "response.created", response: { id: "resp_d", model: "x" } },
+      { type: "response.output_item.added", output_index: 0, item: { type: "function_call", id: "call_1", call_id: "call_1", name: "shell_command", arguments: "" } },
+      { type: "response.function_call_arguments.delta", item_id: "call_1", output_index: 0, delta: "{\"command\":\"echo\"}" },
+      { type: "response.function_call_arguments.done", item_id: "call_1", output_index: 0 },
+      { type: "response.output_item.done", output_index: 0, item: { type: "function_call", id: "call_1", call_id: "call_1", name: "shell_command", arguments: "{\"command\":\"echo\"}" } },
+      { type: "response.completed", response: { id: "resp_d", usage: { input_tokens: 5, output_tokens: 3 } } },
+    ];
+    const out = parseAnthropicStreamChunk(events, "msg-d1");
+    const types = out.map(s => {
+      const m = s.match(/event: ([^\n]+)/);
+      return m ? m[1] : null;
+    }).filter(Boolean);
+    // The .done should emit content_block_stop; subsequent output_item.done should not
+    // emit a duplicate stop (blockStarted is reset).
+    expect(types.filter(t => t === "content_block_stop")).toHaveLength(1);
+    expect(types).toContain("message_stop");
   });
 });

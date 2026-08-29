@@ -416,6 +416,18 @@ export function parseAnthropicStreamChunk(
         }
         break;
       }
+      case "response.function_call_arguments.done":
+        // Arguments are fully streamed. Close the open tool_use block.
+        if (state.toolUseBlockEmitted || state.blockStarted) {
+          out.push(sseEvent("content_block_stop", {
+            type: "content_block_stop",
+            index: state.blockIndex,
+          }));
+          state.blockIndex += 1;
+          state.blockStarted = false;
+          state.toolUseBlockEmitted = false;
+        }
+        break;
       case "response.content_part.added":
         // text part preamble already emitted from response.output_item.added above.
         break;
@@ -424,26 +436,56 @@ export function parseAnthropicStreamChunk(
         break;
       case "response.output_item.done": {
         const item = ev.item ?? {};
-        // Close the open content block (text or tool_use).
-        out.push(sseEvent("content_block_stop", {
-          type: "content_block_stop",
-          index: state.blockIndex,
-        }));
+        // Only close the block if one is currently open. If response.function_call_arguments.done
+        // already closed a tool_use block, blockStarted was reset and this case should
+        // advance the blockIndex without emitting a redundant content_block_stop.
+        if (state.blockStarted || state.toolUseBlockEmitted) {
+          out.push(sseEvent("content_block_stop", {
+            type: "content_block_stop",
+            index: state.blockIndex,
+          }));
+          state.blockIndex += 1;
+        }
         if (item.type === "function_call") {
           state.toolUseBlockEmitted = false;
         }
-        state.blockIndex += 1;
         state.blockStarted = false;
         break;
       }
-      case "response.completed": {
+      case "response.completed":
+      case "response.incomplete": {
+        const isComplete = ev.type === "response.completed";
         const resp = ev.response ?? {};
         const usage = resp.usage as Record<string, number> | undefined;
         const inputTokens = usage?.input_tokens ?? 0;
         const outputTokens = usage?.output_tokens ?? 0;
+        // For incomplete: try to honor upstream reason, else fall back to max_tokens
+        // (which signals to the client that the model stopped at its limit).
+        let stopReason = "end_turn";
+        if (!isComplete) {
+          const details = (resp as { incomplete_details?: { reason?: string } }).incomplete_details;
+          const upstreamReason = details?.reason;
+          if (upstreamReason === "max_output_tokens" || upstreamReason === "length") {
+            stopReason = "max_tokens";
+          } else if (upstreamReason === "content_filter") {
+            stopReason = "max_tokens";
+          } else {
+            stopReason = "max_tokens";
+          }
+        }
+        // Close any still-open content block so the client gets a complete frame.
+        if (state.blockStarted || state.toolUseBlockEmitted) {
+          out.push(sseEvent("content_block_stop", {
+            type: "content_block_stop",
+            index: state.blockIndex,
+          }));
+          state.blockIndex += 1;
+          state.blockStarted = false;
+          state.toolUseBlockEmitted = false;
+        }
         out.push(sseEvent("message_delta", {
           type: "message_delta",
-          delta: { stop_reason: "end_turn", stop_sequence: null },
+          delta: { stop_reason: stopReason, stop_sequence: null },
           usage: { input_tokens: inputTokens, output_tokens: outputTokens },
         }));
         out.push(sseEvent("message_stop", { type: "message_stop" }));
