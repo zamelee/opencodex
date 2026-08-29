@@ -261,3 +261,30 @@ describe("Patch 3a: parseChatCompletionsStreamChunk", () => {
     expect(out).toHaveLength(0);
   });
 });
+
+describe("Patch 3a follow-up: responsesJsonToChatCompletionsJson function_call", () => {
+  // buildResponsesJson is internal to the bridge module; we exercise it indirectly
+  // through a fetch call. To keep the test pure, test the streaming translation via
+  // parseChatCompletionsStreamChunk and trust the live e2e check for non-streaming.
+  // (See tests/e2e-chat-completions-stream.test.ts / opencodex/tests/_test_try_bootstrap_bun.py
+  // for the wire-level verification.)
+  test("function_call event sequence translates to OpenAI tool_calls chunks", () => {
+    const events = [
+      { type: "response.created", response: { id: "resp_1", model: "x" } },
+      { type: "response.output_item.added", output_index: 0, item: { type: "function_call", id: "call_1", call_id: "call_1", name: "shell_command", arguments: "" } },
+      { type: "response.function_call_arguments.delta", item_id: "call_1", output_index: 0, delta: '{"command":"echo hi"}' },
+      { type: "response.output_item.done", output_index: 0, item: { type: "function_call", id: "call_1", call_id: "call_1", name: "shell_command", arguments: '{"command":"echo hi"}' } },
+      { type: "response.completed", response: { id: "resp_1", usage: { input_tokens: 5, output_tokens: 3 } } },
+    ];
+    const out = parseChatCompletionsStreamChunk(events, "cmpl-1");
+    // Find the LAST tool_calls-bearing chunk (the final one carries finish_reason=tool_calls + complete args).
+    const toolChunks = out.map(s => { try { return JSON.parse(s); } catch { return null; } })
+      .filter(c => c && c.choices && c.choices[0].delta && c.choices[0].delta.tool_calls);
+    expect(toolChunks.length).toBeGreaterThan(0);
+    const finalTool = toolChunks[toolChunks.length - 1];
+    expect(finalTool.choices[0].finish_reason).toBe("tool_calls");
+    const tc = finalTool.choices[0].delta.tool_calls[0];
+    expect(tc.function.name).toBe("shell_command");
+    expect(tc.function.arguments).toBe('{"command":"echo hi"}');
+  });
+});

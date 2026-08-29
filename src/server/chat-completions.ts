@@ -151,18 +151,40 @@ function responsesJsonToChatCompletionsJson(
     };
   }
   const output = (r.output as Array<Record<string, unknown>>) ?? [];
-  const msgItem = output.find(item => item.type === "message");
-  if (msgItem) {
-    const content = msgItem.content as Array<Record<string, unknown>> | undefined;
-    const text = content?.map(c => (c.type === "output_text" ? (c.text as string) : "")).join("") ?? "";
-    out.choices = [{
-      index: 0,
-      message: { role: "assistant", content: text },
-      finish_reason: "stop",
-    }];
+  // OpenAI Chat Completions tool_calls go in choices[0].message.tool_calls; finish_reason
+  // becomes "tool_calls" when a function_call item is present. Walk every output item and
+  // emit one OpenAI tool_call entry per Responses function_call item.
+  const toolCalls: Array<Record<string, unknown>> = [];
+  let textBuf = "";
+  for (const item of output) {
+    if (item.type === "message") {
+      const content = item.content as Array<Record<string, unknown>> | undefined;
+      if (content) {
+        for (const part of content) {
+          if (part.type === "output_text" && typeof part.text === "string") {
+            textBuf += part.text as string;
+          }
+        }
+      }
+    } else if (item.type === "function_call") {
+      toolCalls.push({
+        index: toolCalls.length,
+        id: (item.call_id as string) ?? (item.id as string) ?? `call_${toolCalls.length}`,
+        type: "function",
+        function: {
+          name: item.name as string,
+          arguments: (item.arguments as string) ?? "{}",
+        },
+      });
+    }
+  }
+  if (toolCalls.length > 0) {
+    const message: Record<string, unknown> = { role: "assistant", content: textBuf || null };
+    if (textBuf === "") delete message.content;
+    message.tool_calls = toolCalls;
+    out.choices = [{ index: 0, message, finish_reason: "tool_calls" }];
   } else {
-    // No message — could be tool calls or refusal. Best-effort: empty content + stop.
-    out.choices = [{ index: 0, message: { role: "assistant", content: "" }, finish_reason: "stop" }];
+    out.choices = [{ index: 0, message: { role: "assistant", content: textBuf }, finish_reason: "stop" }];
   }
   return out;
 }

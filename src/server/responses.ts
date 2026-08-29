@@ -554,28 +554,47 @@ export async function handleResponses(
 
   let authCtx: CodexAuthContext;
   let selectedForwardHeaders: Headers;
-  try {
-    authCtx = options.authContext ?? await resolveCodexAuthContext(req.headers, config);
-    selectedForwardHeaders = options.selectedForwardHeaders ?? headersForCodexAuthContext(req.headers, authCtx);
-  } catch (err) {
-    if (err instanceof CodexAccountCooldownError) {
-      return formatErrorResponse(429, "rate_limit_error", "Selected Codex account is cooling down");
+  // Only resolve a Codex OAuth context when the routed provider actually uses Codex account
+  // forwarding. key-auth providers (custom API keys, local mocks) must skip the pool
+  // resolution entirely; otherwise we 401 on unrelated Codex pool-account state.
+  const providerUsesCodexAuth = route.provider.authMode === "forward" || route.provider.authMode === "oauth";
+  if (providerUsesCodexAuth) {
+    try {
+      authCtx = options.authContext ?? await resolveCodexAuthContext(req.headers, config);
+      selectedForwardHeaders = options.selectedForwardHeaders ?? headersForCodexAuthContext(req.headers, authCtx);
+    } catch (err) {
+      if (err instanceof CodexAccountCooldownError) {
+        return formatErrorResponse(429, "rate_limit_error", "Selected Codex account is cooling down");
+      }
+      if (err instanceof CodexThreadAffinityExpiredError) {
+        return formatErrorResponse(409, "invalid_request_error", "Codex thread account affinity expired; start a new session");
+      }
+      if (err instanceof CodexAuthContextError) {
+        const safeAccountLabel = formatCodexProviderForLog(route.providerName, err.accountId, config);
+        console.error(`[codex-auth] Pool account ${safeAccountLabel} token failed; reauthentication required`);
+        return formatErrorResponse(401, "authentication_error", "Selected Codex account needs reauthentication");
+      }
+      throw err;
     }
-    if (err instanceof CodexThreadAffinityExpiredError) {
-      return formatErrorResponse(409, "invalid_request_error", "Codex thread account affinity expired; start a new session");
-    }
-    if (err instanceof CodexAuthContextError) {
-      const safeAccountLabel = formatCodexProviderForLog(route.providerName, err.accountId, config);
-      console.error(`[codex-auth] Pool account ${safeAccountLabel} token failed; reauthentication required`);
+  } else {
+    // key-auth provider: skip the Codex pool entirely. Provide a sentinel main ctx and an
+    // empty Headers so downstream consumers (which all sit behind providerUsesCodexAuth)
+    // operate on well-typed non-undefined values.
+    authCtx = options.authContext ?? ({ kind: "main", accountId: null } as CodexAuthContext);
+    selectedForwardHeaders = options.selectedForwardHeaders ?? new Headers();
+  }
+
+  if (providerUsesCodexAuth) {
+    if (!isCodexAuthContextUsable(authCtx, config)) {
       return formatErrorResponse(401, "authentication_error", "Selected Codex account needs reauthentication");
     }
-    throw err;
+    route.provider = applyCodexAuthContextToProvider(route.provider, authCtx);
+    logCtx.provider = formatCodexProviderForLog(route.providerName, codexLogAccountId(authCtx), config);
+  } else {
+    // key-auth provider: skip Codex account resolution; providerUsesCodexAuth guards every
+    // downstream consumer. The sentinel authCtx above is never used by the adapter.
+    logCtx.provider = route.providerName;
   }
-  if (!isCodexAuthContextUsable(authCtx, config)) {
-    return formatErrorResponse(401, "authentication_error", "Selected Codex account needs reauthentication");
-  }
-  route.provider = applyCodexAuthContextToProvider(route.provider, authCtx);
-  logCtx.provider = formatCodexProviderForLog(route.providerName, codexLogAccountId(authCtx), config);
 
   // OAuth providers: swap in a fresh access token (auto-refreshed) as the Bearer key, so the
   // existing openai-chat / anthropic adapters authenticate with no change.
