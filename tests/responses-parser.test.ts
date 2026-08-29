@@ -233,4 +233,70 @@ describe("codex-rs compat surface (260707)", () => {
     const parsed = parseRequest({ model: "p/m", input: "hi", reasoning: { effort: "banana" } });
     expect(parsed.options.reasoning).toBeUndefined();
   });
+
+
+  test("empty/missing tool_call ids get a generated fallback (no empty id reaches upstream)", () => {
+    // Anthropic upstream rejects HTTP 400 "duplicate tool_call id:" when two tool_use blocks share an
+    // empty id. The parser must substitute a fresh non-empty id whenever Codex sends an empty
+    // (or whitespace-only) call_id, AND when the corresponding tool_result also has an empty
+    // call_id so the link between call + result stays intact.
+    const parsed = parseRequest({
+      model: "p/m",
+      input: [
+        { type: "message", role: "user", content: "ping" },
+        { type: "function_call", call_id: "", name: "ping", arguments: "{}" },
+        { type: "function_call_output", call_id: "", output: "pong" },
+        { type: "function_call", call_id: "   ", name: "pong", arguments: "{}" },
+        { type: "function_call_output", call_id: "   ", output: "ok" },
+      ],
+    });
+    const toolCalls = parsed.context.messages
+      .filter(m => m.role === "assistant")
+      .flatMap(m => m.content)
+      .filter(p => p.type === "toolCall")
+      .map(p => (p as { id: string }).id);
+    expect(toolCalls.length).toBe(2);
+    for (const id of toolCalls) {
+      expect(id.length).toBeGreaterThan(0);
+      expect(id.startsWith("toolu_orphan_")).toBe(true);
+    }
+    // Ids must be unique — the whole point of the fix: empty ids collide upstream.
+    expect(new Set(toolCalls).size).toBe(2);
+  });
+
+  test("function_call + function_call_output with matching empty ids get the SAME generated id", () => {
+    // When Codex sends matching empty call_ids for the call AND the output, the parser must
+    // derive one shared generated id so the tool_result still links to its tool_use downstream.
+    const parsed = parseRequest({
+      model: "p/m",
+      input: [
+        { type: "function_call", call_id: "", name: "lookup", arguments: "{}" },
+        { type: "function_call_output", call_id: "", output: "result" },
+      ],
+    });
+    const toolCallId = parsed.context.messages
+      .filter(m => m.role === "assistant")
+      .flatMap(m => m.content)
+      .find(p => p.type === "toolCall")?.id as string;
+    const toolResultId = parsed.context.messages
+      .find(m => m.role === "toolResult")?.toolCallId;
+    expect(toolCallId).toBeTruthy();
+    expect(toolCallId).toBe(toolResultId);
+  });
+
+  test("non-empty call_ids are preserved verbatim", () => {
+    const parsed = parseRequest({
+      model: "p/m",
+      input: [
+        { type: "function_call", call_id: "call_xyz", name: "ping", arguments: "{}" },
+        { type: "function_call_output", call_id: "call_xyz", output: "pong" },
+      ],
+    });
+    const toolCallId = parsed.context.messages
+      .filter(m => m.role === "assistant")
+      .flatMap(m => m.content)
+      .find(p => p.type === "toolCall")?.id;
+    expect(toolCallId).toBe("call_xyz");
+  });
+
 });

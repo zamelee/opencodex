@@ -20,6 +20,31 @@ function isObj(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+
+/**
+ * Generate a unique non-empty tool_call id. Used when Codex sends an empty/missing
+ * call_id on a function_call / custom_tool_call / function_call_output — Anthropic
+ * upstream rejects multiple empty tool_use ids with HTTP 400 "duplicate tool_call id".
+ * Mirrors kiro-wire.ts's `toolu_${randomUUID().slice(0, 8)}` shape.
+ */
+function genToolCallId(): string {
+  return `toolu_orphan_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
+}
+
+/**
+ * Defensive id coercion for any `call_id`-style field. Empty / whitespace-only / undefined
+ * values get replaced with a freshly generated id so upstream providers never see two
+ * tool_use blocks sharing the same empty id. When `peerId` is supplied (i.e. an immediately
+ * preceding empty function_call already minted a generated id), reuse that id so the
+ * subsequent function_call_output stays linked to its tool_use. This preserves
+ * toolCall <-> toolResult linkage when Codex drops call_ids on the wire.
+ */
+function ensureToolCallId(raw: string | undefined, peerId?: string): string {
+  const trimmed = raw?.trim();
+  if (trimmed) return trimmed;
+  return peerId ?? genToolCallId();
+}
+
 type InputBlock =
   | { type: "input_text"; text: string }
   | { type: "text"; text: string }
@@ -242,6 +267,11 @@ export function parseRequest(body: unknown): OcxParsedRequest {
   if (typeof data.input === "string") {
     messages.push({ role: "user", content: data.input, timestamp: now });
   } else if (data.input) {
+    // Per-request slot for the most-recent empty function_call / custom_tool_call id.
+    // The immediately-following function_call_output / custom_tool_call_output reuses this id
+    // so the tool_call <-> tool_result link survives when Codex sends empty call_ids on the wire.
+    let pendingEmptyCallId: string | undefined;
+
     for (const item of data.input) {
       const effectiveType = (item as { type?: string }).type ?? ("role" in item ? "message" : undefined);
 
@@ -365,8 +395,10 @@ export function parseRequest(body: unknown): OcxParsedRequest {
             console.warn(`[parser] function_call ${call.call_id} has non-JSON arguments; defaulting to {}`);
           }
         }
+        const fcId = ensureToolCallId(call.call_id);
+        if (!call.call_id?.trim()) pendingEmptyCallId = fcId;
         const toolCall: OcxToolCall = {
-          type: "toolCall", id: call.call_id, name: call.name, arguments: args,
+          type: "toolCall", id: fcId, name: call.name, arguments: args,
           ...(call.id ? { thoughtSignature: call.id } : {}),
           ...(call.namespace ? { namespace: call.namespace } : {}),
         };
@@ -376,8 +408,10 @@ export function parseRequest(body: unknown): OcxParsedRequest {
 
       if (effectiveType === "custom_tool_call") {
         const call = item as { id?: string; call_id: string; name: string; input: string };
+        const ctcId = ensureToolCallId(call.call_id);
+        if (!call.call_id?.trim()) pendingEmptyCallId = ctcId;
         const toolCall: OcxToolCall = {
-          type: "toolCall", id: call.call_id, name: call.name,
+          type: "toolCall", id: ctcId, name: call.name,
           arguments: { input: call.input ?? "" },
           customWireName: call.name,
           ...(call.id ? { thoughtSignature: call.id } : {}),
@@ -416,7 +450,7 @@ export function parseRequest(body: unknown): OcxParsedRequest {
         // Preserve the model's prior tool_search call as an assistant tool call so multi-turn
         // history stays complete (otherwise the model re-issues tool_search forever).
         const call = item as { id?: string; call_id?: string; arguments?: unknown };
-        const callId = call.call_id ?? call.id ?? "";
+        const callId = ensureToolCallId(call.call_id ?? call.id);
         ensureAssistantPlaceholder(messages, data.model, now).content.push({
           type: "toolCall", id: callId, name: "tool_search",
           arguments: isObj(call.arguments) ? call.arguments : {},
@@ -443,7 +477,7 @@ export function parseRequest(body: unknown): OcxParsedRequest {
         }
         const failed = typeof out.status === "string" && out.status !== "completed" && out.status !== "success";
         messages.push({
-          role: "toolResult", toolCallId: out.call_id ?? "", toolName: "tool_search",
+          role: "toolResult", toolCallId: ensureToolCallId(out.call_id), toolName: "tool_search",
           content: failed && wireNames.length === 0
             ? `Tool search failed (status: ${out.status}).`
             : wireNames.length
@@ -456,9 +490,11 @@ export function parseRequest(body: unknown): OcxParsedRequest {
 
       if (effectiveType === "function_call_output") {
         const output = item as { call_id: string; output?: string | unknown[] };
-        const toolInfo = findToolById(messages, output.call_id);
+        const fcoId = ensureToolCallId(output.call_id, pendingEmptyCallId);
+        if (!output.call_id?.trim()) pendingEmptyCallId = undefined;
+        const toolInfo = findToolById(messages, fcoId);
         messages.push({
-          role: "toolResult", toolCallId: output.call_id,
+          role: "toolResult", toolCallId: fcoId,
           toolName: toolInfo.name, toolNamespace: toolInfo.namespace,
           content: outputToToolResultContent(output.output), isError: false, timestamp: now,
         });
@@ -467,9 +503,11 @@ export function parseRequest(body: unknown): OcxParsedRequest {
 
       if (effectiveType === "custom_tool_call_output") {
         const output = item as { call_id: string; output: string | unknown[] };
-        const toolInfo = findToolById(messages, output.call_id);
+        const ctcoId = ensureToolCallId(output.call_id, pendingEmptyCallId);
+        if (!output.call_id?.trim()) pendingEmptyCallId = undefined;
+        const toolInfo = findToolById(messages, ctcoId);
         messages.push({
-          role: "toolResult", toolCallId: output.call_id,
+          role: "toolResult", toolCallId: ctcoId,
           toolName: toolInfo.name, toolNamespace: toolInfo.namespace,
           // Same payload shape as function_call_output (codex-rs FunctionCallOutputPayload):
           // string or content items — normalize arrays instead of leaking raw wire blocks.
