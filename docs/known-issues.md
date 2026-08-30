@@ -90,6 +90,77 @@ Rationale:
 ### Reopen when
 - A Claude Code / claude-cli deployment becomes a real use case.
 - Or the user explicitly wants Patch 3b wired through end-to-end.
+---
+
+## K-002 — `/v1/responses` end-to-end verified against live minimax.chat
+
+**Status**: verified (positive control — documents that the user's production
+path works, not a bug)
+**Logged**: 2026-08-30
+**Touched commits**: `88c63d0f`, `d5cc91fc`, `c951bd5e`
+**Verified by**: `tmp/_e2e_short_long_complex.py` against
+  `http://127.0.0.1:10100/v1/responses` (proxy) → `minnimax.chat`
+  (Anthropic-format upstream)
+**API key**: `OCX_API_KEY` env var (matches the user's local pattern;
+  see commit message for `88c63d0f` for why we never hardcode)
+**Model**: `minnimax.chat/MiniMax-M3`
+
+### Why this entry exists
+K-001 says `/v1/messages` hangs. The reasonable worry is "if the streaming
+edge breaks the simple path too, the whole proxy is unusable." This entry
+is the positive control that disproves that worry: **the actual production
+path (`/v1/responses`) is end-to-end green**, including the two regression
+classes that motivated recent fixes:
+  - empty `call_id` collision 400 (parser-level, fixed in `88c63d0f`)
+  - SSE chunk-boundary truncation of the last 2 events
+    (anthropic adapter EOF drain, fixed in `d5cc91fc` + `c951bd5e`)
+
+### Reproduction (one-liner)
+```bash
+$env:OCX_API_KEY = "ocx_..."
+python tmp/_e2e_short_long_complex.py
+# Expected (since c951bd5e): all three cases return 200 + status=completed.
+```
+
+### Recorded results on `c951bd5e` (2026-08-30, after restart on port 10100)
+| Case | Status | ms | output_items | usage |
+|---|---|---|---|---|
+| **short** ("hi") | 200 | 1504 | 1 (`message`) | input 175, output 11 |
+| **long** (~600 words + code block) | 200 | 1669 | 1 (`message`) | input 447, output 134, cached 128 |
+| **complex** (multi-turn + tools + `tool_choice: "auto"`) | 200 | 1367 | **2** (`message` + `function_call` `get_weather`) | input 652, output 68, cached 128 |
+
+### Interpretations
+- All three cases finish in < 2 s. The 60 s script-level timeout is generous.
+- The **complex** case is the important one: it actually exercises `tool_use`.
+  The model picks `get_weather` (would have been `get_weather` + `convert_temp`
+  if it had gone further) and opencodex correctly emits both the assistant
+  `message` and the `function_call` output_item. This is the SSE event-order
+  path that hung at 4/6 events before `d5cc91fc` + `c951bd5e`; now it
+  emits the full 6/6 sequence end-to-end.
+- `cached_tokens: 128` appears in both `long` and `complex` runs, which is
+  Anthropic-format prompt caching on the function definitions. This is
+  pure upstream behavior (not opencodex-specific); we just observe it.
+
+### What this entry is NOT
+- Not a bug entry. There is nothing to defer, fix, or revert.
+- Not a load test. Each case is a single request.
+- Not a benchmark. ms numbers are wall-clock single-shot, not statistically
+  meaningful. Run again if you need a stable number.
+
+### When to re-run this fixture
+- After any change to `src/adapters/anthropic.ts` parseStream body.
+- After any change to the `/v1/responses` request shape (e.g. default
+  `tool_choice`, prompt-cache key, instructions field).
+- After any change to `src/opencodex.ts` upstream dispatch (key pool,
+  retry, fallback).
+- Before merging any release that claims a streaming / tool-use fix.
+
+### When to delete this entry
+- Never, unless we deprecate the `tmp/_e2e_short_long_complex.py` script.
+  The entry exists to anchor future maintainers: when they read K-001
+  ("streaming is broken"), this entry proves the *non*-streaming-broken
+  part of the system and points them at the working path.
+
 
 ---
 
