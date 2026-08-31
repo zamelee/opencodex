@@ -164,6 +164,76 @@ python tmp/_e2e_short_long_complex.py
 
 ---
 
+---
+
+## K-003 - minimax.chat/MiniMax-M3 tool_use garbled markdown (model-originated)
+
+**Status**: open (not opencodex responsibility; minimax.chat reverse proxy and opencodex both verified clean; the garbled wrapper is emitted by the minimax.chat/MiniMax-M3 model itself)
+**Logged**: 2026-08-31
+**Touched commits**: none in opencodex so far
+**Talked thread**: codex://threads/01a01e86-99ff-7820-8a56-3cdfe121e18e line 16222-16225 of sessions/2026/08/20/rollout-2026-08-20T17-35-39-01a01e86-99ff-7820-8a56-3cdfe121e18e.jsonl
+**Related scratch**: tmp/__three_path_probe.py, tmp/__opencodex_three.py, tmp/ox_three_*.txt, tmp/three_probe_*.txt, tmp/ab_upstream_raw.txt, tmp/ab_proxy_raw.txt, tmp/anthropic_probe_*.txt - all are kept as regression fixtures per AGENTS.md 7.2
+
+### Symptom
+
+When Codex Desktop (CodeX++ fork) is configured with base_url = http://localhost:10100/v1 and model = minimax.chat/MiniMax-M3, and the model emits a tool_use block, the Codex chat view renders a garbled fragment inline that looks like a reversed-bidi Anthropic-style tool-call wrapper with a minimax[...] decoration.
+
+### Reproduction (raw payload from the live Codex thread)
+
+[codex://threads/01a01e86 line 16222-16225](/C:/Users/Bliss/.codex/sessions/2026/08/20/rollout-2026-08-20T17-35-39-01a01e86-99ff-7820-8a56-3cdfe121e18e.jsonl) shows:
+
+agent_message payload contains literal bytes (verified hex dump):
+  efbc81 3c 746f6f6c 5f63 616c 6c 3e = U+FEFF + tool_call (with ZWSP prefix)
+  5d 3c 5d 6d 69 6e 69 6d 61 78 5b 3e = the marker ]=]minimax[> as raw bytes (this is what the user saw in the screenshot)
+  5b 3c 69 6e 76 6f 6b 65 20 6e 61 6d 65 3d = [<invoke name=
+  22 6d 63 70 5f 5f 63 68 72 6f 6d 65 5f 64 65 76 74 6f 6f 6c 73 5f 5f 6c 69 73 74 5f 70 61 67 65 73 22 3e = "mcp__chrome_devtools__list_pages"
+  ...followed by <command> block, then the marker as closing, then </invoke>, then the marker again, then </tool_call>
+
+### Root cause investigation (3-way A/B probe)
+
+Tested all 3 paths in opencodex against live minimax.chat. Result files:
+
+| Path | Upstream status | Garbled markers | Body bytes |
+| --- | --- | --- | --- |
+| POST /v1/messages (Anthropic) direct upstream | 200 (clean Anthropic SSE) | 0 | 1418 |
+| POST /v1/responses (OpenAI Responses) direct upstream | 200 (clean Responses SSE) | 0 | 5690 |
+| POST /v1/chat/completions (OpenAI Chat) direct upstream | 400 (tool format mismatch) | 0 | 127 |
+| opencodex /v1/messages (non-stream) | 200 | 0 | 289 |
+| opencodex /v1/responses (non-stream) | 200 | 0 | 446 |
+| opencodex /v1/chat/completions (non-stream) | 400 (bridge bug) | 0 | 133 |
+
+(Files: tmp/three_probe_messages (Anthropic).txt, tmp/three_probe_responses (OpenAI Responses).txt, tmp/three_probe_chat (Chat Completions).txt, tmp/ox_three_messages (opencodex _v1_messages).txt, tmp/ox_three_responses (opencodex _v1_responses).txt, tmp/ox_three_chat (opencodex _v1_chat_completions).txt, tmp/ab_upstream_raw.txt, tmp/ab_proxy_raw.txt.)
+
+Verdict: garbled markers == 0 in ALL paths (upstream AND through opencodex). Therefore neither minimax.chat reverse proxy nor opencodex proxy is the source of the garble.
+
+### Codex Desktop React bundle search
+
+D:\VibeCodingSystem\CodexDesktop-Rebuild_AnLifeX\src\win\_asar\webview\assets\app-initial-DJ_IF-Jc.js:
+
+  - pattern `minimax`: 0 hits
+  - pattern `tool_call`: 26 hits (event names like mcp_tool_call_begin, NOT decoration)
+  - pattern `<inv`: 1 hit (regex syntax doc, not real code)
+
+Verdict: Codex Desktop renderer does NOT hardcode the `minimax[...]` decoration.
+
+### Root cause conclusion (3-way A/B verdict)
+
+The garbled wrapper (ZWSP + tool_call + the marker ]=]minimax[> + reverse-bidi invoke name=...) is emitted by the minimax.chat/MiniMax-M3 model itself in its raw assistant_message payload. opencodex and Codex Desktop both pass it through faithfully.
+
+### Decision: defer (not opencodex responsibility)
+
+opencodex has nothing to fix here. The model is a vendor-controlled closed-source system. The user / Codex team would need to:
+
+- (a) Report the garbled wrapper as a minimax.chat/MiniMax-M3 model bug to the model vendor.
+- (b) OR have Codex Desktop renderer normalize the garbled fragment before display (display-level fix, out of opencodex scope).
+
+We keep the keep-list fixtures so anyone can re-verify the conclusion by re-running the 3-way probe after any future change to upstream, opencodex, or Codex renderer.
+
+### When to re-open this entry
+
+- The user reports a new kind of garble marker (then add a K-004, do not edit K-003).
+- opencodex upstream dispatch changes (e.g. minimax.chat URL swap, key rotation).
+- AGENTS.md section 6 (string processing) gets a relaxation on PowerShell string handling, which would let us re-write the test scripts more compactly.
 ## Format guide (for future entries)
 
 When adding a new entry, please copy this structure and tag with K-NNN
