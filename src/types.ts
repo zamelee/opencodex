@@ -472,6 +472,13 @@ export interface OcxProviderConfig {
    */
   apiKeyPool?: Array<{ id: string; key: string; label?: string; addedAt?: number }>;
   defaultModel?: string;
+  /**
+   * Model used by the per-key "Test" button (`/api/providers/keys/test`). When unset the
+   * probe falls back to `defaultModel`, then a hardcoded default per adapter. Populated by
+   * the "拉取模型" UI - selecting from a freshly fetched model list and persisting via
+   * `PUT /api/providers/{name}/test-model`.
+   */
+  testModel?: string;
   models?: string[];
   /**
    * Fetch the provider's live `/models` endpoint. Defaults to true.

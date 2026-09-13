@@ -236,6 +236,7 @@ export function safeConfigDTO(config: OcxConfig): unknown {
     };
     for (const key of [
       "defaultModel",
+      "testModel",
       "disabled",
       "authMode",
       "liveModels",

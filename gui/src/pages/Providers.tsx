@@ -12,7 +12,17 @@ import { providerIconSrc } from "../provider-icons";
 interface Config {
   port: number;
   defaultProvider: string;
-  providers: Record<string, { adapter: string; baseUrl: string; hasApiKey?: boolean; hasHeaders?: boolean; defaultModel?: string; authMode?: string; disabled?: boolean }>;
+  providers: Record<string, {
+    adapter: string;
+    baseUrl: string;
+    hasApiKey?: boolean;
+    hasHeaders?: boolean;
+    defaultModel?: string;
+    testModel?: string;
+    models?: string[];
+    authMode?: string;
+    disabled?: boolean;
+  }>;
 }
 
 interface OAuthStatus { loggedIn: boolean; email?: string; error?: string; done?: boolean }
@@ -36,7 +46,7 @@ export default function Providers({ apiBase }: { apiBase: string }) {
   const [draft, setDraft] = useState("");
   const [status, setStatus] = useState("");
   const [statusOk, setStatusOk] = useState(false);
-  const [oauthProviders, setOauthProviders] = useState<string[]>([]);
+  const [oauthProviders, setOauthProviders] = useState<Array<{ id: string; adapter: string }>>([]);
   const [oauthStatus, setOauthStatus] = useState<Record<string, OAuthStatus>>({});
   const [quotaReports, setQuotaReports] = useState<Record<string, ProviderQuotaReport>>({});
   const [busy, setBusy] = useState<string | null>(null);
@@ -46,6 +56,21 @@ export default function Providers({ apiBase }: { apiBase: string }) {
   const [keyPools, setKeyPools] = useState<Record<string, ApiKeyEntry[]>>({});
   const [addingKeyFor, setAddingKeyFor] = useState<string | null>(null);
   const [newKeyValue, setNewKeyValue] = useState("");
+  // Reveal state: { [provider]: { [keyId]: fullKey } }. Setting a key here replaces the masked
+  // label in the row. Cleared on hide or when the pool reloads.
+  const [revealedKeys, setRevealedKeys] = useState<Record<string, Record<string, string>>>({});
+  // Show-all toggle per provider. When true, every key in the pool is auto-revealed (the
+  // reveal state above is populated lazily as the user hovers a row, but the toggle also
+  // forces an immediate reveal-all).
+  const [showAll, setShowAll] = useState<Record<string, boolean>>({});
+  // Test status per (provider, keyId). `undefined` means idle; "loading" hides result text.
+  const [keyTests, setKeyTests] = useState<Record<string, Record<string, { status: "loading" | "ok" | "fail" | "unknown"; latencyMs?: number; error?: string }>>>({});
+  // Test-model picker state. Models and selection are read directly from `config.providers[name]`
+  // (already in /api/config response) so we don't have to keep them in sync. We only need
+  // transient loading + error state per provider for the 拉取模型 button.
+  const [pullingModels, setPullingModels] = useState<Record<string, boolean>>({});
+  const [providerModelError, setProviderModelError] = useState<Record<string, string | undefined>>({});
+
   const aliveRef = useRef(true);
 
   const notify = (msg: string, ok: boolean) => { setStatus(msg); setStatusOk(ok); };
@@ -66,11 +91,12 @@ export default function Providers({ apiBase }: { apiBase: string }) {
   // Load the list of OAuth-capable providers, then each one's login status.
   const fetchOauth = async () => {
     try {
-      const provs: string[] = (await fetch(`${apiBase}/api/oauth/providers`).then(r => r.json())).providers ?? [];
+      const data = await fetch(`${apiBase}/api/oauth/providers`).then(r => r.json()) as { providers?: Array<{ id: string; adapter: string }> };
+      const provs = data.providers ?? [];
       setOauthProviders(provs);
       const entries = await Promise.all(provs.map(async p => {
-        const s = await fetch(`${apiBase}/api/oauth/status?provider=${p}`).then(r => r.json()).catch(() => ({ loggedIn: false }));
-        return [p, s] as const;
+        const s = await fetch(`${apiBase}/api/oauth/status?provider=${p.id}`).then(r => r.json()).catch(() => ({ loggedIn: false }));
+        return [p.id, s] as const;
       }));
       setOauthStatus(Object.fromEntries(entries));
     } catch { /* ignore */ }
@@ -168,6 +194,114 @@ export default function Providers({ apiBase }: { apiBase: string }) {
     } else {
       const data = await res.json().catch(() => ({}));
       notify(data.error || t("prov.keyAddFail"), false);
+    }
+  };
+  const revealOne = async (provider: string, id: string) => {
+    try {
+      const res = await fetch(`${apiBase}/api/providers/keys/reveal`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: provider, id }),
+      });
+      if (!res.ok) { notify(t("prov.keyRevealFail"), false); return; }
+      const body = await res.json() as { id: string; key: string };
+      setRevealedKeys(prev => ({ ...prev, [provider]: { ...(prev[provider] ?? {}), [body.id]: body.key } }));
+    } catch {
+      notify(t("prov.keyRevealFail"), false);
+    }
+  };
+  const hideOne = (provider: string, id: string) => {
+    setRevealedKeys(prev => {
+      const next = { ...(prev[provider] ?? {}) };
+      delete next[id];
+      return { ...prev, [provider]: next };
+    });
+  };
+  const toggleShowAll = async (provider: string, entries: ApiKeyEntry[]) => {
+    const next = !showAll[provider];
+    setShowAll(prev => ({ ...prev, [provider]: next }));
+    if (next) {
+      // Reveal every entry that's not already revealed.
+      const toFetch = entries.filter(e => !revealedKeys[provider]?.[e.id]);
+      const fetched = await Promise.all(toFetch.map(async e => {
+        try {
+          const res = await fetch(`${apiBase}/api/providers/keys/reveal`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name: provider, id: e.id }),
+          });
+          if (!res.ok) return null;
+          const body = await res.json() as { id: string; key: string };
+          return [body.id, body.key] as const;
+        } catch {
+          return null;
+        }
+      }));
+      const merged: Record<string, string> = { ...(revealedKeys[provider] ?? {}) };
+      for (const pair of fetched) if (pair) merged[pair[0]] = pair[1];
+      setRevealedKeys(prev => ({ ...prev, [provider]: merged }));
+    } else {
+      // Hide all = drop every revealed entry for this provider.
+      setRevealedKeys(prev => ({ ...prev, [provider]: {} }));
+    }
+  };
+  const testOne = async (provider: string, id: string) => {
+    setKeyTests(prev => ({ ...prev, [provider]: { ...(prev[provider] ?? {}), [id]: { status: "loading" } } }));
+    try {
+      const res = await fetch(`${apiBase}/api/providers/keys/test`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: provider, id }),
+      });
+      const body = await res.json() as { ok: boolean | "unknown"; latencyMs?: number } | { error: string };
+      if ("error" in body) {
+        setKeyTests(prev => ({ ...prev, [provider]: { ...(prev[provider] ?? {}), [id]: { status: "fail", error: body.error } } }));
+        return;
+      }
+      setKeyTests(prev => ({ ...prev, [provider]: { ...(prev[provider] ?? {}), [id]: { status: body.ok === true ? "ok" : body.ok === false ? "fail" : "unknown", ...(typeof body.latencyMs === "number" ? { latencyMs: body.latencyMs } : {}) } } }));
+    } catch (err) {
+      setKeyTests(prev => ({ ...prev, [provider]: { ...(prev[provider] ?? {}), [id]: { status: "fail", error: String(err) } } }));
+    }
+  };
+
+  // Pull the model list for a provider. Cache hits return immediately; refresh=true forces
+  // a live fetch and persists the result to provider.models. After success we re-fetch the
+  // full config so `provider.models` and any newly-saved `testModel` show up in the dropdown.
+  const pullProviderModels = async (provider: string, refresh = false) => {
+    setPullingModels(prev => ({ ...prev, [provider]: true }));
+    setProviderModelError(prev => { const next = { ...prev }; delete next[provider]; return next; });
+    try {
+      const res = await fetch(`${apiBase}/api/providers/models`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: provider, refresh }),
+      });
+      const body = await res.json() as { models?: string[]; source?: "cached" | "live"; error?: string };
+      if (!res.ok || body.error || !body.models) {
+        setProviderModelError(prev => ({ ...prev, [provider]: body.error || `HTTP ${res.status}` }));
+        return;
+      }
+      // Refresh full config so the dropdown sees the freshly cached list.
+      fetchConfig();
+    } catch (err) {
+      setProviderModelError(prev => ({ ...prev, [provider]: String(err) }));
+    } finally {
+      setPullingModels(prev => ({ ...prev, [provider]: false }));
+    }
+  };
+
+  // Persist the user's selection of test model. Empty string = clear override (use defaultModel).
+  const selectTestModel = async (provider: string, model: string) => {
+    try {
+      const res = await fetch(`${apiBase}/api/providers/test-model`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: provider, model: model === "" ? null : model }),
+      });
+      const body = await res.json() as { testModel?: string | null; error?: string };
+      if (!res.ok || body.error) {
+        notify(body.error || `HTTP ${res.status}`, false);
+        return;
+      }
+      // Refresh full config so the saved testModel shows up.
+      fetchConfig();
+    } catch (err) {
+      notify(String(err), false);
     }
   };
 
@@ -284,6 +418,26 @@ export default function Providers({ apiBase }: { apiBase: string }) {
     if (res.ok) { notify(t("prov.removed", { name }), true); fetchConfig(); fetchOauth(); fetchProviderQuotas(true); }
     else notify(t("prov.removeFail", { name }), false);
   };
+  const setDefaultProvider = async (name: string) => {
+    if (!config || name === config.defaultProvider) return; // no-op
+    try {
+      const res = await fetch(`${apiBase}/api/providers?name=${encodeURIComponent(name)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ setDefault: true }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok || body.error) { notify(body.error || `HTTP ${res.status}`, false); return; }
+      notify(t("prov.defaultChanged", { name }), true);
+      // fetchConfig reloads the new defaultProvider; the disabled/remove buttons re-evaluate
+      // isDefault on the next render so the previous default becomes editable.
+      fetchConfig();
+      fetchOauth();
+      fetchProviderQuotas(true);
+    } catch (err) {
+      notify(String(err), false);
+    }
+  };
 
   const setProviderDisabled = async (name: string, disabled: boolean) => {
     const res = await fetch(`${apiBase}/api/providers?name=${encodeURIComponent(name)}`, {
@@ -306,7 +460,7 @@ export default function Providers({ apiBase }: { apiBase: string }) {
 
   // API-key providers shown alongside OAuth logins in the account panel.
   const keyProviders = Object.entries(config.providers)
-    .filter(([name, prov]) => prov.hasApiKey && prov.authMode !== "oauth" && prov.authMode !== "forward" && !oauthProviders.includes(name))
+    .filter(([name, prov]) => prov.hasApiKey && prov.authMode !== "oauth" && prov.authMode !== "forward" && !oauthProviders.some(p => p.id === name))
     .map(([name]) => name);
 
   return (
@@ -342,15 +496,16 @@ export default function Providers({ apiBase }: { apiBase: string }) {
             <span className="muted" style={{ fontSize: 13, gridColumn: "1 / -1" }}>{t("prov.noOauth")}</span>
           )}
           {oauthProviders.map(p => {
-            const st = oauthStatus[p] ?? { loggedIn: false };
-            const isBusy = busy === p;
-            const icon = providerIconSrc(p);
+            const st = oauthStatus[p.id] ?? { loggedIn: false };
+            const isBusy = busy === p.id;
+            const icon = providerIconSrc(p.id);
             return (
-              <div key={p} className="oauth-row">
-                <span className="oauth-name" title={oauthLabel(p)}>
+              <div key={p.id} className="oauth-row">
+                <span className="oauth-name" title={oauthLabel(p.id)}>
                   <span className="provider-icon provider-icon-sm">{icon && <img src={icon} alt="" aria-hidden="true" />}</span>
-                  <span className="oauth-name-text">{p}</span>
+                  <span className="oauth-name-text">{p.id}</span>
                 </span>
+                <span className="oauth-type muted" title={`Adapter: ${p.adapter}`}>{p.adapter}</span>
                 <span className="oauth-status">
                   <span className={`dot ${st.loggedIn ? "dot-green" : "dot-muted"}`} />
                   {st.loggedIn ? (
@@ -361,14 +516,14 @@ export default function Providers({ apiBase }: { apiBase: string }) {
                 </span>
                 <span className="oauth-actions">
                   {st.loggedIn ? (
-                    <button className="btn btn-ghost btn-sm" onClick={() => logoutOAuth(p)}>{t("prov.logout")}</button>
+                    <button className="btn btn-ghost btn-sm" onClick={() => logoutOAuth(p.id)}>{t("prov.logout")}</button>
                   ) : (
-                    <button className="btn btn-primary btn-sm" onClick={() => loginOAuth(p)} disabled={isBusy}>
+                    <button className="btn btn-primary btn-sm" onClick={() => loginOAuth(p.id)} disabled={isBusy}>
                       {isBusy ? <><span className="spin" />{t("prov.waitingBrowser")}</> : <><IconLock />{t("prov.login")}</>}
                     </button>
                   )}
                 </span>
-                {loginInfo?.provider === p && (loginInfo.url || loginInfo.instructions) && (
+                {loginInfo?.provider === p.id && (loginInfo.url || loginInfo.instructions) && (
                   <span className="oauth-login-hint muted">
                     {loginInfo.url && <a href={loginInfo.url} target="_blank" rel="noreferrer" className="link-btn" style={{ display: "inline-flex", alignItems: "center", gap: 5 }}><IconExternal />{t("prov.didntOpen")}</a>}
                     {loginInfo.instructions && <span>{loginInfo.instructions}</span>}
@@ -379,12 +534,16 @@ export default function Providers({ apiBase }: { apiBase: string }) {
           })}
           {keyProviders.map(name => {
             const icon = providerIconSrc(name);
+            const keyProvider = config.providers[name];
             return (
               <div key={name} className="oauth-row">
                 <span className="oauth-name" title={name}>
                   <span className="provider-icon provider-icon-sm">{icon && <img src={icon} alt="" aria-hidden="true" />}</span>
                   <span className="oauth-name-text">{name}</span>
                 </span>
+                {keyProvider?.adapter ? (
+                  <span className="oauth-type muted" title={`Adapter: ${keyProvider.adapter}`}>{keyProvider.adapter}</span>
+                ) : null}
                 <span className="oauth-status">
                   <span className="dot dot-green" />
                   <span className="oauth-email muted">{t("prov.hasApiKey")}</span>
@@ -406,7 +565,20 @@ export default function Providers({ apiBase }: { apiBase: string }) {
       ) : (
         <div className="stack" style={{ gap: 8 }}>
           <div className="muted" style={{ fontSize: 13, marginBottom: 4 }}>
-            {t("prov.port")}: <code className="chip">{config.port}</code> · {t("prov.default")}: <code className="chip">{config.defaultProvider}</code>
+            {t("prov.port")}: <code className="chip">{config.port}</code> · {t("prov.default")}:{" "}
+          <select
+            className="input-sm"
+            value={config.defaultProvider ?? ""}
+            onChange={e => setDefaultProvider(e.target.value)}
+            aria-label={t("prov.default")}
+            style={{ fontSize: 12, padding: "1px 8px" }}
+            disabled={Object.keys(config.providers).length < 2}
+            title={t("prov.defaultSwitchHint")}
+          >
+            {Object.keys(config.providers).map(n => (
+              <option key={n} value={n}>{n}</option>
+            ))}
+          </select>
           </div>
           {Object.entries(config.providers).map(([name, prov]) => {
             const isDefault = name === config.defaultProvider;
@@ -452,7 +624,13 @@ export default function Providers({ apiBase }: { apiBase: string }) {
                       {isDefault ? <IconLock /> : <IconPower />}
                       {isDisabled ? t("prov.enable") : t("prov.disable")}
                     </button>
-                    <button className="btn btn-danger btn-sm" onClick={() => removeProvider(name)} aria-label={t("sub.removeAria", { m: name })}><IconTrash />{t("common.remove")}</button>
+                    <button
+                      className="btn btn-danger btn-sm"
+                      onClick={() => removeProvider(name)}
+                      disabled={isDefault}
+                      title={isDefault ? t("prov.defaultCannotRemove") : undefined}
+                      aria-label={t("sub.removeAria", { m: name })}
+                    ><IconTrash />{t("common.remove")}</button>
                   </div>
                 </div>
                 {quota && <QuotaBars quota={quota} threshold={80} t={t} className="provider-quota" />}
@@ -492,7 +670,69 @@ export default function Providers({ apiBase }: { apiBase: string }) {
                           </button>
                         )
                       ) : null}
+                      {isKeyAuth && keyPool.length > 1 ? (
+                        <button
+                          className="btn btn-ghost btn-sm"
+                          onClick={() => toggleShowAll(name, keyPool)}
+                          title={showAll[name] ? t("prov.keyHideAllTitle") : t("prov.keyRevealAllTitle")}
+                          aria-pressed={showAll[name] === true}
+                        >
+                          {showAll[name] ? t("prov.keyHideAll") : t("prov.keyRevealAll")}
+                        </button>
+                      ) : null}
                     </div>
+                                        {accountsOpen !== false && isKeyAuth ? (() => {
+                      const provConf = config.providers[name];
+                      const provTestModel = provConf?.testModel;
+                      const provModels: string[] = Array.isArray(provConf?.models) ? provConf.models : [];
+                      return (
+                        <div className="prov-test-model" style={{
+                          display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap",
+                          padding: "6px 8px", borderTop: "1px solid var(--border-soft)",
+                          borderBottom: "1px solid var(--border-soft)",
+                          background: "var(--raised)",
+                        }}>
+                          <label className="muted" style={{ fontSize: 11 }}>{t("prov.testModel")}</label>
+                          <select
+                            className="input-sm"
+                            value={provTestModel ?? ""}
+                            onChange={e => selectTestModel(name, e.target.value)}
+                            aria-label={t("prov.testModel")}
+                            style={{ flex: "1 1 160px", minWidth: 120 }}
+                            disabled={!!pullingModels[name]}
+                          >
+                            <option value="">{t("prov.testModelDefault")}</option>
+                            {provModels.map(m => (
+                              <option key={m} value={m}>{m}</option>
+                            ))}
+                          </select>
+                          <button
+                            className="btn btn-ghost btn-sm"
+                            onClick={() => pullProviderModels(name, false)}
+                            disabled={!!pullingModels[name]}
+                            aria-label={t("prov.pullModelsAria", { name })}
+                            title={t("prov.pullModels")}
+                            style={{ fontSize: 11 }}
+                          >
+                            {pullingModels[name] ? (
+                              <><span className="spin" />{t("prov.pullModelsLoading")}</>
+                            ) : (
+                              t("prov.pullModels")
+                            )}
+                          </button>
+                          {provModels.length > 0 ? (
+                            <span className="muted" style={{ fontSize: 10.5 }}>
+                              {t("prov.modelsJustPulled", { count: provModels.length })}
+                            </span>
+                          ) : null}
+                          {providerModelError[name] ? (
+                            <span className="muted" style={{ fontSize: 10.5, color: "var(--red)" }}>
+                              {t("prov.pullModelsFail", { error: providerModelError[name] })}
+                            </span>
+                          ) : null}
+                        </div>
+                      );
+                    })() : null}
                     {accountsOpen !== false && (
                       <div className="prov-accounts-list">
                         {(accountSet?.accounts ?? []).map(account => (
@@ -516,46 +756,32 @@ export default function Providers({ apiBase }: { apiBase: string }) {
                             </span>
                           </button>
                         ))}
-                        {(quota?.keys ?? []).map((qk, idx) => {
-                          const entry = keyPool.find(k => k.id === qk.id);
-                          if (!entry) return null;
+                        {keyPool.map((entry, idx) => {
+                          const qk = (quota?.keys ?? []).find(q => q.id === entry.id);
                           const onSwitch = () => switchApiKey(name, entry);
                           const onRemove = (e: React.MouseEvent) => { e.stopPropagation(); removeApiKey(name, entry); };
+                          // Synthesize a minimal KeyQuota when quota data is absent (probe failed, first poll
+                          // pending, etc.). updatedAt=0 marks the row as 'no data yet'.
+                          const quotaProp = qk
+                            ? { ...qk, label: qk.label ?? entry.label }
+                            : { id: entry.id, label: entry.label, masked: entry.masked, active: entry.active, updatedAt: 0 };
                           return (
                             <KeyPoolPanel
-                              key={qk.id}
-                              quota={{
-                                ...qk,
-                                label: qk.label ?? entry.label,
-                              }}
+                              key={entry.id}
+                              quota={quotaProp}
                               index={idx}
                               active={entry.active}
                               onSwitch={entry.active ? undefined : onSwitch}
                               onRemove={onRemove}
+                              {...(revealedKeys[name]?.[entry.id] !== undefined ? { revealedKey: revealedKeys[name]![entry.id]! } : {})}
+                              onReveal={() => revealOne(name, entry.id)}
+                              onHide={() => hideOne(name, entry.id)}
+                              onTest={() => testOne(name, entry.id)}
+                              {...(keyTests[name]?.[entry.id] ? { testStatus: keyTests[name]![entry.id]!.status, ...(keyTests[name]![entry.id]!.latencyMs !== undefined ? { testLatencyMs: keyTests[name]![entry.id]!.latencyMs } : {}), ...(keyTests[name]![entry.id]!.error ? { testError: keyTests[name]![entry.id]!.error } : {}) } : {})}
                               t={t}
                             />
                           );
                         })}
-                        {keyPool.filter(entry => !(quota?.keys ?? []).some(qk => qk.id === entry.id)).map(entry => (
-                          <button
-                            key={entry.id}
-                            className={`prov-account-row${entry.active ? " active" : ""}`}
-                            onClick={() => switchApiKey(name, entry)}
-                            title={entry.active ? undefined : t("prov.keySwitchTitle")}
-                          >
-                            <span className={`dot ${entry.active ? "dot-green" : "dot-muted"}`} />
-                            <span className="prov-account-email mono">{entry.label ? `${entry.label} · ${entry.masked}` : entry.masked}</span>
-                            {entry.active && <span className="badge badge-primary">{t("prov.accountActive")}</span>}
-                            <span
-                              className="prov-account-remove"
-                              role="button"
-                              aria-label={t("prov.keyRemoveAria", { key: entry.label ?? entry.masked })}
-                              onClick={e => { e.stopPropagation(); removeApiKey(name, entry); }}
-                            >
-                              <IconTrash style={{ width: 13, height: 13 }} />
-                            </span>
-                          </button>
-                        ))}
                         {accountSet ? (
                           <button className="prov-account-row prov-account-add" onClick={() => loginOAuth(name, true)} disabled={busy === name}>
                             {busy === name ? <><span className="spin" />{t("prov.waitingBrowser")}</> : <><IconPlus style={{ width: 13, height: 13 }} />{t("prov.accountAdd")}</>}

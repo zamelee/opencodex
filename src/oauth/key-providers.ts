@@ -16,6 +16,8 @@ export interface KeyLoginProvider {
   models?: string[];
   liveModels?: boolean;
   defaultModel?: string;
+  /** Model used by the per-key Test button. Falls back to defaultModel then hardcoded. */
+  testModel?: string;
   contextWindow?: number;
   modelContextWindows?: Record<string, number>;
   modelInputModalities?: Record<string, string[]>;
@@ -69,10 +71,11 @@ export async function validateApiKey(provider: KeyLoginProvider, key: string): P
         headers: {
           "Content-Type": "application/json",
           "anthropic-version": "2023-06-01",
+          "User-Agent": "@anthropic-ai/sdk/0.74.0",
           "x-api-key": key,
         },
         body: JSON.stringify({
-          model: provider.defaultModel ?? "claude-haiku-4-5",
+          model: provider.testModel ?? provider.defaultModel ?? "claude-haiku-4-5",
           max_tokens: 1,
           messages: [{ role: "user", content: "ping" }],
         }),

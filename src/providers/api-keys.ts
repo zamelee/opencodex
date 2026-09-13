@@ -8,6 +8,7 @@
  */
 import { createHash } from "node:crypto";
 import { saveConfig } from "../config";
+import { validateApiKey } from "../oauth/key-providers";
 import type { OcxConfig, OcxProviderConfig } from "../types";
 
 export interface ProviderApiKeyInfo {
@@ -118,4 +119,54 @@ export function removeProviderApiKey(config: OcxConfig, name: string, id: string
   if (provider.apiKeyPool.length === 0) delete provider.apiKeyPool;
   saveConfig(config);
   return true;
+}
+
+/** Return the full key value for a pool entry, or null when the id isn't in this provider's pool.
+ *  Mirrors the audit shape used by /api/keys/reveal — callers log id/label/provider, never the
+ *  key contents themselves. */
+export function revealProviderApiKey(config: OcxConfig, name: string, id: string): { id: string; label?: string; masked: string; key: string } | null {
+  const provider = config.providers[name];
+  if (!provider || !isKeyAuthProvider(provider)) return null;
+  const entry = ensurePool(provider).find(e => e.id === id);
+  if (!entry) return null;
+  return {
+    id: entry.id,
+    ...(entry.label ? { label: entry.label } : {}),
+    masked: maskApiKey(entry.key),
+    key: entry.key,
+  };
+}
+
+/** Result of probing an upstream API key against its provider. `unknown` covers transport /
+ *  non-auth errors so the UI can render "couldn't tell" instead of a misleading pass/fail. */
+export type ProviderApiKeyTestResult = { ok: true | false | "unknown"; latencyMs: number };
+
+/** Probe a pool entry's key against its provider's upstream (anthropic messages, google
+ *  models.list, or openai-compatible /models). Pure read — never persists config. */
+export async function testProviderApiKey(config: OcxConfig, name: string, id: string): Promise<ProviderApiKeyTestResult | { error: string }> {
+  const provider = config.providers[name];
+  if (!provider || !isKeyAuthProvider(provider)) return { error: "provider does not use API-key auth" };
+  const entry = ensurePool(provider).find(e => e.id === id);
+  if (!entry) return { error: "key not found" };
+  if (isEnvReference(entry.key)) return { error: "env-referenced keys cannot be tested directly" };
+  // All providers (including minimax.chat reverse proxy) go through validateApiKey so the
+  // probe mirrors what the proxy actually does at runtime: POST /v1/messages + max_tokens=1 +
+  // provider.testModel ?? defaultModel. This means a key that passes /v1/usage but fails
+  // /v1/messages (different gateway routes) is correctly flagged, and a key that works for
+  // inference but not quota is also correctly flagged.
+  // Reuse the dashboard-flow validator with a synthetic registry entry shaped from the saved
+  // provider config — only adapter / baseUrl / googleMode / defaultModel are read by the probe.
+  const googleMode = (provider as unknown as { googleMode?: "ai-studio" | "vertex" | "cloud-code-assist" }).googleMode;
+  const synthetic = {
+    label: name,
+    baseUrl: provider.baseUrl,
+    adapter: provider.adapter,
+    dashboardUrl: "",
+    ...(provider.testModel ? { testModel: provider.testModel } : {}),
+    ...(provider.defaultModel ? { defaultModel: provider.defaultModel } : {}),
+    ...(googleMode ? { googleMode } : {}),
+  };
+  const started = Date.now();
+  const ok = await validateApiKey(synthetic as Parameters<typeof validateApiKey>[0], entry.key);
+  return { ok, latencyMs: Date.now() - started };
 }

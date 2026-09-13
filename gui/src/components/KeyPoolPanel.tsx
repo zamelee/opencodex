@@ -2,10 +2,12 @@ import type { TFn } from "../i18n";
 import type { KeyQuota } from "../codex-quota-utils";
 import { formatDate } from "../codex-quota-utils";
 
+type TestStatus = "loading" | "ok" | "fail" | "unknown";
+
 interface Props {
   quota: KeyQuota;
   t: TFn;
-  /** Zero-based index in pool (we render as (NN)). Optional — only used in key-row mode. */
+  /** Zero-based index in pool (we render as (NN)). Optional. */
   index?: number;
   /** True when this is the only key (no key-pool UI). Optional. */
   only?: boolean;
@@ -13,25 +15,116 @@ interface Props {
   active?: boolean;
   onSwitch?: () => void;
   onRemove?: (e: React.MouseEvent) => void;
+  /**
+   * Full key value, set when the user has clicked Reveal for this row.
+   * Plan A: the Reveal/Hide button sits inline next to this text, not at the
+   * far-right action column.
+   */
+  revealedKey?: string;
+  onReveal?: () => Promise<void> | void;
+  onHide?: () => void;
+  /**
+   * Per-key upstream probe. When set, a Test button + result pill appear
+   * in the right action column.
+   */
+  onTest?: () => Promise<void> | void;
+  testStatus?: TestStatus;
+  testLatencyMs?: number;
+  /** Backend error message when testStatus === "fail". Surfaces the real reason. */
+  testError?: string;
 }
 
 /** Format "1234 / 2500 (12.3%)" — falls back gracefully when raw counts are absent. */
 function fmtCount(pct: number | undefined, used: number | undefined, limit: number | undefined): string {
   if (pct === undefined) return "\u2014";
   const pctText = `${pct.toFixed(1)}%`;
-  if (used !== undefined && limit !== undefined) return `${used.toLocaleString()} / ${limit.toLocaleString()} (${pctText})`;
+  if (used !== undefined && limit !== undefined) {
+    return `${used.toLocaleString()} / ${limit.toLocaleString()} (${pctText})`;
+  }
   return pctText;
 }
 
+/** Compact result pill for the per-key upstream probe. */
+function TestPill({
+  status,
+  latencyMs,
+  errorText,
+  t,
+}: {
+  status: TestStatus;
+  latencyMs?: number;
+  errorText?: string;
+  t: TFn;
+}) {
+  if (status === "loading") {
+    return (
+      <span className="prov-key-test-pill prov-key-test-loading" data-testid="key-test-loading">
+        {t("prov.keyTestLoading")}
+      </span>
+    );
+  }
+  if (status === "ok") {
+    return (
+      <span className="prov-key-test-pill prov-key-test-ok">
+        {t("prov.keyTestOk", { ms: latencyMs ?? 0 })}
+      </span>
+    );
+  }
+  if (status === "fail") {
+    // Prefer the actual backend error. Fall back to the generic "rejected" string
+    // when the backend didn't surface one.
+    const label = errorText ? errorText : t("prov.keyTestFail");
+    return (
+      <span
+        className="prov-key-test-pill prov-key-test-fail"
+        data-testid="key-test-fail"
+        title={errorText ?? undefined}
+      >
+        {label}
+      </span>
+    );
+  }
+  // "unknown" - backend reachable but unsure.
+  return (
+    <span className="prov-key-test-pill prov-key-test-unknown">
+      {t("prov.keyTestUnknown", { ms: latencyMs ?? 0 })}
+    </span>
+  );
+}
+
 /**
- * One row per key. Includes the (NN) tag, masked id, label (if any), and the per-window
- * quota numbers (5h / weekly). When `onSwitch` / `onRemove` are provided, an action
- * column is rendered. The component does not own the "default open" state for the
- * wrapper (that's a Providers-level concern).
+ * One row per key in a multi-key (apiKeyPool) provider. Layout:
+ *
+ *   (NN)  <key text>  [Reveal/Hide]   <active badge>   <Test pill/button>  <Switch>  <Remove>
+ *   row 2:  5h | weekly | exp
+ *
+ * Plan A places Reveal/Hide next to the key text so the eye pairs them.
+ * Test stays in the right action column since it is a process action, not
+ * a state toggle.
  */
-export default function KeyPoolPanel({ quota, t, index = 0, only, active, onSwitch, onRemove }: Props) {
+export default function KeyPoolPanel({
+  quota,
+  t,
+  index = 0,
+  only,
+  active,
+  onSwitch,
+  onRemove,
+  revealedKey,
+  onReveal,
+  onHide,
+  onTest,
+  testStatus,
+  testLatencyMs,
+  testError,
+}: Props) {
   const id = `(${String(index + 1).padStart(2, "0")})`;
+  const isRevealed = revealedKey !== undefined;
+  const showReveal = !!onReveal && !only;
+  const showTest = !!onTest && !only;
   const showActions = !only && (onSwitch || onRemove);
+  // When a result is in, hide the Test button - the pill says everything.
+  const showTestButton = showTest && !testStatus;
 
   return (
     <div
@@ -39,8 +132,8 @@ export default function KeyPoolPanel({ quota, t, index = 0, only, active, onSwit
       style={{
         display: "grid",
         gridTemplateColumns: showActions
-          ? "44px 130px 1fr auto"
-          : "44px 130px 1fr",
+          ? "44px minmax(0,1fr) auto auto"
+          : "44px minmax(0,1fr) auto",
         gridTemplateRows: "auto auto",
         columnGap: 12,
         rowGap: 4,
@@ -49,21 +142,66 @@ export default function KeyPoolPanel({ quota, t, index = 0, only, active, onSwit
         fontSize: 12,
       }}
     >
-      {/* Row 1: (NN) + masked + active badge + actions */}
-      <code className="chip" style={{ fontSize: 11, fontWeight: 600, gridRow: 1, gridColumn: 1 }}>{id}</code>
+      {/* Row 1: (NN) chip */}
+      <code
+        className="chip"
+        style={{ fontSize: 11, fontWeight: 600, gridRow: 1, gridColumn: 1 }}
+      >
+        {id}
+      </code>
+
+      {/* Row 1: key text + inline Reveal/Hide (Plan A) */}
       <span
         style={{
-          fontFamily: "var(--mono)",
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          whiteSpace: "nowrap",
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 6,
+          minWidth: 0,
           gridRow: 1,
           gridColumn: 2,
         }}
       >
         {quota.label ? <span className="muted">{quota.label} · </span> : null}
-        {quota.masked}
+        {isRevealed ? (
+          <span
+            className="prov-key-revealed"
+            data-testid="key-revealed"
+          >
+            {revealedKey}
+          </span>
+        ) : (
+          <span
+            style={{
+              fontFamily: "var(--mono)",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+              minWidth: 0,
+            }}
+          >
+            {quota.masked}
+          </span>
+        )}
+        {showReveal ? (
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            onClick={isRevealed ? onHide : onReveal}
+            title={isRevealed ? t("prov.keyHideTitle") : t("prov.keyRevealTitle")}
+            aria-label={
+              isRevealed
+                ? t("prov.keyHideAria", { key: quota.label ?? quota.masked })
+                : t("prov.keyRevealAria", { key: quota.label ?? quota.masked })
+            }
+            data-testid={isRevealed ? "key-hide" : "key-reveal"}
+            style={{ fontSize: 11 }}
+          >
+            {isRevealed ? t("prov.keyHide") : t("prov.keyReveal")}
+          </button>
+        ) : null}
       </span>
+
+      {/* Row 1: active badge */}
       <span
         style={{
           display: "inline-flex",
@@ -72,19 +210,48 @@ export default function KeyPoolPanel({ quota, t, index = 0, only, active, onSwit
           gridColumn: 3,
         }}
       >
-        {active ? <span className="badge badge-primary" style={{ fontSize: 10 }}>active</span> : null}
+        {active ? (
+          <span className="badge badge-primary" style={{ fontSize: 10 }}>
+            active
+          </span>
+        ) : null}
       </span>
+
+      {/* Row 1: action column (Test pill/button + Switch + Remove) */}
       {showActions ? (
         <span
           style={{
             display: "inline-flex",
             gap: 6,
+            alignItems: "center",
             gridRow: 1,
             gridColumn: 4,
           }}
         >
+          {testStatus ? (
+            <TestPill
+              status={testStatus}
+              latencyMs={testLatencyMs}
+              errorText={testError}
+              t={t}
+            />
+          ) : null}
+          {showTestButton ? (
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              onClick={onTest}
+              title={t("prov.keyTestTitle")}
+              aria-label={t("prov.keyTestAria", { key: quota.label ?? quota.masked })}
+              data-testid="key-test"
+              style={{ fontSize: 11 }}
+            >
+              {t("prov.keyTest")}
+            </button>
+          ) : null}
           {onSwitch ? (
             <button
+              type="button"
               className={`btn btn-sm ${active ? "btn-ghost" : "btn-primary"}`}
               disabled={active}
               onClick={onSwitch}
@@ -96,6 +263,7 @@ export default function KeyPoolPanel({ quota, t, index = 0, only, active, onSwit
           ) : null}
           {onRemove ? (
             <button
+              type="button"
               className="btn btn-danger btn-sm"
               onClick={onRemove}
               aria-label={t("prov.keyRemoveAria", { key: quota.label ?? quota.masked })}
@@ -106,7 +274,8 @@ export default function KeyPoolPanel({ quota, t, index = 0, only, active, onSwit
           ) : null}
         </span>
       ) : null}
-      {/* Row 2: quota details (5h, weekly, exp) — aligned under the masked column */}
+
+      {/* Row 2: quota details - aligned under the masked column */}
       <span
         style={{
           fontFamily: "var(--mono)",

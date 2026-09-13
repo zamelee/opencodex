@@ -119,9 +119,23 @@ export function getOAuthCredentialProjectId(provider: string): string | undefine
 }
 
 /** Provider ids that support real OAuth login (drives the GUI's "Log in with …" buttons). */
+/** Provider descriptor returned by /api/oauth/providers so the GUI can render an
+ *  adapter-type column without having to know the registry. */
+export interface OAuthProviderListEntry {
+  id: string;
+  adapter: string;
+}
+
 export function listOAuthProviders(): string[] {
   return Object.keys(OAUTH_PROVIDERS);
 }
+
+/** Same data as listOAuthProviders() but with adapter metadata so the GUI can
+ *  render a per-row "provider type" column. */
+export function listOAuthProviderDescriptors(): OAuthProviderListEntry[] {
+  return Object.entries(OAUTH_PROVIDERS).map(([id, def]) => ({ id, adapter: def.providerConfig.adapter }));
+}
+
 
 export class UnsupportedOAuthProviderError extends Error {
   constructor(provider: string) {

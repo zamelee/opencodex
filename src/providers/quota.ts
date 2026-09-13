@@ -141,8 +141,14 @@ function isBuiltInChatGptForwardProvider(name: string, provider: OcxProviderConf
  */
 function isMinimaxChatReverseProxy(name: string, provider: OcxProviderConfig): boolean {
   const base = (provider.baseUrl ?? "").toLowerCase();
-  return base.includes("minnimax.chat");
+  // Both `minnimax.chat` (legacy) and `m.aiio.chat` (current) are minimax reverse-proxy
+  // domains - same backend, same auth, same /v1/usage shape. Some users clone the provider
+  // entry to point at both so each can be probed/inspected independently. Keep detection
+  // broad so both providers pick up the minimax quota polling path.
+  return base.includes("minnimax.chat") || base.includes("m.aiio.chat");
 }
+
+export { isMinimaxChatReverseProxy };
 
 function report(provider: string, source: string, quota: ProviderQuota): ProviderQuotaReport | null {
   if (!hasQuotaRows(quota)) return null;

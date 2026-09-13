@@ -15,6 +15,7 @@ import {
   getLoginStatus,
   isOAuthProvider,
   listOAuthProviders,
+  listOAuthProviderDescriptors,
   startLoginFlow,
   upsertOAuthProvider,
 } from "../oauth";
@@ -375,6 +376,8 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
   if (url.pathname === "/api/providers" && req.method === "GET") {
     return jsonResponse(Object.entries(config.providers).map(([name, p]) => ({
       name, adapter: p.adapter, baseUrl: publicProviderBaseUrl(p.baseUrl), defaultModel: p.defaultModel,
+      testModel: p.testModel,
+      modelCount: Array.isArray(p.models) ? p.models.length : 0,
       hasApiKey: !!p.apiKey,
       disabled: p.disabled === true,
     })));
@@ -420,17 +423,27 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
   if (url.pathname === "/api/providers" && req.method === "PATCH") {
     const name = url.searchParams.get("name")?.trim();
     if (!name || !isValidProviderName(name) || !hasOwnProvider(config.providers, name)) return jsonResponse({ error: "unknown provider" }, 404);
-    let body: { disabled?: unknown };
+    let body: { disabled?: unknown; setDefault?: unknown };
     try { body = await req.json(); } catch { return jsonResponse({ error: "invalid JSON body" }, 400); }
-    if (typeof body.disabled !== "boolean") return jsonResponse({ error: "disabled boolean is required" }, 400);
+    const wantDisabled = typeof body.disabled === "boolean" ? body.disabled : undefined;
+    const wantSetDefault = body.setDefault === true;
+    if (wantDisabled === undefined && !wantSetDefault) return jsonResponse({ error: "at least one of `disabled` or `setDefault` is required" }, 400);
     if (body.disabled && name === config.defaultProvider) {
       return jsonResponse({ error: "cannot disable the default provider; set another default first" }, 400);
     }
+    // setDefault=true means "make this provider the new default". Previously only POST /api/providers
+    // supported this (for newly added providers); extending PATCH lets the GUI switch default on
+    // an existing provider without the add/remove round-trip.
+    if (wantSetDefault) {
+      config.defaultProvider = name;
+    }
     const { saveConfig: save } = await import("../config");
-    config.providers[name] = { ...config.providers[name], disabled: body.disabled };
+    if (wantDisabled !== undefined) {
+      config.providers[name] = { ...config.providers[name], disabled: wantDisabled };
+    }
     save(config);
     refreshCodexCatalogBestEffort();
-    return jsonResponse({ success: true, name, disabled: body.disabled });
+    return jsonResponse({ success: true, name, disabled: wantDisabled, defaultProvider: config.defaultProvider });
   }
 
   if (url.pathname === "/api/providers" && req.method === "DELETE") {
@@ -689,7 +702,7 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
 
   // Which providers support real OAuth login (drives the GUI's "Log in with …" buttons).
   if (url.pathname === "/api/oauth/providers" && req.method === "GET") {
-    return jsonResponse({ providers: listOAuthProviders() });
+    return jsonResponse({ providers: listOAuthProviderDescriptors() });
   }
 
   // API-key "login" providers (open dashboard → paste key). Drives the GUI's key-provider picker.
@@ -965,6 +978,92 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
     const { clearKeyCooldowns } = await import("../providers/key-failover");
     clearKeyCooldowns(name); // manual key management resets 429 cooldown state
     return jsonResponse({ ok: true });
+  }
+  // Reveal the full value of a single pool entry. Mirrors /api/keys/reveal: full key content is
+  // returned in the response body but never written to logs/audit — the audit line only names
+  // the provider + key id so an operator can tell which entry was exposed.
+  if (url.pathname === "/api/providers/keys/reveal" && req.method === "POST") {
+    let rb: { name?: string; id?: string };
+    try { rb = await req.json() as { name?: string; id?: string }; }
+    catch { return jsonResponse({ error: "invalid JSON body" }, 400); }
+    const name = (rb.name ?? "").trim();
+    const id = (rb.id ?? "").trim();
+    if (!name || !isValidProviderName(name) || !hasOwnProvider(config.providers, name)) return jsonResponse({ error: "unknown provider" }, 404);
+    if (!id) return jsonResponse({ error: "missing id" }, 400);
+    const { revealProviderApiKey } = await import("../providers/api-keys");
+    const revealed = revealProviderApiKey(config, name, id);
+    if (!revealed) return jsonResponse({ error: "key not found" }, 404);
+    const ts = new Date().toISOString();
+    const from = sourceIp ?? "unknown";
+    console.log(`[opencodex-audit] revealed providerApiKey provider=${name} id=${id} label=${revealed.label ?? ""} from=${from} at=${ts}`);
+    markActivity(`revealed providerApiKey provider=${name} id=${id} from=${from}`);
+    return jsonResponse({ id: revealed.id, label: revealed.label, masked: revealed.masked, key: revealed.key });
+  }
+  // Probe a pool entry's key against the provider's upstream. Read-only — does not persist,
+  // does not rotate the active key, and does not touch cooldowns.
+  if (url.pathname === "/api/providers/keys/test" && req.method === "POST") {
+    let rb: { name?: string; id?: string };
+    try { rb = await req.json() as { name?: string; id?: string }; }
+    catch { return jsonResponse({ error: "invalid JSON body" }, 400); }
+    const name = (rb.name ?? "").trim();
+    const id = (rb.id ?? "").trim();
+    if (!name || !isValidProviderName(name) || !hasOwnProvider(config.providers, name)) return jsonResponse({ error: "unknown provider" }, 404);
+    if (!id) return jsonResponse({ error: "missing id" }, 400);
+    const { testProviderApiKey } = await import("../providers/api-keys");
+    const result = await testProviderApiKey(config, name, id);
+    if ("error" in result) return jsonResponse({ error: result.error }, result.error === "key not found" ? 404 : 400);
+    return jsonResponse(result);
+  }
+
+  // Fetch the provider's live model list (or return cached `provider.models`). Used by the
+  // Providers-page "拉取模型" button to populate the per-key test-model dropdown. Read-only,
+  // does not touch cooldowns, does not rotate the active key, and only refreshes `provider.models`
+  // when `?refresh=1` is set so the periodic catalog sync's cache is not churned.
+  if (url.pathname === "/api/providers/models" && req.method === "POST") {
+    let rb: { name?: string; refresh?: boolean };
+    try { rb = await req.json() as { name?: string; refresh?: boolean }; }
+    catch { return jsonResponse({ error: "invalid JSON body" }, 400); }
+    const name = (rb.name ?? "").trim();
+    if (!name || !isValidProviderName(name) || !hasOwnProvider(config.providers, name)) return jsonResponse({ error: "unknown provider" }, 404);
+    const refresh = rb.refresh === true;
+    const provider = config.providers[name];
+    const cached = provider.models;
+    if (!refresh && cached && cached.length > 0) {
+      return jsonResponse({ models: cached, source: "cached" });
+    }
+    const pool: Array<{ key: string }> = [];
+    if (provider.apiKeyPool && provider.apiKeyPool.length > 0) {
+      for (const entry of provider.apiKeyPool) pool.push({ key: entry.key });
+    } else if (provider.apiKey) {
+      pool.push({ key: provider.apiKey });
+    }
+    if (pool.length === 0) return jsonResponse({ error: "no keys configured" }, 400);
+    const { fetchProviderModels } = await import("../providers/catalog-models");
+    const result = await fetchProviderModels(provider, pool);
+    if ("error" in result) return jsonResponse({ error: result.error }, 400);
+    provider.models = result.models;
+    saveConfig(config);
+    return jsonResponse({ models: result.models, source: "live" });
+  }
+
+  // Persist the user's pick for the per-key test model. Body `{ model: string | null }`.
+  // `null` clears the override so the probe falls back to defaultModel / hardcoded default.
+  if (url.pathname === "/api/providers/test-model" && req.method === "POST") {
+    let rb: { name?: string; model?: string | null };
+    try { rb = await req.json() as { name?: string; model?: string | null }; }
+    catch { return jsonResponse({ error: "invalid JSON body" }, 400); }
+    const name = (rb.name ?? "").trim();
+    if (!name || !isValidProviderName(name) || !hasOwnProvider(config.providers, name)) return jsonResponse({ error: "unknown provider" }, 404);
+    const provider = config.providers[name];
+    const raw = rb.model;
+    if (raw === null || raw === "") {
+      delete provider.testModel;
+    } else {
+      if (typeof raw !== "string") return jsonResponse({ error: "model must be a string or null" }, 400);
+      provider.testModel = raw;
+    }
+    saveConfig(config);
+    return jsonResponse({ testModel: provider.testModel ?? null });
   }
 
   // ---------------------------------------------------------------------------
