@@ -579,28 +579,43 @@ def try_bootstrap_bun(non_interactive: bool = False) -> bool:
     found_mgr = False        # 是否有任一个包管理器被检测到
     attempted_any = False    # 是否至少跳了一次 subprocess.call
     last_failed_mgr = None   # 最后一次走到 subprocess.call 但失败的包管器
+    last_launch_err = None   # 最后一次 subprocess.call 抛出的异常（FileNotFoundError 等）
+
+    # Windows 上 npm / pnpm / yarn 的安装产物是 .CMD shim。Python subprocess 用 list args
+    # + 无 shell=True 时直接走 CreateProcess，不解析 .CMD shim -> FileNotFoundError。
+    # 这是手动跑 `python ocx-start.py` 报 "bun 装失败" 但无任何 exit 信息的根因。
+    # 走 cmd.exe /c 让 PATHEXT 解析 .CMD。args 是字面量，无 shell 注入风险。
+    use_shell = sys.platform == "win32"
 
     for mgr in ("npm", "pnpm", "yarn"):
-        if shutil.which(mgr) is None:
+        mgr_path = shutil.which(mgr)
+        if mgr_path is None:
             continue
         found_mgr = True
         try:
             if mgr == "npm":
                 print("[bootstrap] npm install -g bun", file=sys.stderr)
-                rc = subprocess.call([mgr, "install", "-g", "bun"])
+                rc = subprocess.call([mgr, "install", "-g", "bun"], shell=use_shell)
             elif mgr == "pnpm":
                 print("[bootstrap] pnpm add -g bun", file=sys.stderr)
-                rc = subprocess.call([mgr, "add", "-g", "bun"])
+                rc = subprocess.call([mgr, "add", "-g", "bun"], shell=use_shell)
             else:
                 print("[bootstrap] yarn global add bun", file=sys.stderr)
-                rc = subprocess.call([mgr, "global", "add", "bun"])
+                rc = subprocess.call([mgr, "global", "add", "bun"], shell=use_shell)
             attempted_any = True
             if rc == 0 and has_bun():
                 print("[bootstrap] bun 安装成功", file=sys.stderr)
                 return True
             print(f"[bootstrap] {mgr} 装 bun 返 exit={rc}", file=sys.stderr)
             last_failed_mgr = mgr
-        except FileNotFoundError:
+        except FileNotFoundError as e:
+            # 之前 silently continue 让用户看不到任何诊断。现在记下来 + 打 stderr，
+            # 让脚本失败时能区分「安装失败」vs「调起失败」两种根因。
+            attempted_any = True
+            last_failed_mgr = mgr
+            last_launch_err = f"{type(e).__name__}: {e}"
+            print(f"[bootstrap] {mgr} 调起失败（shim={mgr_path}）: {last_launch_err}",
+                  file=sys.stderr)
             continue
 
     # 所有路径都走完，还是不成功 → 错误诊断
