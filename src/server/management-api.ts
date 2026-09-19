@@ -947,6 +947,8 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
     clearProviderQuotaCache();
     const { clearKeyCooldowns } = await import("../providers/key-failover");
     clearKeyCooldowns(name); // manual key management resets 429 cooldown state
+    const { clearKeyScheduleState } = await import("../providers/key-scheduler");
+    clearKeyScheduleState(name); // manual key management resets scheduler probe/local state
     return jsonResponse({ ok: true, id: result.id }, 201);
   }
   if (url.pathname === "/api/providers/keys/active" && req.method === "PUT") {
@@ -962,6 +964,8 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
     clearProviderQuotaCache();
     const { clearKeyCooldowns } = await import("../providers/key-failover");
     clearKeyCooldowns(name); // manual key management resets 429 cooldown state
+    const { clearKeyScheduleState } = await import("../providers/key-scheduler");
+    clearKeyScheduleState(name); // manual key management resets scheduler probe/local state
     return jsonResponse({ ok: true, name, activeId: body.id });
   }
   if (url.pathname === "/api/providers/keys" && req.method === "DELETE") {
@@ -977,6 +981,8 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
     clearProviderQuotaCache();
     const { clearKeyCooldowns } = await import("../providers/key-failover");
     clearKeyCooldowns(name); // manual key management resets 429 cooldown state
+    const { clearKeyScheduleState } = await import("../providers/key-scheduler");
+    clearKeyScheduleState(name); // manual key management resets scheduler probe/local state
     return jsonResponse({ ok: true });
   }
   // Reveal the full value of a single pool entry. Mirrors /api/keys/reveal: full key content is
@@ -999,6 +1005,18 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
     markActivity(`revealed providerApiKey provider=${name} id=${id} from=${from}`);
     return jsonResponse({ id: revealed.id, label: revealed.label, masked: revealed.masked, key: revealed.key });
   }
+  // Probe a pool entry's key against the provider's upstream. Read-only — does not persist,
+  // Quota-aware key scheduler state: threshold, next-up candidate, and recent rotation
+  // events for the provider card UI (src/providers/key-scheduler.ts). Read-only.
+  if (url.pathname === "/api/providers/key-schedule" && req.method === "GET") {
+    const name = (url.searchParams.get("name") ?? "").trim();
+    if (!name || !isValidProviderName(name) || !hasOwnProvider(config.providers, name)) return jsonResponse({ error: "unknown provider" }, 404);
+    const { getKeyScheduleState } = await import("../providers/key-scheduler");
+    const state = getKeyScheduleState(config, name);
+    if (!state) return jsonResponse({ error: "unknown provider" }, 404);
+    return jsonResponse(state);
+  }
+
   // Probe a pool entry's key against the provider's upstream. Read-only — does not persist,
   // does not rotate the active key, and does not touch cooldowns.
   if (url.pathname === "/api/providers/keys/test" && req.method === "POST") {

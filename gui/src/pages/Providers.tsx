@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import AddProviderModal from "../components/AddProviderModal";
 import { Notice } from "../ui";
 import { IconPlus, IconTrash, IconLock, IconExternal, IconPower, IconChevron } from "../icons";
-import { useT } from "../i18n";
+import { useT, type TFn } from "../i18n";
 import type { AccountQuota } from "../codex-quota-utils";
 import { formatRelativeTime } from "../codex-quota-utils";
 import QuotaBars from "../components/QuotaBars";
@@ -29,6 +29,19 @@ interface OAuthStatus { loggedIn: boolean; email?: string; error?: string; done?
 interface ProviderQuotaReport { provider: string; quota: AccountQuota; source: string; updatedAt: number }
 interface OAuthAccount { id: string; email?: string; active: boolean; needsReauth?: boolean; expiresAt?: number }
 interface ApiKeyEntry { id: string; label?: string; masked: string; active: boolean }
+interface KeyScheduleEvent { ts: number; fromId: string; toId: string; reason: string; fromFiveHourEst?: number; toFiveHourEst?: number; fiveHourResetAt?: number }
+interface KeyScheduleState { enabled: boolean; threshold: number; activeId: string | null; nextUpId: string | null; events: KeyScheduleEvent[] }
+
+/** "14:02 · (02) 5h 用量 88% → 切换至 (01)" — one scheduler rotation, pool ids as (NN) chips. */
+function schedEventText(ev: KeyScheduleEvent, pool: ApiKeyEntry[], t: TFn): string {
+  const chip = (id: string) => {
+    const idx = pool.findIndex(k => k.id === id);
+    return idx >= 0 ? `(${String(idx + 1).padStart(2, "0")})` : "(?)";
+  };
+  const time = new Date(ev.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const pct = ev.fromFiveHourEst !== undefined ? String(Math.round(ev.fromFiveHourEst * 100)) : "?";
+  return t("prov.schedEvent", { time, from: chip(ev.fromId), to: chip(ev.toId), pct });
+}
 
 // Friendly labels for the OAuth providers the proxy supports.
 const OAUTH_LABELS: Record<string, string> = {
@@ -54,6 +67,8 @@ export default function Providers({ apiBase }: { apiBase: string }) {
   const [accountSets, setAccountSets] = useState<Record<string, { activeAccountId: string | null; accounts: OAuthAccount[] }>>({});
   const [openAccounts, setOpenAccounts] = useState<Record<string, boolean>>({});
   const [keyPools, setKeyPools] = useState<Record<string, ApiKeyEntry[]>>({});
+  // Quota-scheduler snapshots per provider (threshold, next-up candidate, rotation events).
+  const [keySchedules, setKeySchedules] = useState<Record<string, KeyScheduleState | null>>({});
   const [addingKeyFor, setAddingKeyFor] = useState<string | null>(null);
   const [newKeyValue, setNewKeyValue] = useState("");
   // Reveal state: { [provider]: { [keyId]: fullKey } }. Setting a key here replaces the masked
@@ -143,9 +158,13 @@ export default function Providers({ apiBase }: { apiBase: string }) {
   const fetchKeyPools = async (providers: string[]) => {
     const entries = await Promise.all(providers.map(async name => {
       const data = await fetch(`${apiBase}/api/providers/keys?name=${encodeURIComponent(name)}`).then(r => r.json()).catch(() => null) as { keys?: ApiKeyEntry[] } | null;
-      return [name, data?.keys ?? []] as const;
+      // Scheduler state rides the same refresh cycle; null when the provider is not
+      // quota-capable or the endpoint errors (UI hides all scheduler chrome then).
+      const sched = await fetch(`${apiBase}/api/providers/key-schedule?name=${encodeURIComponent(name)}`).then(r => r.ok ? r.json() : null).catch(() => null) as KeyScheduleState | null;
+      return [name, { keys: data?.keys ?? [], sched: sched && typeof sched.threshold === "number" ? sched : null }] as const;
     }));
-    setKeyPools(Object.fromEntries(entries));
+    setKeyPools(Object.fromEntries(entries.map(([n, e]) => [n, e.keys])));
+    setKeySchedules(Object.fromEntries(entries.map(([n, e]) => [n, e.sched])));
   };
 
   const switchApiKey = async (provider: string, entry: ApiKeyEntry) => {
@@ -588,6 +607,7 @@ export default function Providers({ apiBase }: { apiBase: string }) {
             const accountSet = prov.authMode === "oauth" ? accountSets[name] : undefined;
             const isKeyAuth = prov.authMode !== "oauth" && prov.authMode !== "forward";
             const keyPool = isKeyAuth && prov.hasApiKey ? (keyPools[name] ?? []) : [];
+            const keySched = keySchedules[name] ?? null;
             const showAccounts = (!!accountSet && accountSet.accounts.length > 0) || keyPool.length > 0;
             const accountsOpen = openAccounts[name] !== false;
             const dropdownCount = accountSet?.accounts.length ?? keyPool.length;
@@ -771,6 +791,7 @@ export default function Providers({ apiBase }: { apiBase: string }) {
                               quota={quotaProp}
                               index={idx}
                               active={entry.active}
+                              nextUp={keySched?.nextUpId === entry.id}
                               onSwitch={entry.active ? undefined : onSwitch}
                               onRemove={onRemove}
                               {...(revealedKeys[name]?.[entry.id] !== undefined ? { revealedKey: revealedKeys[name]![entry.id]! } : {})}
@@ -782,6 +803,23 @@ export default function Providers({ apiBase }: { apiBase: string }) {
                             />
                           );
                         })}
+                        {keySched && keySched.events.length > 0 ? (
+                          <div className="prov-account-row prov-sched-events" style={{ display: "block", fontSize: 11, cursor: "default" }}>
+                            <span className="muted">{schedEventText(keySched.events[keySched.events.length - 1]!, keyPool, t)}</span>
+                            {keySched.events.length > 1 ? (
+                              <details style={{ marginTop: 4 }}>
+                                <summary className="muted" style={{ cursor: "pointer" }}>
+                                  {t("prov.schedEventsMore", { n: String(keySched.events.length - 1) })}
+                                </summary>
+                                <div style={{ marginTop: 4 }}>
+                                  {[...keySched.events].reverse().slice(1).map((ev, i) => (
+                                    <div key={i} className="muted">{schedEventText(ev, keyPool, t)}</div>
+                                  ))}
+                                </div>
+                              </details>
+                            ) : null}
+                          </div>
+                        ) : null}
                         {accountSet ? (
                           <button className="prov-account-row prov-account-add" onClick={() => loginOAuth(name, true)} disabled={busy === name}>
                             {busy === name ? <><span className="spin" />{t("prov.waitingBrowser")}</> : <><IconPlus style={{ width: 13, height: 13 }} />{t("prov.accountAdd")}</>}

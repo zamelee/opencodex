@@ -463,7 +463,7 @@ export async function handleResponses(
   logCtx.configuredServiceTier = readConfiguredCodexServiceTier();
   logCtx.configuredSpeedLabel = requestLogSpeedLabel(logCtx.configuredServiceTier);
 
-  let route;
+  let route: ReturnType<typeof routeModel>;
   try {
     route = routeModel(config, parsed.modelId);
   } catch (err) {
@@ -481,6 +481,22 @@ export async function handleResponses(
   }
   logCtx.model = route.modelId;
   logCtx.provider = route.providerName;
+
+  // Quota-aware proactive key scheduling ("A+B": 5h-threshold gate + expiry-urgency ranking).
+  // Rotates the active pool key BEFORE dispatch when its estimated 5h utilization crosses
+  // the configured threshold; non-quota providers and probe failures degrade silently to
+  // the reactive 429 path (src/providers/key-scheduler.ts). Also records one billable
+  // dispatch for the local estimate between probes. Best-effort — never breaks a request.
+  try {
+    const { maybeRotateForQuota, recordRoutedCall } = await import("../providers/key-scheduler");
+    if (await maybeRotateForQuota(config, route.providerName)) {
+      route = routeModel(config, parsed.modelId); // fresh provider config with the rotated key
+    }
+    const dispatchedPoolKey = route.provider.apiKeyPool?.find(entry => entry.key === route.provider.apiKey);
+    if (dispatchedPoolKey) recordRoutedCall(route.providerName, dispatchedPoolKey.id);
+  } catch {
+    // scheduling must never break the request path
+  }
 
   // Multi-agent guidance shim: codex-rs emits its Proactive delegation developer
   // message only on the v2 surface. The proxy fills both gaps: the Proactive text

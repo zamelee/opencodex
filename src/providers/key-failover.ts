@@ -42,7 +42,9 @@ function parseRetryAfterMs(value: string | null | undefined, now = Date.now()): 
   return delay > 0 ? Math.min(delay, MAX_COOLDOWN_MS) : undefined;
 }
 
-function isKeyInCooldown(providerName: string, keyId: string, now = Date.now()): boolean {
+// Exported for the quota-aware scheduler (key-scheduler.ts): candidates in 429 cooldown
+// are skipped just like saturated keys.
+export function isKeyInCooldown(providerName: string, keyId: string, now = Date.now()): boolean {
   const entry = keyCooldowns.get(cooldownKey(providerName, keyId));
   if (!entry) return false;
   if (entry.cooldownUntil <= now) {

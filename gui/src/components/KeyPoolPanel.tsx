@@ -13,6 +13,8 @@ interface Props {
   only?: boolean;
   /** Optional per-key actions (providers.tsx wires them for the apiKeyPool case). */
   active?: boolean;
+  /** True when the quota scheduler ranked this key as the standby (rotates here next). */
+  nextUp?: boolean;
   onSwitch?: () => void;
   onRemove?: (e: React.MouseEvent) => void;
   /**
@@ -108,6 +110,7 @@ export default function KeyPoolPanel({
   index = 0,
   only,
   active,
+  nextUp,
   onSwitch,
   onRemove,
   revealedKey,
@@ -215,6 +218,15 @@ export default function KeyPoolPanel({
             active
           </span>
         ) : null}
+        {nextUp && !active ? (
+          <span
+            className="badge"
+            style={{ fontSize: 10, border: "1px solid var(--border)", color: "var(--muted)" }}
+            title={t("prov.keyNextUpTitle")}
+          >
+            {t("prov.keyNextUp")}
+          </span>
+        ) : null}
       </span>
 
       {/* Row 1: action column (Test pill/button + Switch + Remove) */}
@@ -298,6 +310,31 @@ export default function KeyPoolPanel({
         {quota.expiresAt !== undefined ? (
           <span className="muted">exp {formatDate(quota.expiresAt)}</span>
         ) : null}
+        {(() => {
+          // Scheduler forecast: translate raw quota numbers into "what happens next" for
+          // this key. Quiet when the key is healthy; amber when expiry will waste quota.
+          if (quota.weeklyPercent !== undefined && quota.weeklyPercent >= 100) {
+            return (
+              <span className="muted">· {quota.weeklyResetAt !== undefined
+                ? t("prov.keyForecastWeeklyOut", { reset: formatDate(quota.weeklyResetAt) })
+                : t("prov.keyForecastWeeklyOutNoReset")}</span>
+            );
+          }
+          if (quota.fiveHourPercent !== undefined && quota.fiveHourPercent >= 100) {
+            return (
+              <span className="muted">· {quota.fiveHourResetAt !== undefined
+                ? t("prov.keyForecast5hOut", { reset: new Date(quota.fiveHourResetAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) })
+                : t("prov.keyForecast5hOutNoReset")}</span>
+            );
+          }
+          if (quota.expiresAt !== undefined && quota.expiresAt > Date.now()) {
+            const days = Math.ceil((quota.expiresAt - Date.now()) / (24 * 60 * 60 * 1000));
+            if (days <= 14 && (quota.weeklyPercent === undefined || quota.weeklyPercent < 100)) {
+              return <span style={{ color: "var(--amber)" }}>· {t("prov.keyForecastExpirySoon", { n: String(days) })}</span>;
+            }
+          }
+          return null;
+        })()}
       </span>
     </div>
   );

@@ -388,6 +388,50 @@ async function maybeFetchProviderQuota(
  * and the whole call returns null only if zero keys returned data.
  */
 async function fetchMinimaxChatQuota(provider: string, prov: OcxProviderConfig): Promise<ProviderQuotaReport | null> {
+  const keys = await probeMinimaxKeyQuotas(prov);
+  if (!keys) return null;
+
+  // Provider-level rollup mirrors the ACTIVE key (or the only key).
+  // Provider-level rollup:
+  //   - 5h: each key has its OWN rolling 5h window (independent trigger times), so we
+  //     cannot simply sum used values. Provider-level 5h mirrors the ACTIVE key instead.
+  //   - weekly: calendar-week window resets at Monday 00:00 across ALL keys, so used
+  //     values sum cleanly. weeklyLimit likewise sums; weeklyPercent is recomputed.
+  //   - expiresAt + planLabel: each key has its own; provider mirrors the active one.
+  const active = keys.find(k => k.active) ?? keys[0];
+  let totalWeeklyUsed = 0;
+  let totalWeeklyLimit = 0;
+  let anyWeekly = false;
+  for (const k of keys) {
+    if (k.weeklyUsed !== undefined && k.weeklyLimit !== undefined) {
+      totalWeeklyUsed += k.weeklyUsed;
+      totalWeeklyLimit += k.weeklyLimit;
+      anyWeekly = true;
+    }
+  }
+  const summedWeeklyPct = anyWeekly && totalWeeklyLimit > 0
+    ? Math.max(0, Math.min(100, (totalWeeklyUsed / totalWeeklyLimit) * 100))
+    : undefined;
+  const quota: ProviderQuota = {
+    updatedAt: Date.now(),
+    ...(active.fiveHourPercent !== undefined ? { fiveHourPercent: active.fiveHourPercent } : {}),
+    ...(active.fiveHourResetAt !== undefined ? { fiveHourResetAt: active.fiveHourResetAt } : {}),
+    ...(summedWeeklyPct !== undefined ? { weeklyPercent: summedWeeklyPct } : {}),
+    ...(active.weeklyResetAt !== undefined ? { weeklyResetAt: active.weeklyResetAt } : {}),
+    ...(active.planLabel ? { planLabel: active.planLabel } : {}),
+    ...(active.expiresAt !== undefined ? { expiresAt: active.expiresAt } : {}),
+    keys,
+  };
+  return report(provider, "minimax-chat:/v1/usage", quota);
+}
+
+/**
+ * Raw per-key probe against the minimax.chat `/v1/usage` endpoint (no rollup, no cache).
+ * Shared by fetchMinimaxChatQuota (provider-level report) and the quota-aware key
+ * scheduler (key-scheduler.ts), which caches results itself. Returns null when zero
+ * keys returned usable data.
+ */
+export async function probeMinimaxKeyQuotas(prov: OcxProviderConfig): Promise<ProviderQuotaKey[] | null> {
   const baseUrl = (prov.baseUrl ?? "").replace(/\/+$/, "");
   if (!baseUrl) return null;
 
@@ -423,40 +467,7 @@ async function fetchMinimaxChatQuota(provider: string, prov: OcxProviderConfig):
     }
   }));
   const keys = perKey.filter((k): k is ProviderQuotaKey => k !== null);
-  if (keys.length === 0) return null;
-
-  // Provider-level rollup mirrors the ACTIVE key (or the only key).
-  // Provider-level rollup:
-  //   - 5h: each key has its OWN rolling 5h window (independent trigger times), so we
-  //     cannot simply sum used values. Provider-level 5h mirrors the ACTIVE key instead.
-  //   - weekly: calendar-week window resets at Monday 00:00 across ALL keys, so used
-  //     values sum cleanly. weeklyLimit likewise sums; weeklyPercent is recomputed.
-  //   - expiresAt + planLabel: each key has its own; provider mirrors the active one.
-  const active = keys.find(k => k.active) ?? keys[0];
-  let totalWeeklyUsed = 0;
-  let totalWeeklyLimit = 0;
-  let anyWeekly = false;
-  for (const k of keys) {
-    if (k.weeklyUsed !== undefined && k.weeklyLimit !== undefined) {
-      totalWeeklyUsed += k.weeklyUsed;
-      totalWeeklyLimit += k.weeklyLimit;
-      anyWeekly = true;
-    }
-  }
-  const summedWeeklyPct = anyWeekly && totalWeeklyLimit > 0
-    ? Math.max(0, Math.min(100, (totalWeeklyUsed / totalWeeklyLimit) * 100))
-    : undefined;
-  const quota: ProviderQuota = {
-    updatedAt: Date.now(),
-    ...(active.fiveHourPercent !== undefined ? { fiveHourPercent: active.fiveHourPercent } : {}),
-    ...(active.fiveHourResetAt !== undefined ? { fiveHourResetAt: active.fiveHourResetAt } : {}),
-    ...(summedWeeklyPct !== undefined ? { weeklyPercent: summedWeeklyPct } : {}),
-    ...(active.weeklyResetAt !== undefined ? { weeklyResetAt: active.weeklyResetAt } : {}),
-    ...(active.planLabel ? { planLabel: active.planLabel } : {}),
-    ...(active.expiresAt !== undefined ? { expiresAt: active.expiresAt } : {}),
-    keys,
-  };
-  return report(provider, "minimax-chat:/v1/usage", quota);
+  return keys.length === 0 ? null : keys;
 }
 
 function parseMinimaxUsageForKey(

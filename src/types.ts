@@ -471,6 +471,14 @@ export interface OcxProviderConfig {
    * `apiKey` seeds a one-entry pool on first management touch.
    */
   apiKeyPool?: Array<{ id: string; key: string; label?: string; addedAt?: number }>;
+  /**
+   * Quota-aware proactive key scheduling (threshold gate + expiry-urgency ranking).
+   * Only effective for providers with a live per-key quota probe (v1: minimax.chat reverse
+   * proxies) and apiKeyPool >= 2. `enabled` defaults to true; `threshold` is the 5h-window
+   * utilization fraction (0-1, default 0.85) at which the scheduler rotates away. Probe
+   * failure or absence degrades gracefully to the reactive 429 failover path.
+   */
+  keySchedule?: { enabled?: boolean; threshold?: number };
   defaultModel?: string;
   /**
    * Model used by the per-key "Test" button (`/api/providers/keys/test`). When unset the
