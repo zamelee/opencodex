@@ -227,6 +227,23 @@ export async function maybeRotateForQuota(config: OcxConfig, providerName: strin
 }
 
 /** Read-only snapshot for the management API / GUI. */
+/**
+ * Warm the probe cache for the state endpoint. Without this, a fresh server reports
+ * nextUpId=null until the first real request happens to run the gate — the GUI badge
+ * would never show on page load. Best-effort: probe failure leaves the cache cold and
+ * the state simply reports nextUpId=null.
+ */
+export async function warmKeyScheduleProbe(config: OcxConfig, providerName: string): Promise<void> {
+  const provider = config.providers[providerName];
+  if (!provider || provider.disabled === true) return;
+  if (provider.authMode === "oauth" || provider.authMode === "forward") return;
+  if ((provider.apiKeyPool?.length ?? 0) < 2) return;
+  if (!isMinimaxChatReverseProxy(providerName, provider)) return;
+  try {
+    await probeKeysCached(providerName, provider, Date.now());
+  } catch { /* probe failure → cold cache → nextUpId null */ }
+}
+
 export function getKeyScheduleState(config: OcxConfig, providerName: string): KeyScheduleState | null {
   const provider = config.providers[providerName];
   if (!provider) return null;

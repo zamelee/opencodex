@@ -150,6 +150,13 @@ describe("server quota-aware key scheduling (end-to-end)", () => {
     saveConfig(config);
     const server = startServer(0);
     try {
+      // Cold server, zero requests: the endpoint itself warms the probe so the next-up
+      // badge is meaningful on page load (regression: used to report nextUpId=null).
+      const early = await originalFetch(new URL("/api/providers/key-schedule?name=pooled", server.url));
+      const earlyState = await early.json() as { nextUpId: string | null };
+      expect(earlyState.nextUpId).toBe("k2");
+      expect(seenAuth).toHaveLength(0); // warming must not dispatch any generation call
+
       const res = await fetch(new URL("/v1/responses", server.url), {
         method: "POST",
         headers: { "content-type": "application/json" },

@@ -1011,7 +1011,10 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
   if (url.pathname === "/api/providers/key-schedule" && req.method === "GET") {
     const name = (url.searchParams.get("name") ?? "").trim();
     if (!name || !isValidProviderName(name) || !hasOwnProvider(config.providers, name)) return jsonResponse({ error: "unknown provider" }, 404);
-    const { getKeyScheduleState } = await import("../providers/key-scheduler");
+    // Warm the probe first so nextUpId is meaningful on a fresh server (page load
+    // before any request has run the gate).
+    const { warmKeyScheduleProbe, getKeyScheduleState } = await import("../providers/key-scheduler");
+    await warmKeyScheduleProbe(config, name);
     const state = getKeyScheduleState(config, name);
     if (!state) return jsonResponse({ error: "unknown provider" }, 404);
     return jsonResponse(state);
