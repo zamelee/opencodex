@@ -133,36 +133,33 @@ def _avx_find_node_exe():
 # `Bun.sleepSync`, tsconfig `moduleResolution: "bundler"`, extension-less
 # imports). Node ESM cannot satisfy any of these — `bun run` would either
 # crash on `bun:` URL scheme or fail to resolve `src/codex/inject` style paths.
-# So we no longer pretend node is a fallback: when AVX is missing the only
-# honest answer is to refuse and tell the operator to upgrade hardware.
+# AVX is no longer part of the runtime gate: Bun 1.2+ targets Nehalem
+# (SSE4.2) as the baseline, with AVX2/AVX-512 selected at runtime when
+# supported. Older revisions of this script refused on NO_AVX based on a
+# misreading of bun's pre-1.2 compatibility shim — the real binary has
+# no such gate. AVX is now reported for diagnostic logging only.
 def decide_runtime(force=None):
     """Pick runtime command prefix. force: 'bun'|'node'|None.
 
-    Returns dict with runtime/reason/node_path/avx/node_cmd. When AVX is
-    missing (or force=='node' on a project that doesn't actually ship a
-    Node backend) runtime="none" — callers must refuse to spawn.
+    Returns dict with runtime/reason/avx. Runtime is 'bun' for normal use
+    and 'none' only when force=='node' (no Node backend exists, refuse
+    to mask a real failure). AVX is included for logging only — the
+    SSE4.2 baseline shipped by Bun 1.2+ covers all x64 CPUs we care
+    about, including Apollo Lake (J3455) and other Atom/Celeron parts.
     """
     feats = _avx_detect_cpu_features()
     info = {
-        "avx": bool(feats["avx"]),
+        "avx": bool(feats.get("avx", False)),
         "avx2": bool(feats.get("avx2", False)),
         "source": feats.get("source", ""),
         "runtime": "bun",
         "reason": "default",
-        "node_path": None,
-        "node_cmd": None,
     }
     if force == "bun":
         info["reason"] = "forced"
-        return info
-    if force == "node":
-        # No node backend exists; refuse so we don't paper over a real failure.
+    elif force == "node":
         info["runtime"] = "none"
         info["reason"] = "node-backend-not-implemented"
-        return info
-    if not feats["avx"]:
-        info["runtime"] = "none"
-        info["reason"] = "no-avx-no-bun-runtime-no-node-backend"
     return info
 
 
@@ -175,16 +172,12 @@ def log_runtime_decision(decision):
     DIM = "\x1b[2m"
     RESET = "\x1b[0m"
     if not avx:
-        tag = f"{RED}NO_AVX{RESET}"
-        if rt == "none":
-            print(
-                f"[avx] {tag}  REFUSE: CPU lacks AVX. opencodex requires Bun runtime "
-                f"(`bun:sqlite` / `Bun.serve`); there is no Node fallback. "
-                f"Run on Haswell (2013) or newer, or in WSL/Linux.",
-                file=sys.stderr,
-            )
-        else:
-            print(f"[avx] {tag}  WARNING: CPU lacks AVX and node is not on PATH; running bun anyway. Long uptimes (>3h) on Windows may crash.", file=sys.stderr)
+        tag = f"{YELLOW}NO_AVX{RESET}"
+        print(
+            f"[avx] {tag}  (Bun ships a SSE4.2 baseline build; runtime continues. "
+            f"Long uptimes on Windows may be unstable.) [{decision.get('source','')}]",
+            file=sys.stderr,
+        )
     else:
         tag = f"{DIM}avx ok{RESET}"
         print(f"[avx] CPU feature detection: {tag} ({decision.get('source','')})", file=sys.stderr)
@@ -809,7 +802,7 @@ def run_cli(*args: str, env_overrides: dict | None = None, no_bootstrap: bool = 
         print(
             f"[err] 无法启动 opencodex：runtime 决策为 none (reason={reason}). "
             f"本项目强依赖 Bun runtime（bun:sqlite / Bun.serve），且不存在 Node backend。"
-            f"请在满足 Bun 最低要求（Win10 1809+ / x86_64 SSE4.2+ / Haswell 或更新）的机器上运行。",
+            "AVX 不再参与判定 — Bun 的 SSE4.2 baseline 已覆盖 Apollo Lake / Atom / Celeron。",
             file=sys.stderr,
         )
         return 2
@@ -887,14 +880,16 @@ def run_background(port: int, cli_overrides: dict | None = None, no_bootstrap: b
             if bun_exe is None:
                 print("[err] bun 装后 PATH 仍找不到。请重新打开 PowerShell。", file=sys.stderr)
                 return 127
-        # Runtime decision. Mirror run_cli: refuse if runtime="none".
+        # Runtime decision. Mirror run_cli: refuse only if runtime="none"
+        # (currently only triggered by explicit --force=node, since AVX is
+        # no longer part of the gate).
         runtime_decision = decide_runtime()
         log_runtime_decision(runtime_decision)
         if runtime_decision.get("runtime") == "none":
             reason = runtime_decision.get("reason", "unknown")
             print(
                 f"[err] 后台启动中止：runtime 决策为 none (reason={reason}). "
-                f"本项目强依赖 Bun runtime（bun:sqlite / Bun.serve）。",
+                f"本项目强依赖 Bun runtime（bun:sqlite / Bun.serve），且不存在 Node backend。",
                 file=sys.stderr,
             )
             return 2
