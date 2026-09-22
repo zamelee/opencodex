@@ -567,4 +567,8 @@ export const zh: Record<TKey, string> = {
     "settings.restartOk": "\u4ee3\u7406\u5df2\u6062\u590d \u2713",
     "settings.restartFailed": "\u91cd\u542f\u5931\u8d25\uff1a{msg}",
   "apiKeys.copyError": "无法复制。浏览器拦截了对剪贴板的访问。",
+  "prov.probeAdapters": "检测",
+  "prov.probeAdaptersAria": "从 {name} 同时探测三种协议",
+  "prov.probeAdaptersLoading": "正在探测…",
+  "prov.probeAdaptersRecommended": "推荐",
 };

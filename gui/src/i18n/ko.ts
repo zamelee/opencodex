@@ -567,4 +567,8 @@ export const ko: Record<TKey, string> = {
     "settings.restarting": "\u518d\u8d77\u52d5\u4e2d\u2026",
     "settings.restartOk": "\u30d7\u30ed\u30ad\u30b7\u518d\u8d77\u52d5\u5b8c\u4e86 \u2713",
     "settings.restartFailed": "\u518d\u8d77\u52d5\u5931\u6557\uff1a{msg}",
+  "prov.probeAdapters": "탐지",
+  "prov.probeAdaptersAria": "{name}에 대해 세 가지 프로토콜 모두 탐지",
+  "prov.probeAdaptersLoading": "탐지 중…",
+  "prov.probeAdaptersRecommended": "추천",
 };

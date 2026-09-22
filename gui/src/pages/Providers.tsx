@@ -9,6 +9,19 @@ import QuotaBars from "../components/QuotaBars";
 import KeyPoolPanel from "../components/KeyPoolPanel";
 import { providerIconSrc } from "../provider-icons";
 
+interface ProbeAdapterResult {
+  adapter: "anthropic" | "openai-responses" | "openai-chat";
+  ok: boolean;
+  status?: number;
+  modelCount: number;
+  models: string[];
+  warning?: string;
+}
+interface AdapterProbeResponse {
+  recommended: ProbeAdapterResult["adapter"];
+  results: ProbeAdapterResult[];
+}
+
 interface Config {
   port: number;
   defaultProvider: string;
@@ -84,6 +97,27 @@ export default function Providers({ apiBase }: { apiBase: string }) {
   // (already in /api/config response) so we don't have to keep them in sync. We only need
   // transient loading + error state per provider for the 拉取模型 button.
   const [pullingModels, setPullingModels] = useState<Record<string, boolean>>({});
+  const [probingAdapters, setProbingAdapters] = useState<Record<string, boolean>>({});
+  const [adapterProbeResult, setAdapterProbeResult] = useState<Record<string, AdapterProbeResponse | undefined>>({});
+  const probeAdapters = async (provider: string) => {
+    setProbingAdapters(prev => ({ ...prev, [provider]: true }));
+    try {
+      const res = await fetch(`${apiBase}/api/providers/probe-adapters`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: provider }),
+      });
+      const data = await res.json() as AdapterProbeResponse | { error?: string };
+      if (!res.ok || "error" in (data as Record<string, unknown>)) {
+        notify(("error" in data ? (data as { error?: string }).error : null) || `HTTP ${res.status}`, false);
+        return;
+      }
+      setAdapterProbeResult(prev => ({ ...prev, [provider]: data as AdapterProbeResponse }));
+    } catch (err) {
+      notify(String(err), false);
+    } finally {
+      setProbingAdapters(prev => ({ ...prev, [provider]: false }));
+    }
+  };
   const [providerModelError, setProviderModelError] = useState<Record<string, string | undefined>>({});
 
   const aliveRef = useRef(true);
@@ -740,6 +774,74 @@ export default function Providers({ apiBase }: { apiBase: string }) {
                               t("prov.pullModels")
                             )}
                           </button>
+                          <button
+                            className="btn btn-ghost btn-sm"
+                            onClick={() => probeAdapters(name)}
+                            disabled={!!probingAdapters[name]}
+                            aria-label={t("prov.probeAdaptersAria", { name })}
+                            title={t("prov.probeAdapters")}
+                            style={{ fontSize: 11 }}
+                          >
+                            {probingAdapters[name] ? (
+                              <><span className="spin" />{t("prov.probeAdaptersLoading")}</>
+                            ) : (
+                              t("prov.probeAdapters")
+                            )}
+                          </button>
+                          {adapterProbeResult[name] ? (() => {
+                            const r = adapterProbeResult[name]!;
+                            return (
+                              <div
+                                className="prov-adapter-probe"
+                                data-testid="adapter-probe-result"
+                                style={{
+                                  display: "flex",
+                                  flexDirection: "column",
+                                  gap: 4,
+                                  marginTop: 6,
+                                  padding: "6px 8px",
+                                  border: "1px solid var(--border)",
+                                  borderRadius: 4,
+                                  fontSize: 11,
+                                }}
+                              >
+                                <span style={{ color: "var(--muted)" }}>
+                                  {t("prov.probeAdaptersRecommended")}: <strong>{r.recommended}</strong>
+                                </span>
+                                {r.results.map((row) => (
+                                  <label
+                                    key={row.adapter}
+                                    className="prov-adapter-probe-row"
+                                    style={{
+                                      display: "flex",
+                                      alignItems: "center",
+                                      gap: 8,
+                                      padding: "2px 0",
+                                      cursor: row.ok && row.modelCount > 0 ? "pointer" : "default",
+                                    }}
+                                  >
+                                    <input
+                                      type="radio"
+                                      name={`adapter-choice-${name}`}
+                                      disabled={!(row.ok && row.modelCount > 0)}
+                                      onChange={() => {
+                                        notify(`Adapter ${row.adapter} selected — edit provider JSON to apply.`, true);
+                                      }}
+                                      data-testid={`adapter-choice-${row.adapter}`}
+                                    />
+                                    <code style={{ minWidth: 130 }}>{row.adapter}</code>
+                                    {row.ok && row.modelCount > 0 ? (
+                                      <span style={{ color: "#4ade80" }}>✓ {row.modelCount} models</span>
+                                    ) : row.ok ? (
+                                      <span style={{ color: "#facc15" }}>⚠ empty (200, data[])</span>
+                                    ) : (
+                                      <span style={{ color: "var(--red)" }}>✗ {row.warning ?? "failed"}</span>
+                                    )}
+                                  </label>
+                                ))}
+                              </div>
+                            );
+                          })() : null}
                           {provModels.length > 0 ? (
                             <span className="muted" style={{ fontSize: 10.5 }}>
                               {t("prov.modelsJustPulled", { count: provModels.length })}

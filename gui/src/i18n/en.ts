@@ -568,6 +568,10 @@ export const en = {
     "settings.restarting": "Restarting\u2026",
     "settings.restartOk": "Proxy back up \u2713",
     "settings.restartFailed": "Restart failed: {msg}",
+  "prov.probeAdapters": "Detect",
+  "prov.probeAdaptersAria": "Probe all three protocols against {name}",
+  "prov.probeAdaptersLoading": "Probing…",
+  "prov.probeAdaptersRecommended": "Recommended",
 } as const;
 
 export type TKey = keyof typeof en;

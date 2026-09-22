@@ -547,6 +547,10 @@ export const de = {
     "settings.restarting": "Starte neu\u2026",
     "settings.restartOk": "Proxy l\u00e4uft wieder \u2713",
     "settings.restartFailed": "Neustart fehlgeschlagen: {msg}",
+  "prov.probeAdapters": "Erkennen",
+  "prov.probeAdaptersAria": "Drei Protokolle für {name} testen",
+  "prov.probeAdaptersLoading": "Teste…",
+  "prov.probeAdaptersRecommended": "Empfohlen",
 } as const;
 
 export type TKey = keyof typeof de;
