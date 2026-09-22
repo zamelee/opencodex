@@ -109,9 +109,6 @@ def _avx_detect_cpu_features():
     return feats
 
 
-_NODE_CACHE = None
-
-
 def _avx_find_node_exe():
     global _NODE_CACHE
     if _NODE_CACHE is not None:
@@ -132,43 +129,40 @@ def _avx_find_node_exe():
             except OSError:
                 continue
     return None
-
-
+# NOTE: this project hard-depends on Bun runtime (`bun:sqlite`, `Bun.serve`,
+# `Bun.sleepSync`, tsconfig `moduleResolution: "bundler"`, extension-less
+# imports). Node ESM cannot satisfy any of these — `bun run` would either
+# crash on `bun:` URL scheme or fail to resolve `src/codex/inject` style paths.
+# So we no longer pretend node is a fallback: when AVX is missing the only
+# honest answer is to refuse and tell the operator to upgrade hardware.
 def decide_runtime(force=None):
     """Pick runtime command prefix. force: 'bun'|'node'|None.
-    Returns dict with runtime/reason/node_path/avx/node_cmd."""
+
+    Returns dict with runtime/reason/node_path/avx/node_cmd. When AVX is
+    missing (or force=='node' on a project that doesn't actually ship a
+    Node backend) runtime="none" — callers must refuse to spawn.
+    """
     feats = _avx_detect_cpu_features()
-    node_path = _avx_find_node_exe()
-    has_node = node_path is not None
     info = {
         "avx": bool(feats["avx"]),
+        "avx2": bool(feats.get("avx2", False)),
         "source": feats.get("source", ""),
-        "node_path": node_path,
-        "has_node": has_node,
         "runtime": "bun",
         "reason": "default",
+        "node_path": None,
         "node_cmd": None,
     }
     if force == "bun":
         info["reason"] = "forced"
         return info
     if force == "node":
-        if not has_node:
-            info["runtime"] = "bun"
-            info["reason"] = "node-forced-but-missing"
-        else:
-            info["runtime"] = "node"
-            info["reason"] = "forced"
-            info["node_cmd"] = [node_path, "run"]
+        # No node backend exists; refuse so we don't paper over a real failure.
+        info["runtime"] = "none"
+        info["reason"] = "node-backend-not-implemented"
         return info
     if not feats["avx"]:
-        if has_node:
-            info["runtime"] = "node"
-            info["reason"] = "no-avx-fallback"
-            info["node_cmd"] = [node_path, "run"]
-        else:
-            info["runtime"] = "bun"
-            info["reason"] = "no-avx-no-node-fallback"
+        info["runtime"] = "none"
+        info["reason"] = "no-avx-no-bun-runtime-no-node-backend"
     return info
 
 
@@ -181,11 +175,15 @@ def log_runtime_decision(decision):
     DIM = "\x1b[2m"
     RESET = "\x1b[0m"
     if not avx:
-        if rt == "node":
-            tag = f"{RED}NO_AVX{RESET}"
-            print(f"[avx] CPU feature detection: {tag}  -> falling back to node ({decision['node_path']})", file=sys.stderr)
+        tag = f"{RED}NO_AVX{RESET}"
+        if rt == "none":
+            print(
+                f"[avx] {tag}  REFUSE: CPU lacks AVX. opencodex requires Bun runtime "
+                f"(`bun:sqlite` / `Bun.serve`); there is no Node fallback. "
+                f"Run on Haswell (2013) or newer, or in WSL/Linux.",
+                file=sys.stderr,
+            )
         else:
-            tag = f"{RED}NO_AVX{RESET}"
             print(f"[avx] {tag}  WARNING: CPU lacks AVX and node is not on PATH; running bun anyway. Long uptimes (>3h) on Windows may crash.", file=sys.stderr)
     else:
         tag = f"{DIM}avx ok{RESET}"
@@ -455,18 +453,72 @@ def has_bun() -> bool:
 
 
 def find_bun_exe() -> str | None:
-    """Return absolute path to bun executable (resolved through PATHEXT),
-    or None if not found. Windows .cmd shims cannot always be invoked directly
-    by subprocess with list args + no shell=True, so we resolve first and
-    pass the absolute path as cmd[0].
+    """Return absolute path to a real (non-stub) bun executable, or None.
+
+    Resolution order (highest priority first):
+      1. Project-local node_modules: ROOT/node_modules/.bin/bun{,.exe,.cmd}
+      2. Project-local node_modules: ROOT/node_modules/bun/bin/bun{,.exe}
+         (npm installs the real ~86MB binary here; the .cmd shim that nvm
+         creates at PATH priority is only a few hundred bytes and prints
+         "version of bun.exe is not compatible" when invoked.)
+      3. shutil.which(BUN) on PATH, with the same size gate applied.
+
+    The size gate rejects nvm/npm-placeholder stubs (~hundreds of bytes);
+    the real Windows binary is ~86 MB (1.4.x) and never under 30 MB.
+    Windows .cmd shims cannot always be invoked directly by subprocess
+    with list args + no shell=True, so we resolve first and pass the
+    absolute path as cmd[0].
     """
+    REAL_BUN_MIN_BYTES = 30 * 1024 * 1024  # 30 MB floor; real bun ~86 MB
+
+    def _candidates_from_dir(d: Path):
+        out = []
+        nm_bin = d / "node_modules" / ".bin"
+        for name in ("bun", "bun.exe", "bun.cmd"):
+            out.append(nm_bin / name)
+        nm_pkg = d / "node_modules" / "bun" / "bin"
+        for name in ("bun", "bun.exe", "bun.cmd"):
+            out.append(nm_pkg / name)
+        return out
+
+    # 1+2: project-local node_modules (ROOT and CWD).
+    seen: set[str] = set()
+    for base in {ROOT, Path.cwd()}:
+        for cand in _candidates_from_dir(base):
+            try:
+                real = cand.resolve(strict=False)
+            except OSError:
+                continue
+            key = str(real).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                if real.is_file() and real.stat().st_size >= REAL_BUN_MIN_BYTES:
+                    return str(real)
+            except OSError:
+                continue
+
+    # 3: PATH (covers nvm/node-managed locations whose .cmd shim would
+    # otherwise print a misleading "version incompatible" error).
     p = shutil.which(BUN)
-    if p is None:
-        return None
-    try:
-        return str(Path(p).resolve())
-    except OSError:
-        return p
+    if p is not None:
+        try:
+            real = Path(p).resolve()
+            size = real.stat().st_size if real.exists() else 0
+        except OSError:
+            real = Path(p)
+            size = 0
+        if size >= REAL_BUN_MIN_BYTES:
+            return str(real)
+        print(
+            f"[warn] PATH 命中的 bun({p})大小={size} bytes，"
+            f"远低于真 binary 阈值({REAL_BUN_MIN_BYTES // (1024*1024)} MB)，疑似 nvm/npm placeholder stub。"
+            f"已跳过。请检查 ROOT/node_modules/bun/bin/bun.exe 是否存在。",
+            file=sys.stderr,
+        )
+
+    return None
 
 
 def ensure_deps_installed(quiet: bool = False) -> bool:
@@ -705,12 +757,20 @@ def run_cli(*args: str, env_overrides: dict | None = None, no_bootstrap: bool = 
     if not ensure_gui_built():
         print("[err] GUI build 不上，请先手动跳 `bun run build:gui` 再重试。", file=sys.stderr)
         return 127
-    # Pick runtime command. Node fallback only fires when bun's no_avx compat path would
-    # otherwise be used AND node is on PATH. Default = bun.
-    if ocx_env_marker == "node" and runtime_decision.get("node_cmd"):
-        cmd = list(runtime_decision["node_cmd"]) + ["src/cli/index.ts", *args]
-    else:
-        cmd = [bun_exe, "run", "src/cli/index.ts", *args]
+    # Pick runtime command. Project hard-depends on Bun; if runtime="none"
+    # (CPU lacks AVX, or operator explicitly forced "node" but no Node
+    # backend exists), refuse instead of falling through to a known-bad
+    # command.
+    if ocx_env_marker == "none":
+        reason = runtime_decision.get("reason", "unknown")
+        print(
+            f"[err] 无法启动 opencodex：runtime 决策为 none (reason={reason}). "
+            f"本项目强依赖 Bun runtime（bun:sqlite / Bun.serve），且不存在 Node backend。"
+            f"请在满足 Bun 最低要求（Win10 1809+ / x86_64 SSE4.2+ / Haswell 或更新）的机器上运行。",
+            file=sys.stderr,
+        )
+        return 2
+    cmd = [bun_exe, "run", "src/cli/index.ts", *args]
     print(f"[run] {' '.join(cmd)}", file=sys.stderr)
     env = None
     if env_overrides:
@@ -784,13 +844,18 @@ def run_background(port: int, cli_overrides: dict | None = None, no_bootstrap: b
             if bun_exe is None:
                 print("[err] bun 装后 PATH 仍找不到。请重新打开 PowerShell。", file=sys.stderr)
                 return 127
-        # Patch 1: AVX-driven runtime choice (mirror run_cli)
+        # Runtime decision. Mirror run_cli: refuse if runtime="none".
         runtime_decision = decide_runtime()
         log_runtime_decision(runtime_decision)
-        if runtime_decision.get("runtime") == "node" and runtime_decision.get("node_cmd"):
-            spawn_cmd = list(runtime_decision["node_cmd"]) + ["src/cli/index.ts", "start", "--port", str(effective_port)]
-        else:
-            spawn_cmd = [bun_exe, "run", "src/cli/index.ts", "start", "--port", str(effective_port)]
+        if runtime_decision.get("runtime") == "none":
+            reason = runtime_decision.get("reason", "unknown")
+            print(
+                f"[err] 后台启动中止：runtime 决策为 none (reason={reason}). "
+                f"本项目强依赖 Bun runtime（bun:sqlite / Bun.serve）。",
+                file=sys.stderr,
+            )
+            return 2
+        spawn_cmd = [bun_exe, "run", "src/cli/index.ts", "start", "--port", str(effective_port)]
         proc = subprocess.Popen(
             spawn_cmd,
             cwd=str(ROOT),
