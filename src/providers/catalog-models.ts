@@ -100,8 +100,20 @@ async function fetchGoogleModels(provider: OcxProviderConfig, key: string): Prom
 }
 
 /** Try each pool key in order; first 2xx wins. Used by the "拉取模型" button. */
-export async function fetchProviderModels(provider: OcxProviderConfig, pool: Array<{ key: string }>): Promise<{ models: string[] } | { error: string }> {
+export async function fetchProviderModels(provider: OcxProviderConfig, pool: Array<{ key: string }>): Promise<{ models: string[] } | { error: string; hint?: string }> {
   const adapter = (provider.adapter ?? "").toLowerCase();
+  const base = (provider.baseUrl ?? "").toLowerCase();
+  // Reverse-proxy providers (m.aiio.chat, minnimax.chat) accept the `x-api-key`
+  // header but reject `openai-chat`/anthropic-version/User-Agent. Adapter=openai-*
+  // sends `Authorization: Bearer` which these proxies ignore, so a key that
+  // works for /v1/usage returns [] for /v1/models. Detect and steer.
+  const looksLikeReverseProxy = base.includes("m.aiio.chat") || base.includes("minnimax.chat");
+  if (looksLikeReverseProxy && adapter !== "anthropic") {
+    return {
+      error: "wrong adapter for reverse-proxy provider",
+      hint: `baseUrl "${provider.baseUrl}" looks like the m.aiio.chat / minnimax.chat reverse proxy, which expects adapter=anthropic (x-api-key header, /v1/models + /v1/usage). Current adapter="${provider.adapter}" sends Authorization: Bearer and the proxy returns an empty list. Switch adapter to "anthropic" and retry.`,
+    };
+  }
   for (const entry of pool) {
     let r: { ok: true; models: string[] } | { ok: false; error: string };
     if (adapter === "anthropic") {
@@ -119,7 +131,10 @@ export async function fetchProviderModels(provider: OcxProviderConfig, pool: Arr
     }
     // If this key failed with auth, try the next one. Otherwise stop and surface.
     const looksAuth = /401|403|empty key|invalid/i.test(r.error);
-    if (!looksAuth && pool.length > 1) return { error: r.error };
+    if (!looksAuth && pool.length > 1) return { error: r.error, hint: undefined };
   }
-  return { error: "no key produced a usable model list (all returned auth failures)" };
+  return {
+    error: "no key produced a usable model list (all returned auth failures)",
+    hint: "Every key in apiKeyPool was rejected with 401/403. Common causes: (1) all keys are expired/disabled; (2) adapter mismatch — e.g. baseUrl is a reverse proxy (m.aiio.chat / minnimax.chat) but adapter is \"openai-responses\", which sends Authorization: Bearer instead of x-api-key; (3) key was copied with stray whitespace. Verify with: curl -H \"x-api-key: <key>\" -H \"anthropic-version: 2023-06-01\" <baseUrl>/v1/usage",
+  };
 }

@@ -104,7 +104,25 @@ export async function runInit(): Promise<void> {
       process.exit(1);
     }
     const baseUrl = await prompt.ask("Base URL (e.g. http://localhost:11434/v1): ");
-    const adapter = await prompt.ask("Adapter [openai-chat]: ") || "openai-chat";
+    // Steer reverse-proxy baseUrls to adapter=anthropic upfront so the user
+    // doesn't end up with `openai-responses` + Authorization: Bearer, which
+    // m.aiio.chat / minnimax.chat silently reject (returns [] for /v1/models,
+    // 401 for /v1/usage — and you can't tell the difference).
+    const baseUrlLower = baseUrl.trim().toLowerCase();
+    const looksLikeReverseProxy = baseUrlLower.includes("m.aiio.chat") || baseUrlLower.includes("minnimax.chat");
+    const adapterDefault = looksLikeReverseProxy ? "anthropic" : "openai-chat";
+    const adapter = (await prompt.ask(`Adapter [${adapterDefault}]: `)) || adapterDefault;
+    if (looksLikeReverseProxy && adapter.trim().toLowerCase() !== "anthropic") {
+      console.warn(
+        `⚠️  baseUrl "${baseUrl.trim()}" looks like a reverse proxy (m.aiio.chat / minnimax.chat).
+` +
+        `    These proxies expect adapter=anthropic (x-api-key header). Anything else sends
+` +
+        `    Authorization: Bearer and gets back an empty list. You can continue, but you will
+` +
+        `    likely see "endpoint returned no models" and "/v1/usage 401". Switch to anthropic now.`,
+      );
+    }
     const apiKey = await prompt.ask("API key (optional): ");
     const defaultModel = await prompt.ask("Default model: ");
     providerConfig = {

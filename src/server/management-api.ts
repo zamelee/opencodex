@@ -1061,7 +1061,11 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
     if (pool.length === 0) return jsonResponse({ error: "no keys configured" }, 400);
     const { fetchProviderModels } = await import("../providers/catalog-models");
     const result = await fetchProviderModels(provider, pool);
-    if ("error" in result) return jsonResponse({ error: result.error }, 400);
+    if ("error" in result) {
+      const body: { error: string; hint?: string } = { error: result.error };
+      if (result.hint) body.hint = result.hint;
+      return jsonResponse(body, 400);
+    }
     provider.models = result.models;
     saveConfig(config);
     return jsonResponse({ models: result.models, source: "live" });
