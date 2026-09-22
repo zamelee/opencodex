@@ -1036,6 +1036,26 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
     return jsonResponse(result);
   }
 
+  // Concurrent probe of all three adapters. Returns ordered results for the
+  // user to pick from; never persists anything (read-only diagnostic).
+  if (url.pathname === "/api/providers/probe-adapters" && req.method === "POST") {
+    let rb: { name?: string };
+    try { rb = await req.json(); } catch { return jsonResponse({ error: "invalid JSON body" }, 400); }
+    const name = (rb.name ?? "").trim();
+    if (!name || !isValidProviderName(name) || !hasOwnProvider(config.providers, name)) {
+      return jsonResponse({ error: "unknown provider" }, 404);
+    }
+    const prov = config.providers[name]!;
+    try {
+      const { probeAllAdapters } = await import("../providers/catalog-models");
+      const result = await probeAllAdapters(prov);
+      return jsonResponse(result);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return jsonResponse({ error: msg }, 400);
+    }
+  }
+
   // Fetch the provider's live model list (or return cached `provider.models`). Used by the
   // Providers-page "拉取模型" button to populate the per-key test-model dropdown. Read-only,
   // does not touch cooldowns, does not rotate the active key, and only refreshes `provider.models`

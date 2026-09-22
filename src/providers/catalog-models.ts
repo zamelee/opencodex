@@ -138,3 +138,77 @@ export async function fetchProviderModels(provider: OcxProviderConfig, pool: Arr
     hint: "Every key in apiKeyPool was rejected with 401/403. Common causes: (1) all keys are expired/disabled; (2) adapter mismatch — e.g. baseUrl is a reverse proxy (m.aiio.chat / minnimax.chat) but adapter is \"openai-responses\", which sends Authorization: Bearer instead of x-api-key; (3) key was copied with stray whitespace. Verify with: curl -H \"x-api-key: <key>\" -H \"anthropic-version: 2023-06-01\" <baseUrl>/v1/usage",
   };
 }
+// Per-adapter probe used by the dashboard "Detect" button. Each candidate
+// adapter is probed independently (concurrent) against the same baseUrl +
+// first key, with results returned for the user to choose from. NEVER
+// applied automatically — the user must explicitly pick one and persist
+// it themselves, so this function stays purely read-only.
+export type ProbeAdapterResult = {
+  adapter: "anthropic" | "openai-responses" | "openai-chat";
+  ok: boolean;
+  status?: number;
+  modelCount: number;
+  models: string[];
+  warning?: string;
+};
+
+const PROBE_ADAPTERS: ProbeAdapterResult["adapter"][] = [
+  "anthropic",
+  "openai-responses",
+  "openai-chat",
+];
+
+function poolFirstKey(provider: OcxProviderConfig): string | null {
+  const pool = provider.apiKeyPool;
+  if (Array.isArray(pool) && pool.length > 0 && pool[0]?.key) return pool[0].key;
+  if (provider.apiKey) return provider.apiKey;
+  return null;
+}
+
+async function probeOneAdapter(adapter: ProbeAdapterResult["adapter"], provider: OcxProviderConfig, key: string): Promise<ProbeAdapterResult> {
+  const probeProvider = { ...provider, adapter };
+  const r = adapter === "anthropic"
+    ? await fetchAnthropicModels(probeProvider, key)
+    : await fetchOpenAiModels(probeProvider, key);
+  if (!r.ok) {
+    return { adapter, ok: false, modelCount: 0, models: [], warning: r.error };
+  }
+  return {
+    adapter,
+    ok: r.models.length > 0,
+    status: 200,
+    modelCount: r.models.length,
+    models: r.models,
+    ...(r.models.length === 0 ? { warning: "endpoint returned no models (200 OK with empty list)" } : {}),
+  };
+}
+
+export async function probeAllAdapters(provider: OcxProviderConfig): Promise<{ recommended: ProbeAdapterResult["adapter"]; results: ProbeAdapterResult[] }> {
+  const key = poolFirstKey(provider);
+  if (!key) {
+    throw new Error("no apiKey / apiKeyPool[0].key configured");
+  }
+  const base = (provider.baseUrl ?? "").toLowerCase();
+  const reverseProxy =
+    base.includes("m.aiio.chat") || base.includes("minnimax.chat");
+  const order: ProbeAdapterResult["adapter"][] = reverseProxy
+    ? ["anthropic", "openai-responses", "openai-chat"]
+    : ["openai-chat", "openai-responses", "anthropic"];
+  const probed = await Promise.all(
+    order.map(async (a) => {
+      try {
+        const r = await probeOneAdapter(a, provider, key);
+        return r;
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return { adapter: a, ok: false, modelCount: 0, models: [], warning: msg } as ProbeAdapterResult;
+      }
+    }),
+  );
+  // Recommended = first adapter that returned >= 1 model, in the
+  // probe order above. If none return anything, fall back to first
+  // order entry — the user can still see all 3 results and pick.
+  const anySuccess = probed.find(r => r.ok && r.modelCount > 0);
+  const recommended = anySuccess ? anySuccess.adapter : order[0]!;
+  return { recommended, results: probed };
+}
