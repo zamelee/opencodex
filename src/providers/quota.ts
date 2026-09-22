@@ -11,7 +11,6 @@ const CACHE_TTL_MS = 5 * 60_000;
 const REQUEST_TIMEOUT_MS = 8_000;
 const REFRESH_SKEW_MS = 60_000;
 const MINIMAX_USAGE_TIMEOUT_MS = 15_000;
-const MINIMAX_USER_AGENT = "opencodex-quota-probe/0.1 (cli)";
 
 export interface ProviderQuotaWindow {
   label: string;
@@ -456,12 +455,11 @@ export async function probeMinimaxKeyQuotas(prov: OcxProviderConfig): Promise<Pr
   const perKey = await Promise.all(pool.map(async (entry) => {
     try {
       const res = await fetch(`${baseUrl}/v1/usage`, {
-        headers: {
-          "x-api-key": entry.key,
-          "anthropic-version": "2023-06-01",
-          "User-Agent": MINIMAX_USER_AGENT,
-          Accept: "application/json",
-        },
+        // The m.aiio.chat dashboard uses a single `x-api-key` header — no
+        // anthropic-version, no Accept, no User-Agent. Earlier revisions
+        // added a "well-mannered" set of extra headers and got 401; the
+        // reverse proxy treats extra headers as a rejection signal.
+        headers: { "x-api-key": entry.key },
         signal: AbortSignal.timeout(MINIMAX_USAGE_TIMEOUT_MS),
       });
       if (!res.ok) return null;

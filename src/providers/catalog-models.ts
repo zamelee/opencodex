@@ -35,12 +35,10 @@ async function fetchAnthropicModels(provider: OcxProviderConfig, key: string): P
   try {
     const res = await fetch(`${base}/v1/models`, {
       method: "GET",
-      headers: {
-        "x-api-key": key,
-        "anthropic-version": "2023-06-01",
-        "User-Agent": "@anthropic-ai/sdk/0.74.0",
-        Accept: "application/json",
-      },
+      // m.aiio.chat (and other minimax reverse proxies) reject any request
+      // carrying extra headers beyond `x-api-key` with 401. Match the
+      // dashboard JS bundle's fetch exactly: one header, the key.
+      headers: { "x-api-key": key },
       signal: AbortSignal.timeout(8000),
     });
     if (!res.ok) {
