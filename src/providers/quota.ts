@@ -4,6 +4,7 @@ import { getValidAccessToken } from "../oauth";
 import { getCredential } from "../oauth/store";
 import { antigravityUserAgent } from "../adapters/client-fingerprint";
 import { getProviderRegistryEntry } from "./registry";
+import { stripBase } from "./catalog-models";
 import type { OcxConfig, OcxProviderConfig } from "../types";
 
 const CACHE_TTL_MS = 5 * 60_000;
@@ -432,7 +433,11 @@ async function fetchMinimaxChatQuota(provider: string, prov: OcxProviderConfig):
  * keys returned usable data.
  */
 export async function probeMinimaxKeyQuotas(prov: OcxProviderConfig): Promise<ProviderQuotaKey[] | null> {
-  const baseUrl = (prov.baseUrl ?? "").replace(/\/+$/, "");
+  // Strip both trailing slashes and a single trailing `/v1` so the probe
+  // works regardless of whether the user typed `https://m.aiio.chat/v1` or
+  // `https://m.aiio.chat` — without this, `/v1/usage` would double up to
+  // `/v1/v1/usage` and silently return nothing.
+  const baseUrl = stripBase(prov.baseUrl ?? "");
   if (!baseUrl) return null;
 
   // Collect all keys: prefer apiKeyPool (multi-key), fall back to legacy single apiKey.

@@ -7,8 +7,14 @@
 import type { OcxProviderConfig } from "../types";
 
 /** Strip trailing `/v1` or `/` from a base URL so we can append endpoints safely. */
-function stripBase(url: string): string {
-  return (url ?? "").replace(/\/+$/, "").replace(/\/v1\/?$/, "");
+export function stripBase(url: string): string {
+  // Collapse repeated slashes only AFTER the protocol separator (which
+  // is the only legal place for `//`); strip trailing slashes, then
+  // strip one optional trailing `/v1` segment.
+  const parts = (url ?? "").split("://", 2);
+  const head = parts.length === 2 ? parts[0] + "://" : "";
+  const tail = (parts[1] ?? "").replace(/\/{2,}/g, "/");
+  return (head + tail).replace(/\/+$/, "").replace(/\/v1$/, "");
 }
 
 /** Common shape: we extract `id` and `data[]` (OpenAI shape) and `data[]`/`models[]` (anthropic). */
