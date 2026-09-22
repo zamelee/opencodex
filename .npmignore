@@ -21,4 +21,10 @@ gui/bun.lock
 # misc
 *.test.ts
 *.map
+**/*.bak
+**/*.bak-*
+**/*.tmp
+*.bak
+*.bak-*
+*.tmp
 .DS_Store

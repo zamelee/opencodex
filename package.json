@@ -24,7 +24,10 @@
     "assets/architecture.png",
     "assets/codex-app-picker.png",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "!**/*.bak",
+    "!**/*.bak-*",
+    "!**/*.tmp"
   ],
   "engines": {
     "node": ">=18"
