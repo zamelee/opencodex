@@ -499,7 +499,50 @@ def find_bun_exe() -> str | None:
             except OSError:
                 continue
 
-    # 3: PATH (covers nvm/node-managed locations whose .cmd shim would
+    # 3: npm-global node_modules. On nvm/Node-managed machines `npm install
+    #    -g bun` writes to <npm-prefix>/node_modules/bun/bin/bun.exe — and
+    #    that path passes the size gate even when the PATH-relative
+    #    `bun(.cmd)` shim is the nvm ~135-byte stub. Resolve via
+    #    `npm root -g` when npm is on PATH; fall back to walking parent
+    #    dirs of each node binary for the sibling `node_modules/`.
+    global_npm_roots: list[Path] = []
+    npm = shutil.which("npm")
+    if npm is not None:
+        try:
+            r = subprocess.run([npm, "root", "-g"], capture_output=True, text=True, timeout=8)
+            if r.returncode == 0:
+                global_npm_roots.append(Path(r.stdout.strip()))
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    # Fallback: derive from `where.exe node` parent dir (covers nvm on
+    # Windows where `npm root -g` may be blocked by ExecutionPolicy).
+    node_bin = shutil.which("node")
+    if node_bin is not None:
+        # `_candidates_from_dir` already appends `/node_modules/bun/bin`
+        # and `/node_modules/.bin` itself, so feed the parent of node_modules
+        # (the nvm nodejs root) directly, not the node_modules dir.
+        node_root = Path(node_bin).resolve().parent  # <...>/nodejs
+        if (node_root / "node_modules").exists():
+            global_npm_roots.append(node_root)
+        elif (node_root / "lib" / "node_modules").exists():
+            global_npm_roots.append(node_root / "lib")
+    for npm_root in global_npm_roots:
+        for cand in _candidates_from_dir(npm_root):
+            try:
+                real = cand.resolve(strict=False)
+            except OSError:
+                continue
+            key = str(real).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                if real.is_file() and real.stat().st_size >= REAL_BUN_MIN_BYTES:
+                    return str(real)
+            except OSError:
+                continue
+
+    # 4: PATH (covers nvm/node-managed locations whose .cmd shim would
     # otherwise print a misleading "version incompatible" error).
     p = shutil.which(BUN)
     if p is not None:
