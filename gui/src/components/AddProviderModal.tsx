@@ -89,6 +89,15 @@ export default function AddProviderModal({
     return presets.filter(p => p.label.toLowerCase().includes(q) || p.id.toLowerCase().includes(q));
   }, [query, presets]);
 
+  // Pick the best adapter based on baseUrl hostname. Used by both
+  // choosePreset (when user picks Custom) and the baseUrl field onChange
+  // (so the dropdown updates as they type the URL). Reverse-proxy baseUrls
+  // (m.aiio.chat / minnimax.chat) want adapter=anthropic (x-api-key).
+  const reverseProxyBaseUrl = (url: string): string | null => {
+    const lower = url.toLowerCase();
+    if (lower.includes("m.aiio.chat") || lower.includes("minnimax.chat")) return "anthropic";
+    return null;
+  };
   const choosePreset = (p: Preset) => {
     setPreset(p);
     setForm({
@@ -302,7 +311,15 @@ export default function AddProviderModal({
                               </div>
                             </details>
               <Field label="Base URL">
-                <input className="input" value={form.baseUrl} onChange={e => setForm({ ...form, baseUrl: e.target.value })} placeholder="https://..." />
+                <input className="input" value={form.baseUrl} onChange={e => {
+                  const next = e.target.value;
+                  const reverseAdapter = reverseProxyBaseUrl(next);
+                  setForm({
+                    ...form,
+                    baseUrl: next,
+                    adapter: reverseAdapter ?? form.adapter,
+                  });
+                }} placeholder="https://..." />
               </Field>
               {form.authMode === "forward" ? (
                 <div style={{ fontSize: 12, color: "var(--green)", background: "var(--green-soft)", border: "1px solid var(--green)", borderRadius: "var(--radius-sm)", padding: "8px 10px" }}>

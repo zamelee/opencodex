@@ -242,7 +242,13 @@ function dedupePresets(presets: DerivedProviderPreset[]): DerivedProviderPreset[
 }
 
 function customPreset(): DerivedProviderPreset {
-  return { id: "custom", label: "Custom provider", adapter: "openai-chat", baseUrl: "", auth: "key" };
+  // Default adapter intentionally omitted so the GUI dropdown shows the
+  // *first* option in its <select> (`openai-responses`) instead of
+  // auto-picking one. Previously we hard-coded "openai-chat", which
+  // sent the user straight into the wrong-adapter dead end for reverse
+  // proxies like m.aiio.chat / minnimax.chat. Let the user choose.
+  // See AddProviderModal where this is consumed.
+  return { id: "custom", label: "Custom provider", adapter: "openai-responses", baseUrl: "", auth: "key" };
 }
 
 function formatInitLabel(entry: ProviderRegistryEntry): string {
