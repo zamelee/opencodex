@@ -211,8 +211,24 @@ def load_opencodex_config() -> dict:
 
 
 def effective_launcher_mode(cfg: dict) -> bool | None:
-    """返回当前 effective launcher_mode；None = 未设置（= true 默认）。"""
-    if cfg.get("preset") == "proxy-only" or cfg.get("preset") == "full-pass-through":
+    """Resolve the effective launcher mode from cfg.
+
+    Returns:
+      True  = launcher mode ON (opencodex writes ~/.codex/* catalog/config)
+      False = launcher mode OFF (HTTP-only / pass-through; CodexPlusPlus owns Codex)
+      None  = unconfigured (caller should warn loudly + treat as False safe default)
+
+    Reads BOTH the Phase-5 `preset` and the current `enableCodexLauncherMode`
+    (camelCase, what src/config.ts writes today). Preset wins when both are set:
+      preset=launcher                        -> True
+      preset=proxy-only / full-pass-through  -> False
+      enableCodexLauncherMode=true           -> True
+      enableCodexLauncherMode=false          -> False
+    """
+    preset = cfg.get("preset")
+    if preset == "launcher":
+        return True
+    if preset in ("proxy-only", "full-pass-through"):
         return False
     val = cfg.get("enableCodexLauncherMode")
     if val is None:
@@ -229,33 +245,49 @@ def health_ok(port: int) -> bool:
 
 
 def show_state(port: int, effective_port: int | None = None) -> None:
+    """Print the status card: config / port / mode / CodexPlusPlus / uptime.
+
+    Always rendered BEFORE the menu so the user knows what state the proxy
+    is in (and which Codex files the current mode will touch) before picking
+    an action.
+    """
     init = is_initialized()
     if effective_port is None:
-        effective_port = read_runtime_port_file()  # post-spawn drift
+        effective_port = read_runtime_port_file()
     actual_port = effective_port if effective_port is not None else port
     run = health_ok(actual_port)
+    cfg = load_opencodex_config()
+    mode = effective_launcher_mode(cfg)
+    cpp = probe_codex_plus_plus()
+
     print()
-    print("=" * 40)
-    print("  opencodex 面板")
-    print("=" * 40)
-    print(f"  配置     : {'已初始化' if init else '未初始化'}")
+    print("=" * 60)
+    print("  opencodex 控制面板  v2.7.8")
+    print("=" * 60)
+    print(f"  配置       : {CONFIG}  {"已初始化" if init else "未初始化"}")
     if actual_port != port:
-        print(f"  进程     : {'运行中' if run else 'fallback 后未起来'}")
-        print(f"  默认端口 : {port}")
-        print(f"  实际端口 : {actual_port} (fallback 启用)")
-        print(f"  面板地址 : http://localhost:{actual_port}")
+        print(f"  程序       : {"运行中" if run else "fallback 后未起来"} (port {actual_port}, fallback 启用)")
     else:
-        print(f"  进程     : {'运行中' if run else '未运行'}")
-        print(f"  默认端口 : {port}")
-        if run:
-            print(f"  面板地址 : http://localhost:{port}")
-    mode = effective_launcher_mode(load_opencodex_config())
-    if mode is False:
-        print("  launcher : 关（HTTP-only 模式）")
-    print("=" * 40)
+        print(f"  程序       : {"运行中" if run else "未运行"} (port {actual_port})")
+
+    label = mode_label(mode)
+    if mode is None:
+        mode_line = f"  模式       : {label}  (HTTP-only 安全回退)"
+    else:
+        mode_line = f"  模式       : {label}" + ("  (开启 CodexPlusPlus 可能被覆盖)" if cpp["present"] and mode else "")
+    print(mode_line)
+    for line in list_codex_impact(mode):
+        prefix = "├─ " if cpp["present"] and mode else "  "
+        print(f"{prefix}{line}")
     print()
-
-
+    cpp_present = cpp["present"]
+    cpp_pid = cpp["pid"]
+    cpp_line = f"  CodexPlusPlus : ✓ 在跑 (PID {cpp_pid}, port 9222)" if cpp_present else f"  CodexPlusPlus : ✗ 未跑"
+    print(cpp_line)
+    if mode is None:
+        print("  ⚠ launcher_mode 未显式配置。下次启动会提示是否写入安全默认 (HTTP-only)。")
+    print("=" * 60)
+    print()
 def read_runtime_port_file() -> int | None:
     """Best-effort read of runtime-port.json written by bun on bind (mirrors src/cli/index.ts:153 writeRuntimePort).
     Falls back to OPENCODEX_HOME if set (matches src/config.ts resolveConfigDir()).
@@ -728,38 +760,167 @@ def try_bootstrap_bun(non_interactive: bool = False) -> bool:
 
 
 def launcher_env(cfg: dict, cli_overrides: dict | None = None) -> dict:
-    """根据 config + CLI overrides 计算要 spawn 给 bun 子进程的 launcher-mode env vars。
-    cli_overrides 形状（任意字段可缺省）：
-      {"preset": "proxy-only" | "launcher" | "full-pass-through" | None,
-       "launcher_mode": true/false/None,
-       "sync_routed_models": true/false/None,
-       "sync_native_openai_models": true/false/None}"""
+    """Compute env vars to pass to the bun subprocess.
+
+    Resolution order (high -> low):
+      1. cli_overrides (CLI flags win)
+      2. cfg["preset"] (Phase 5)
+      3. cfg["enableCodexLauncherMode"] (camelCase; what src/config.ts writes today)
+      4. cfg["syncRoutedModels"], cfg["syncNativeOpenaiModels"]
+
+    When preset is set, it overrides the per-flag values (Phase 5 contract):
+      proxy-only / full-pass-through -> launcher_mode=false, sync_routed_models=false
+      launcher                       -> launcher_mode=true,  sync_routed_models=true
+      full-pass-through              -> sync_native_openai_models=false
+      proxy-only / launcher          -> sync_native_openai_models=true
+
+    Always emits OCX_LAUNCHER_MODE when its intent is determinable so the bun
+    subprocess never has to fall back to its internal default.
+    """
     overrides = cli_overrides or {}
     env: dict[str, str] = {}
-    # preset 优先
+
+    # Resolve each flag from cli_overrides -> cfg (camelCase) -> None
     preset = overrides.get("preset", cfg.get("preset"))
+    launcher_mode = overrides.get("launcher_mode")
+    if launcher_mode is None and cfg.get("enableCodexLauncherMode") is not None:
+        launcher_mode = bool(cfg["enableCodexLauncherMode"])
+    sync_routed = overrides.get("sync_routed_models")
+    if sync_routed is None and cfg.get("syncRoutedModels") is not None:
+        sync_routed = bool(cfg["syncRoutedModels"])
+    sync_native = overrides.get("sync_native_openai_models")
+    if sync_native is None and cfg.get("syncNativeOpenaiModels") is not None:
+        sync_native = bool(cfg["syncNativeOpenaiModels"])
+
     if preset:
         env["OCX_PRESET"] = str(preset)
         if preset in ("proxy-only", "full-pass-through"):
-            env["OCX_LAUNCHER_MODE"] = "false"
-            env["OCX_SYNC_ROUTED_MODELS"] = "false"
+            launcher_mode = False
+            sync_routed = False
         elif preset == "launcher":
-            env["OCX_LAUNCHER_MODE"] = "true"
-            env["OCX_SYNC_ROUTED_MODELS"] = "true"
-        if preset in ("full-pass-through",):
-            env["OCX_SYNC_NATIVE_OPENAI_MODELS"] = "false"
+            launcher_mode = True
+            sync_routed = True
+        if preset == "full-pass-through":
+            sync_native = False
         elif preset in ("proxy-only", "launcher"):
-            env["OCX_SYNC_NATIVE_OPENAI_MODELS"] = "true"
-    # per-flag 覆盖 preset 设的
-    if overrides.get("launcher_mode") is not None:
-        env["OCX_LAUNCHER_MODE"] = "true" if overrides["launcher_mode"] else "false"
-    if overrides.get("sync_routed_models") is not None:
-        env["OCX_SYNC_ROUTED_MODELS"] = "true" if overrides["sync_routed_models"] else "false"
-    if overrides.get("sync_native_openai_models") is not None:
-        env["OCX_SYNC_NATIVE_OPENAI_MODELS"] = "true" if overrides["sync_native_openai_models"] else "false"
+            sync_native = True
+
+    if launcher_mode is not None:
+        env["OCX_LAUNCHER_MODE"] = "true" if launcher_mode else "false"
+    if sync_routed is not None:
+        env["OCX_SYNC_ROUTED_MODELS"] = "true" if sync_routed else "false"
+    if sync_native is not None:
+        env["OCX_SYNC_NATIVE_OPENAI_MODELS"] = "true" if sync_native else "false"
     if overrides.get("hostname"):
         env["OCX_HOSTNAME"] = str(overrides["hostname"])
     return env
+
+
+# --- launcher mode helpers (Phase 6 redesign) -------------------------------
+
+def mode_label(mode: bool | None) -> str:
+    """Human-readable label for the launcher-mode value.
+    True   -> "launcher"     (opencodex writes ~/.codex/*)
+    False  -> "pass-through" (HTTP-only; CodexPlusPlus/other launcher owns Codex)
+    None   -> "unconfigured" (treated as pass-through but caller should warn)
+    """
+    if mode is True:
+        return "launcher"
+    if mode is False:
+        return "pass-through"
+    return "unconfigured"
+
+
+def list_codex_impact(mode: bool | None) -> list[str]:
+    """Files opencodex touches in launcher mode, or skips in pass-through.
+    Same list also surfaced in the [i] "view impact" menu action.
+    """
+    if mode is True:
+        return [
+            "~/.codex/config.toml (model_provider, openai_base_url on each toggle)",
+            "~/.codex/state_5.sqlite (model_provider tag on each thread)",
+            "~/.codex/opencodex-journal.json (opencodex-internal ledger)",
+            "~/.codex/model-catalogs/relay-*.json (routed model entries appended)",
+        ]
+    return [
+        "(none - pass-through mode leaves ~/.codex/* untouched)",
+    ]
+
+
+def probe_codex_plus_plus() -> dict:
+    """Best-effort detection of CodexPlusPlus running on this machine.
+
+    Two signals combined (process name + port 9222 hold):
+      - Windows process named Codex-win32-x64 (CodexPlusPlus Electron binary)
+      - 127.0.0.1:9222 bound (Chrome DevTools debug port CodexPlusPlus uses)
+
+    Returns dict with keys: present (bool), pid (int|None),
+    port_held (bool), codex_home (Path|None).
+    CodexPlusPlus is Windows-only as of this writing; on other OSes returns
+    present=False without an error.
+    """
+    info = {"present": False, "pid": None, "port_held": False, "codex_home": Path.home() / ".codex"}
+    if sys.platform != "win32":
+        return info
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Get-Process | Where-Object { $_.ProcessName -eq 'codex' -or $_.ProcessName -eq 'Codex-win32-x64' -or $_.ProcessName -eq 'codex-plus-plus-manager' } -ErrorAction SilentlyContinue | "
+             "Select-Object -First 1 -ExpandProperty Id"],
+            capture_output=True, text=True, timeout=4,
+        )
+        pid_text = (out.stdout or "").strip()
+        if pid_text.isdigit():
+            info["pid"] = int(pid_text)
+            info["present"] = True
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    s = None
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(0.3)
+        s.bind(("127.0.0.1", 9222))
+    except OSError as e:
+        if e.errno == errno.EADDRINUSE or getattr(e, "winerror", None) == 10048:
+            info["port_held"] = True
+            info["present"] = True
+    finally:
+        if s is not None:
+            try:
+                s.close()
+            except Exception:
+                pass
+    return info
+
+
+def ensure_safe_default(cfg: dict) -> bool:
+    """If cfg has neither enableCodexLauncherMode nor preset, backfill the
+    safe default (enableCodexLauncherMode=false, preset="full-pass-through").
+    Called lazily by the menu on first launch. Returns True if a write happened.
+    Does NOT touch any other fields. Safe to call repeatedly (idempotent).
+    """
+    if cfg.get("enableCodexLauncherMode") is not None or cfg.get("preset") is not None:
+        return False
+    if not CONFIG.exists():
+        return False
+    try:
+        with CONFIG.open("r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except (OSError, ValueError):
+        return False
+    if not isinstance(raw, dict):
+        return False
+    if raw.get("enableCodexLauncherMode") is not None or raw.get("preset") is not None:
+        return False
+    raw["enableCodexLauncherMode"] = False
+    raw["preset"] = "full-pass-through"
+    try:
+        with CONFIG.open("w", encoding="utf-8") as f:
+            json.dump(raw, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+    except OSError:
+        return False
+    return True
 
 
 def warn_if_proxy_mode(cfg: dict) -> None:
@@ -1029,72 +1190,177 @@ def parse_bool_arg(v: str | None) -> bool | None:
     return None
 
 
+def _menu_action_start(port: int, cli_overrides: dict, no_bootstrap: bool, in_tree: bool) -> int:
+    """[s] start the proxy. Sub-prompt: f=foreground, b=background, shim=install shim then fg."""
+    print()
+    print("  启动方式:")
+    print("    [f] 前台 (Ctrl+C 停)")
+    print("    [b] 后台 (shell 立刻返回)")
+    if in_tree:
+        print("    [shim] 安装 codex-shim + 前台启动")
+    print("    [返回] 上一级")
+    try:
+        sub = input("  选 > ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return 0
+    if sub == "f":
+        return run_start(port, cli_overrides=cli_overrides, no_bootstrap=no_bootstrap)
+    if sub == "b" or sub == "":
+        return run_background(port, cli_overrides=cli_overrides, no_bootstrap=no_bootstrap)
+    if sub == "shim" and in_tree:
+        return run_shim_then_start(port, cli_overrides=cli_overrides, no_bootstrap=no_bootstrap)
+    return 0
+
+
+def _menu_action_toggle_mode(port: int, cli_overrides: dict, no_bootstrap: bool) -> int:
+    """[m] toggle launcher mode. Requires stop -> write config -> start."""
+    cfg = load_opencodex_config()
+    cur = effective_launcher_mode(cfg)
+    next_mode = not (cur is True)  # None / False -> True; True -> False
+    cpp = probe_codex_plus_plus()
+    print()
+    print(f"  当前模式: {mode_label(cur)}")
+    print(f"  目标模式: {mode_label(next_mode)}")
+    print()
+    print("  影响文件 (目标模式下):")
+    for line in list_codex_impact(next_mode):
+        print(f"    {line}")
+    print()
+    if cpp["present"] and next_mode:
+        print("  ⚠ 检测到 CodexPlusPlus 在跑。切到 launcher 模式会覆盖 CodexPlusPlus 的路由配置。")
+    elif cpp["present"] and not next_mode:
+        print("  ✓ 检测到 CodexPlusPlus 在跑。切到 pass-through 不会冲突。")
+    print()
+    try:
+        ans = input("  确认切换吗？[y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return 0
+    if ans != "y":
+        print("  取消。")
+        return 0
+    # Stop running proxy first so the env vars we set actually take effect.
+    rc = run_stop(port)
+    if rc != 0 and rc != 124:
+        print(f"  [warn] 停服务返回 {rc}，仍会尝试写入 config", file=sys.stderr)
+    # Write the new value into config.
+    try:
+        with CONFIG.open("r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except (OSError, ValueError):
+        raw = {}
+    raw["enableCodexLauncherMode"] = bool(next_mode)
+    raw["preset"] = "launcher" if next_mode else "full-pass-through"
+    try:
+        with CONFIG.open("w", encoding="utf-8") as f:
+            json.dump(raw, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+        print(f"  [cfg] 写入配置: enableCodexLauncherMode={next_mode}, preset={raw['preset']}")
+    except OSError as e:
+        print(f"  [err] 写入失败: {e}", file=sys.stderr)
+        return 1
+    # Restart so the new env vars are picked up.
+    return run_background(port, cli_overrides=cli_overrides, no_bootstrap=no_bootstrap)
+
+
+def _menu_action_view_impact() -> int:
+    """[i] show which ~/.codex/* files the current mode would touch."""
+    cfg = load_opencodex_config()
+    mode = effective_launcher_mode(cfg)
+    print()
+    print(f"  当前模式: {mode_label(mode)}")
+    print("  影响的 Codex 文件:")
+    for line in list_codex_impact(mode):
+        print(f"    {line}")
+    print()
+    return 0
+
+
+def _menu_action_status(port: int) -> int:
+    """[?] proxy status via bun status command."""
+    return run_status()
+
+
 def main_menu(port: int, cli_overrides: dict | None = None, no_bootstrap: bool = False) -> int:
+    in_tree = (ROOT / "package.json").exists()
     while True:
         show_state(port)
-        print("请选择启动方式（直接回车 = 2 后台）：")
-        print()
-        if (ROOT / "package.json").exists():
-            print("  [1] 前台运行")
-            print("  [2] 后台运行（shell 立刻返回；默认）")
-            print("  [3] 装 codex-shim + 前台跑")
-            print("  [4] 首次：init + 后台启动")
-            print("  [5] 只跑 init（交互）")
-            print("  [6] 停服务")
-            print("  [7] 看 status")
-            print("  [8] 清 dist")
-            print("  [q] 退出")
+        # One-time backfill: if config has neither enableCodexLauncherMode
+        # nor preset, propose writing the safe default.
+        cfg = load_opencodex_config()
+        if is_initialized() and cfg.get("enableCodexLauncherMode") is None and cfg.get("preset") is None:
+            print("  [hint] launcher_mode 未显式配置。如果你计划长期用 CodexPlusPlus 管 Codex，")
+            print("         推荐为安全默认 enableCodexLauncherMode=false（HTTP-only）。")
+            try:
+                ans = input("  现在写入默认配置吗？[y/N] ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                ans = "n"
+            if ans == "y":
+                if ensure_safe_default(cfg):
+                    print("  [cfg] 已写入 enableCodexLauncherMode=false + preset=full-pass-through。下次启动会传递给 bun。")
+                else:
+                    print("  [err] 写入失败，跳过。")
+                print()
+
+        if in_tree:
+            print("  动作:")
+            print("    [s] 启动  (f=前台 / b=后台 / shim=安 codex-shim)")
+            print("    [x] 停止  (停服务 + 恢复原生 Codex)")
+            print("    [m] 切换模式  (HTTP-only <-> Launcher)")
+            print("    [i] 查看影响  (列出当前模式会动哪些 Codex 文件)")
+            print("    [?] 查看状态  (proxy status)")
+            print("    [c] 配置 init  (首次安装 / 重新 init)")
+            print("    [r] 清理 dist  (gui/dist + dist)")
+            print("    [q] 退出")
         else:
-            print("  [1] 首次装机（克隆 repo + 装依赖 + init + 后台启动）")
-            print("  [2] 后台运行（shell 立刻返回；默认）")
-            print("  [3] 装 codex-shim + 前台跑")
-            print("  [4] 前台运行")
-            print("  [5] 只跑 init（交互）")
-            print("  [6] 停服务")
-            print("  [q] 退出")
+            print("  动作 (out-of-tree，尚未 init):")
+            print("    [s] 启动  (含首次安装 bootstrap)")
+            print("    [x] 停止")
+            print("    [m] 切换模式  (需先 init)")
+            print("    [i] 查看影响")
+            print("    [?] 查看状态")
+            print("    [q] 退出")
             print()
-            print("  ★ 检测到尚未初始化。推荐先跑 [1] 首次装机。", file=__import__("sys").stderr)
+            print("  ⚠ 检测到未 init，请先运行 [s] bootstrap 。")
         print()
         try:
-            c = input("选项 > ").strip().lower()
+            c = input("选 > ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             print()
             return 0
 
-        in_tree = (ROOT / "package.json").exists()
-        if in_tree:
-            # In-tree menu: 老布局
-            if   c == "1": return run_start(port, cli_overrides=cli_overrides, no_bootstrap=no_bootstrap)
-            elif c in ("", "2"): return run_background(port, cli_overrides=cli_overrides, no_bootstrap=no_bootstrap)
-            elif c == "3": return run_shim_then_start(port, cli_overrides=cli_overrides, no_bootstrap=no_bootstrap)
-            elif c == "4":
-                if is_initialized():
-                    print(f"[init] 已发现 {CONFIG}，跳过 init", file=sys.stderr)
-                else:
-                    rc = run_init()
-                    if rc != 0 or not is_initialized():
-                        print("[init] init 后仍未生成 config，终止", file=sys.stderr)
-                        return rc or 1
-                return run_background(port, cli_overrides=cli_overrides, no_bootstrap=no_bootstrap)
-            elif c == "5": return run_init()
-            elif c == "6": return run_stop(port)
-            elif c == "7": return run_status()
-            elif c == "8": run_clean()
-            elif c == "q": return 0
-        else:
-            # Out-of-tree menu: bootstrap 是首选
-            if   c == "1": return run_bootstrap(port, None, None, cli_overrides=cli_overrides, no_bootstrap=no_bootstrap)
-            elif c == "2": return run_bootstrap(port, None, None, cli_overrides=cli_overrides, no_bootstrap=no_bootstrap)
-            elif c == "3": return run_bootstrap(port, None, None, cli_overrides=cli_overrides, no_bootstrap=no_bootstrap)
-            elif c == "4":
-                print("[hint] 尚未初始化。请先跑 [1] 首次装机，或自己 clone + bun install。", file=sys.stderr)
-                time.sleep(2)
-            elif c == "5": return run_bootstrap(port, None, None, cli_overrides=cli_overrides, no_bootstrap=no_bootstrap)
-            elif c == "6": return run_stop(port)
-            elif c == "q": return 0
-            else:
-                print(f"无效: {c}", file=sys.stderr)
-                time.sleep(1)
+        if c == "q":
+            return 0
+        if c == "x":
+            return run_stop(port)
+        if c == "i":
+            _menu_action_view_impact()
+            continue
+        if c == "?":
+            _menu_action_status(port)
+            continue
+        if c == "c":
+            if not in_tree:
+                print("  out-of-tree 环境下 init 走 bootstrap 路径。")
+                continue
+            run_init()
+            continue
+        if c == "r":
+            run_clean()
+            continue
+        if c == "m":
+            if not is_initialized():
+                print("  未 init，跳过。")
+                continue
+            _menu_action_toggle_mode(port, cli_overrides or {}, no_bootstrap)
+            continue
+        if c == "s" or c == "":
+            if not in_tree:
+                # Out-of-tree: bootstrap (clone + install + init + background)
+                rc = run_bootstrap(port, None, None, cli_overrides=cli_overrides, no_bootstrap=no_bootstrap)
+                return rc
+            return _menu_action_start(port, cli_overrides or {}, no_bootstrap, in_tree)
+        # Unrecognized key: show hint, loop back.
+        print(f"  未识别的选项：{c!r}。按上面列表选。", file=sys.stderr)
 
 
 def build_cli_overrides(args: argparse.Namespace) -> dict:
