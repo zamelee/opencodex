@@ -470,6 +470,29 @@ export async function handleResponses(
     return formatErrorResponse(404, "invalid_request_error", err instanceof Error ? err.message : String(err));
   }
 
+  let routeModelError: Error | null = null;
+
+  // Location E: if a previous request's stream died without firing its onDone callback,
+  // a stale `pendingKeyChange` may still be hanging on the provider config. Force-commit
+  // it now so the dispatch below uses a fresh, consistent apiKey.
+  try {
+    const { commitPendingKeyChange } = await import("../providers/key-scheduler");
+    const committed = commitPendingKeyChange(config, route.providerName);
+    if (committed) {
+      try {
+        route = routeModel(config, parsed.modelId);
+      } catch (err) {
+        routeModelError = err instanceof Error ? err : new Error(String(err));
+      }
+    }
+    if (routeModelError) {
+      return formatErrorResponse(404, "invalid_request_error", routeModelError.message);
+    }
+  } catch {
+    /* commit failures are already logged inside commitPendingKeyChange; never break dispatch */
+  }
+  void routeModelError;
+
   // Apply the routed model id upstream: routing may strip a "<provider>/" namespace
   // (e.g. "opencode-go/deepseek-v4-pro" → "deepseek-v4-pro"). Adapters read parsed.modelId,
   // and the passthrough adapter serializes _rawBody, so rewrite both.
@@ -489,9 +512,14 @@ export async function handleResponses(
   // dispatch for the local estimate between probes. Best-effort — never breaks a request.
   try {
     const { maybeRotateForQuota, recordRoutedCall } = await import("../providers/key-scheduler");
-    if (await maybeRotateForQuota(config, route.providerName)) {
-      route = routeModel(config, parsed.modelId); // fresh provider config with the rotated key
-    }
+    // maybeRotateForQuota now stages the rotation as `provider.pendingKeyChange` instead
+    // of mutating `apiKey` directly, so the in-flight dispatch on this route keeps
+    // using the old key. commitPendingKeyChange runs when the dispatch stream closes
+    // (or, if the stream dies without it, at the start of the next request). This is
+    // the path that fixes CodexPlusPlus 502s on 5h-threshold rotations: before, this
+    // code re-routed the whole RouteResult, which under load could swap providers mid-
+    // stream and trigger an upstream_stall_timeout abort.
+    await maybeRotateForQuota(config, route.providerName);
     const dispatchedPoolKey = route.provider.apiKeyPool?.find(entry => entry.key === route.provider.apiKey);
     if (dispatchedPoolKey) recordRoutedCall(route.providerName, dispatchedPoolKey.id);
   } catch {
@@ -819,7 +847,20 @@ export async function handleResponses(
     }
     const body = relayWithAbort(upstreamResponse.body, upstream);
     const turnAc = new AbortController();
-    const tracked = body ? trackStreamLifetime(body, turnAc) : null;
+    // Location D: commit pendingKeyChange once the dispatch stream closes (or aborts).
+    // Captures `route.providerName` so the callback can call commitPendingKeyChange after
+    // dynamic import to avoid pulling key-scheduler into the hot request path before it's
+    // needed. Without this, the next request's stale pendingKeyChange would only flush at
+    // routeModel entry (Location E), leaving this request's mid-stream cuts unprotected.
+    const tracked = body
+      ? trackStreamLifetime(body, turnAc, () => {
+          import("../providers/key-scheduler")
+            .then(({ commitPendingKeyChange }) => commitPendingKeyChange(config, route.providerName))
+            .catch((err) => console.warn(
+              `[opencodex] failed to commit pending key change for ${route.providerName}: ${err instanceof Error ? err.message : String(err)}`,
+            ));
+        })
+      : null;
     return new Response(tracked, {
       status: upstreamResponse.status,
       headers,
@@ -906,9 +947,18 @@ export async function handleResponses(
       on429: retryAfter => {
         const rotated = rotateKeyOn429(config, route.providerName, retryAfter, Date.now(), route.provider.apiKey);
         if (!rotated) return null;
-        route.provider = rotated;
+        if (!rotated.apiKey) return null; // rotated without an apiKey cannot stage a commit
+        // Same pattern as Location A: stage instead of swapping. rotated.apiKey is the new
+        // key but `route.provider.apiKey` keeps the old value for the in-flight stream.
+        // commitPendingKeyChange runs on stream done (or next-request entry).
+        route.provider.pendingKeyChange = {
+          keyId: (rotated.apiKeyPool ?? []).find(e => e.key === rotated.apiKey)?.id ?? "active",
+          key: rotated.apiKey,
+          ts: Date.now(),
+          reason: "429",
+        };
         return resolveAdapter(
-          resolveWireProtocolOverride(route.providerName, route.modelId, rotated),
+          resolveWireProtocolOverride(route.providerName, route.modelId, route.provider),
           config.cacheRetention,
         );
       },

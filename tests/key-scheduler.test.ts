@@ -134,7 +134,12 @@ describe("maybeRotateForQuota", () => {
       quotaKey("k3", { fiveHourUsed: 900, fiveHourLimit: 2500 }),
     ]);
     expect(await maybeRotateForQuota(config, "p", NOW)).toBe(true);
-    expect(config.providers.p!.apiKey).toBe("key-beta-444555666777");
+    // Pending mode: rotation is staged, apiKey is NOT mutated yet (commit happens on stream done
+    // or next request via commitPendingKeyChange).
+    expect(config.providers.p!.apiKey).toBe("key-alpha-000111222333");
+    expect(config.providers.p!.pendingKeyChange?.keyId).toBe("k2");
+    expect(config.providers.p!.pendingKeyChange?.key).toBe("key-beta-444555666777");
+    expect(config.providers.p!.pendingKeyChange?.reason).toBe("5h-threshold");
     const state = getKeyScheduleState(config, "p");
     expect(state?.events).toHaveLength(1);
     expect(state?.events[0]).toMatchObject({ fromId: "k1", toId: "k2", reason: "5h-threshold" });
@@ -161,6 +166,9 @@ describe("maybeRotateForQuota", () => {
     expect(await maybeRotateForQuota(config, "p", NOW)).toBe(false);
     for (let i = 0; i < 30; i++) recordRoutedCall("p", "k1"); // 2131/2500 = 0.8524 → over
     expect(await maybeRotateForQuota(config, "p", NOW)).toBe(true);
+    // apiKey unchanged (still staging); pendingKeyChange is set.
+    expect(config.providers.p!.apiKey).toBe("key-alpha-000111222333");
+    expect(config.providers.p!.pendingKeyChange?.keyId).toBe("k2");
   });
 
   test("probe failure degrades to no-op (429 backstop owns the retry)", async () => {
@@ -199,7 +207,10 @@ describe("maybeRotateForQuota", () => {
       quotaKey("k2", { fiveHourUsed: 1000, fiveHourLimit: 2500 }), // 0.4 < 0.5
     ]);
     expect(await maybeRotateForQuota(config, "p", NOW)).toBe(true);
-    expect(config.providers.p!.apiKey).toBe("key-beta-444555666777");
+    // Pending mode: apiKey is not yet mutated - staging only.
+    expect(config.providers.p!.apiKey).toBe("key-alpha-000111222333");
+    expect(config.providers.p!.pendingKeyChange?.keyId).toBe("k2");
+    expect(config.providers.p!.pendingKeyChange?.key).toBe("key-beta-444555666777");
   });
 
   test("no-op for non-quota providers and small pools", async () => {
@@ -225,7 +236,10 @@ describe("getKeyScheduleState", () => {
     await maybeRotateForQuota(config, "p", NOW);
     const state = getKeyScheduleState(config, "p");
     expect(state?.enabled).toBe(true);
-    expect(state?.activeId).toBe("k2");
-    expect(state?.nextUpId).toBe("k3");
+    // Pending mode: activeId still k1 (rotation staged, not committed yet).
+    expect(state?.activeId).toBe("k1");
+    // Pending-mode: nextUpId is the pending target (k2), NOT the post-commit standby.
+    expect(state?.nextUpId).toBe("k2");
+    expect(state?.pendingKeyChange?.keyId).toBe("k2");
   });
 });

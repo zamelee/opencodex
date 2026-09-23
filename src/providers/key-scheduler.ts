@@ -50,6 +50,8 @@ export interface KeyScheduleState {
   /** Best-ranked standby key, computed from the cached probe; null when unknown. */
   nextUpId: string | null;
   events: KeyRotationEvent[];
+  /** Mirror of provider.pendingKeyChange; non-null when a staged rotation is awaiting commit. */
+  pendingKeyChange?: import("../types").PendingKeyChange;
 }
 
 const DEFAULT_THRESHOLD = 0.85;
@@ -201,9 +203,22 @@ export async function maybeRotateForQuota(config: OcxConfig, providerName: strin
   const next = pool.find(e => e.id === toId);
   if (!next) return false;
 
-  const toQuota = keys.find(k => k.id === toId);
-  provider.apiKey = next.key;
-  saveConfig(config);
+ const toQuota = keys.find(k => k.id === toId);
+  // Pending mode: stage the change instead of mutating. The dispatch for the
+  // current request continues with the existing apiKey; commitPendingKeyChange
+  // (called by responses.ts when the dispatch stream closes) applies the swap.
+  // This prevents mid-stream cuts that surface as CodexPlusPlus 100s
+  // upstream_stall_timeout aborts.
+  const pending: PendingKeyChange = {
+    keyId: toId,
+    key: next.key,
+    ts: now,
+    reason: "5h-threshold",
+  };
+  provider.pendingKeyChange = pending;
+  for (const entry of pool) {
+    entry.active = entry.id === toId;
+  }
 
   const event: KeyRotationEvent = {
     ts: now,
@@ -221,7 +236,41 @@ export async function maybeRotateForQuota(config: OcxConfig, providerName: strin
   rotationEvents.set(providerName, list);
 
   console.warn(
-    `[key-scheduler] ${providerName}: active key ${active.id} 5h at ${(activeEst * 100).toFixed(1)}% ≥ ${threshold * 100}%; rotating to ${toId} (est ${((event.toFiveHourEst ?? 0) * 100).toFixed(1)}%)`,
+    `[key-scheduler] ${providerName}: active key ${active.id} 5h at ${(activeEst * 100).toFixed(1)}% ≥ ${threshold * 100}%; STAGED rotation to ${toId} (est ${((event.toFiveHourEst ?? 0) * 100).toFixed(1)}%, applies on next request)`,
+  );
+  return true;
+}
+
+/**
+ * Apply a previously-staged `pendingKeyChange`. Called by responses.ts once the
+ * dispatch stream for the request which triggered the rotation closes, OR at the
+ * start of the next request if a stale pendingKeyChange is still hanging around
+ * (the previous stream died without firing its onDone). Idempotent: no-op if
+ * `provider.pendingKeyChange` is unset. Errors during saveConfig are logged and
+ * swallowed - the next request's retry will re-attempt the commit.
+ */
+export function commitPendingKeyChange(config: OcxConfig, providerName: string): boolean {
+  const provider = config.providers[providerName];
+  if (!provider || !provider.pendingKeyChange) return false;
+  const pkc = provider.pendingKeyChange;
+  provider.apiKey = pkc.key;
+  if (provider.apiKeyPool) {
+    for (const entry of provider.apiKeyPool) {
+      entry.active = entry.id === pkc.keyId;
+    }
+  }
+  provider.pendingKeyChange = undefined;
+  try {
+    saveConfig(config);
+  } catch (error) {
+    console.warn(
+      `[key-scheduler] ${providerName}: commitPendingKeyChange saveConfig failed (${error instanceof Error ? error.message : String(error)}) - key left at ${pkc.keyId}; next request will retry`,
+    );
+    provider.pendingKeyChange = pkc;
+    return false;
+  }
+  console.log(
+    `[key-scheduler] ${providerName}: committed pending key change to ${pkc.keyId} (reason: ${pkc.reason})`,
   );
   return true;
 }
@@ -254,9 +303,12 @@ export function getKeyScheduleState(config: OcxConfig, providerName: string): Ke
     && provider.authMode !== "oauth" && provider.authMode !== "forward"
     && pool.length >= 2
     && isMinimaxChatReverseProxy(providerName, provider);
-  let nextUpId: string | null = null;
+  // Pending-mode: when a rotation is pending, the key being rotated to IS the next-useful
+  // key from the user perspective. After commit lands on next request, the active key
+  // flips and pickNextKey reports the new standby.
+  let nextUpId: string | null = provider.pendingKeyChange?.keyId ?? null;
   const cached = probeCache.get(providerName);
-  if (enabled && cached) {
+  if (!nextUpId && enabled && cached) {
     const now = Date.now();
     nextUpId = pickNextKey(cached.keys, providerName, active?.id ?? null, threshold, now, id => isKeyInCooldown(providerName, id, now));
   }
@@ -266,6 +318,7 @@ export function getKeyScheduleState(config: OcxConfig, providerName: string): Ke
     activeId: active?.id ?? null,
     nextUpId,
     events: [...(rotationEvents.get(providerName) ?? [])],
+    pendingKeyChange: provider.pendingKeyChange,
   };
 }
 
@@ -282,3 +335,4 @@ export function clearKeyScheduleState(providerName?: string): void {
     if (mapKey.startsWith(`${providerName} `)) localCalls.delete(mapKey);
   }
 }
+import type { PendingKeyChange } from "../types";

@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import AddProviderModal from "../components/AddProviderModal";
+import EditProviderModal, { type EditableProvider } from "../components/EditProviderModal";
 import { Notice } from "../ui";
-import { IconPlus, IconTrash, IconLock, IconExternal, IconPower, IconChevron } from "../icons";
+import { IconPlus, IconTrash, IconLock, IconExternal, IconPower, IconChevron, IconEdit } from "../icons";
 import { useT, type TFn } from "../i18n";
 import type { AccountQuota } from "../codex-quota-utils";
 import { formatRelativeTime } from "../codex-quota-utils";
@@ -28,6 +29,7 @@ interface Config {
   providers: Record<string, {
     adapter: string;
     baseUrl: string;
+    label?: string;
     hasApiKey?: boolean;
     hasHeaders?: boolean;
     defaultModel?: string;
@@ -35,6 +37,8 @@ interface Config {
     models?: string[];
     authMode?: string;
     disabled?: boolean;
+    liveModels?: boolean;
+    headers?: Record<string, string>;
   }>;
 }
 
@@ -83,6 +87,14 @@ export default function Providers({ apiBase }: { apiBase: string }) {
   // Quota-scheduler snapshots per provider (threshold, next-up candidate, rotation events).
   const [keySchedules, setKeySchedules] = useState<Record<string, KeyScheduleState | null>>({});
   const [addingKeyFor, setAddingKeyFor] = useState<string | null>(null);
+  // True while a PATCH /api/providers/key-schedule is in flight for the named
+  // provider, so the threshold slider can show a disabled state and ignore rapid
+  // repeat drags (debounced naturally by the request latency itself).
+  const [savingThreshold, setSavingThreshold] = useState<string | null>(null);
+  // Per-provider pending threshold (draft state for the Save/Cancel buttons).
+  // A `null` entry means "no draft"; otherwise the value is the user's pending integer
+  // percentage. Persisted value is fetched from /api/providers/key-schedule on mount.
+  const [thresholdDrafts, setThresholdDrafts] = useState<Record<string, number | null>>({});
   const [newKeyValue, setNewKeyValue] = useState("");
   // Reveal state: { [provider]: { [keyId]: fullKey } }. Setting a key here replaces the masked
   // label in the row. Cleared on hide or when the pool reloads.
@@ -393,6 +405,37 @@ export default function Providers({ apiBase }: { apiBase: string }) {
     if (keyCardProviders.length > 0) fetchKeyPools(keyCardProviders);
   }, [apiBase, keyCardKey]);
 
+  // Local threshold patch: PATCH /api/providers/key-schedule?name=<p>
+  // Persists provider.keySchedule.threshold (and optionally enabled) without forcing
+  // a full provider-config re-upload. On success, the server returns the updated
+  // getKeyScheduleState, which we merge into local state so the slider reflects the new
+  // threshold immediately.
+  const patchKeySchedule = async (providerName: string, body: { threshold?: number; enabled?: boolean }) => {
+    setSavingThreshold(providerName);
+    try {
+      const url = apiBase + '/api/providers/key-schedule?name=' + encodeURIComponent(providerName);
+      const res = await fetch(url, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        notify(t('prov.thresholdSaveFail', { error: data.error ?? 'HTTP ' + res.status }), false);
+        return null;
+      }
+      const updated = await res.json();
+      setKeySchedules(prev => ({ ...prev, [providerName]: updated }));
+      notify(t('prov.thresholdSaved', { pct: String(Math.round(((body.threshold ?? updated.threshold) || 0) * 100)) }), true);
+      return updated;
+    } catch (err) {
+      notify(t('prov.thresholdSaveFail', { error: err instanceof Error ? err.message : String(err) }), false);
+      return null;
+    } finally {
+      setSavingThreshold((cur) => (cur === providerName ? null : cur));
+    }
+  };
+
   const saveConfig = async () => {
     try {
       const parsed = JSON.parse(draft);
@@ -507,6 +550,56 @@ export default function Providers({ apiBase }: { apiBase: string }) {
     }
     const data = await res.json().catch(() => ({}));
     notify(data.error || (disabled ? t("prov.disableFail", { name }) : t("prov.enableFail", { name })), false);
+  };
+
+  // ----- Edit provider (adapter / baseUrl / defaultModel / liveModels / headers) -----
+  // Edit opens a focused modal; API keys and OAuth accounts stay on their own flows.
+  const [editTarget, setEditTarget] = useState<EditableProvider | null>(null);
+  const openEditModal = (name: string) => {
+    const prov = config?.providers?.[name];
+    if (!prov) return;
+    setEditTarget({
+      name,
+      adapter: prov.adapter ?? "",
+      baseUrl: prov.baseUrl ?? "",
+      defaultModel: prov.defaultModel ?? "",
+      liveModels: prov.liveModels !== false,
+      headers: prov.headers ?? {},
+      models: prov.models ?? [],
+      label: prov.label ?? "",
+    });
+  };
+  const closeEditModal = () => setEditTarget(null);
+  const saveEditProvider = async (patch: {
+    label?: string;
+    renameTo?: string;
+    adapter?: string;
+    baseUrl?: string;
+    defaultModel?: string;
+    liveModels?: boolean;
+    headers?: Record<string, string>;
+  }) => {
+    if (!editTarget) return;
+    // Split the patch: provider edits go inside `provider`, renameTo is its own field
+    // (the backend uses it to move the map key before persisting edits).
+    const { renameTo, ...providerEdits } = patch;
+    const res = await fetch(`${apiBase}/api/providers?name=${encodeURIComponent(editTarget.name)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider: providerEdits, ...(renameTo ? { renameTo } : {}) }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || body.error) {
+      // Throw so the modal can show it inline instead of auto-closing.
+      throw new Error(body.error || `HTTP ${res.status}`);
+    }
+    const savedAs: string = typeof body.name === "string" ? body.name : editTarget.name;
+    notify(t("prov.editSaved", { name: savedAs }), true);
+    // If a rename happened, drop the old editTarget and let fetchConfig() re-populate.
+    setEditTarget(null);
+    fetchConfig();
+    fetchOauth();
+    fetchProviderQuotas(true);
   };
 
   if (!config) return <div className="muted">{t("prov.loadingConfig")}</div>;
@@ -645,6 +738,8 @@ export default function Providers({ apiBase }: { apiBase: string }) {
             const showAccounts = (!!accountSet && accountSet.accounts.length > 0) || keyPool.length > 0;
             const accountsOpen = openAccounts[name] !== false;
             const dropdownCount = accountSet?.accounts.length ?? keyPool.length;
+            let baseHost = "";
+            try { baseHost = new URL(prov.baseUrl).host; } catch { baseHost = ""; }
             return (
               <div key={name} className={`card prov-card${isDisabled ? " prov-card-disabled" : ""}`}>
                 <div className="prov-card-main">
@@ -653,6 +748,25 @@ export default function Providers({ apiBase }: { apiBase: string }) {
                     <div className="prov-card-copy">
                       <div className="prov-title">
                         <span style={{ fontWeight: 600 }}>{name}</span>
+                        {prov.label ? (
+                          <span className="muted" style={{ fontWeight: 400, fontSize: 12, marginLeft: 6 }}>
+                            ({prov.label})
+                          </span>
+                        ) : null}
+                        <span className="muted" style={{ fontWeight: 400, fontSize: 12, marginLeft: 6 }}>
+                          ({baseHost})
+                        </span>
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-sm"
+                          onClick={() => openEditModal(name)}
+                          title={t("prov.editButton")}
+                          aria-label={t("prov.editButton")}
+                          data-testid={`provider-edit-${name}`}
+                          style={{ marginLeft: 6, padding: "2px 6px" }}
+                        >
+                          <IconEdit width={12} height={12} />
+                        </button>
                         {isDefault && <span className="badge badge-primary">{t("prov.defaultBadge")}</span>}
                         {isDisabled ? <span className="badge badge-muted">{t("prov.disabledBadge")}</span> : <span className="badge badge-green">{t("prov.activeBadge")}</span>}
                         {prov.authMode === "oauth" && <span className="badge badge-accent">oauth</span>}
@@ -905,6 +1019,93 @@ export default function Providers({ apiBase }: { apiBase: string }) {
                             />
                           );
                         })}
+                        {isKeyAuth && keyPool.length > 1 && keySched ? (() => {
+                          // Read per-provider draft state from the top-level Map. The pendingPct
+                          // local is intentionally not a hook (the IIFE runs inside JSX so a hook here
+                          // would trigger React error #310). Drafts live on the top-level Map and
+                          // we just project this provider's slice onto local variables.
+                          const currentThreshold = keySched?.threshold ?? 0.85;
+                          const persistedPct = Math.round(currentThreshold * 100);
+                          const pendingPct = thresholdDrafts[name] ?? null;
+                          const draftPct = pendingPct ?? persistedPct;
+                          const dirty = pendingPct !== null && pendingPct !== persistedPct;
+                          const saveDraft = async () => {
+                            if (pendingPct === null) return;
+                            await patchKeySchedule(name, { threshold: pendingPct / 100 });
+                            setThresholdDrafts(prev => ({ ...prev, [name]: null }));
+                          };
+                          const cancelDraft = () => setThresholdDrafts(prev => ({ ...prev, [name]: null }));
+                          return (
+                            <div
+                              className="prov-account-row prov-sched-threshold"
+                              style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, padding: "4px 8px" }}
+                            >
+                              <label
+                                htmlFor={`sched-threshold-${name}`}
+                                className="muted"
+                                style={{ minWidth: 180, cursor: "pointer" }}
+                              >
+                                {t("prov.thresholdLabel")}
+                              </label>
+                              <input
+                                type="range"
+                                min={50}
+                                max={99}
+                                step={1}
+                                value={draftPct}
+                                id={`sched-threshold-${name}`}
+                                aria-label={t("prov.thresholdAria", { name })}
+                                title={t("prov.thresholdTitle")}
+                                style={{ flex: 1, minWidth: 0, cursor: "pointer" }}
+                                onChange={e => setThresholdDrafts(prev => ({ ...prev, [name]: Number(e.target.value) }))}
+                                disabled={savingThreshold === name}
+                                data-testid={`sched-threshold-${name}`}
+                              />
+                              <span
+                                aria-live="polite"
+                                style={{ minWidth: 56, textAlign: "right", fontVariantNumeric: "tabular-nums", fontWeight: 600, flexShrink: 0 }}
+                              >
+                                {draftPct}%
+                                {dirty ? <span style={{ color: "var(--amber)", marginLeft: 4 }}>*</span> : null}
+                              </span>
+                              {/* Save/Cancel reserve a fixed-width slot so the slider width never
+                                  changes when the buttons appear or disappear. Without this
+                                  the flex layout re-flows the slider and the drag handle jumps
+                                  under the cursor, making the value readout flicker. */}
+                              <span
+                                style={{
+                                  display: "inline-flex",
+                                  gap: 4,
+                                  flexShrink: 0,
+                                  minWidth: 132,
+                                  justifyContent: "flex-end",
+                                  visibility: dirty ? "visible" : "hidden",
+                                }}
+                              >
+                                <button
+                                  type="button"
+                                  className="btn btn-ghost btn-sm"
+                                  onClick={cancelDraft}
+                                  disabled={savingThreshold === name}
+                                  data-testid={`sched-threshold-cancel-${name}`}
+                                  title={t("prov.thresholdCancelTitle")}
+                                >
+                                  {t("prov.thresholdCancel")}
+                                </button>
+                                <button
+                                  type="button"
+                                  className="btn btn-primary btn-sm"
+                                  onClick={saveDraft}
+                                  disabled={savingThreshold === name}
+                                  data-testid={`sched-threshold-save-${name}`}
+                                  title={t("prov.thresholdSaveTitle")}
+                                >
+                                  {savingThreshold === name ? t("prov.thresholdSaving") : t("prov.thresholdSave")}
+                                </button>
+                              </span>
+                            </div>
+                          );
+                        })() : null}
                         {keySched && keySched.events.length > 0 ? (
                           <div className="prov-account-row prov-sched-events" style={{ display: "block", fontSize: 11, cursor: "default" }}>
                             <span className="muted">{schedEventText(keySched.events[keySched.events.length - 1]!, keyPool, t)}</span>
@@ -965,6 +1166,14 @@ export default function Providers({ apiBase }: { apiBase: string }) {
           onAdded={(name) => { setAdding(false); notify(t("prov.added", { name, cmd: "ocx sync" }), true); fetchConfig(); fetchOauth(); fetchProviderQuotas(true); }}
         />
       )}
+      <EditProviderModal
+        open={editTarget !== null}
+        provider={editTarget}
+        apiBase={apiBase}
+        existingProviderNames={config ? Object.keys(config.providers) : []}
+        onClose={closeEditModal}
+        onSave={saveEditProvider}
+      />
     </>
   );
 }

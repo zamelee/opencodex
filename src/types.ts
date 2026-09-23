@@ -462,6 +462,14 @@ export interface OcxWebSearchSidecarConfig {
 export interface OcxProviderConfig {
   adapter: string;
   baseUrl: string;
+  /**
+   * Optional display name shown in the GUI. Distinct from the provider key (the map key in
+   * `OcxConfig.providers`) — that one stays immutable because it's the identifier for keys,
+   * quotas, scheduled rotations, OAuth accounts, and Codex's catalog. Set this when the
+   * provider key is something opaque like `pooled` and you want a human-readable label
+   * (e.g. `m.aiio.chat`) in the dashboard title row.
+   */
+  label?: string;
   /** Keep provider settings on disk but exclude it from routing and model/catalog listings. */
   disabled?: boolean;
   apiKey?: string;
@@ -470,7 +478,20 @@ export interface OcxProviderConfig {
    * entry so routing stays single-key; managed via /api/providers/keys. A legacy bare
    * `apiKey` seeds a one-entry pool on first management touch.
    */
-  apiKeyPool?: Array<{ id: string; key: string; label?: string; addedAt?: number }>;
+  apiKeyPool?: Array<{ id: string; key: string; label?: string; addedAt?: number; active?: boolean }>;
+  /**
+   * `active` flags the currently-active entry on the pool. Mirrors `provider.apiKey` after
+   * saveConfig. Stage-only flips (`pendingKeyChange`) set `active` immediately so the GUI
+  /**
+   * `active` flags the currently-active entry on the pool. Mirrors `provider.apiKey` after
+   * saveConfig. Stage-only flips (`pendingKeyChange`) set `active` immediately so the GUI
+   * shows the intended activation, but `provider.apiKey` is only rewritten at
+   * commitPendingKeyChange time.
+   */
+  /**
+   * Stage a key change so it takes effect after the current dispatch ends, not mid-stream.
+   */
+  pendingKeyChange?: PendingKeyChange;
   /**
    * Quota-aware proactive key scheduling (threshold gate + expiry-urgency ranking).
    * Only effective for providers with a live per-key quota probe (v1: minimax.chat reverse
@@ -636,4 +657,16 @@ export interface CodexAccountCredentialRecord {
   lastCodexValidatedAt?: number;
   lastCodexValidationStatus?: "ok" | "failed";
   lastCodexValidationError?: string;
+}
+
+/**
+ * A queued key change. Lives on `OcxProviderConfig.pendingKeyChange` until the dispatch
+ * stream for the current request closes, then `commitPendingKeyChange` (in src/providers/
+ * key-scheduler.ts) applies it (apiKey + apiKeyPool.active + saveConfig) and clears it.
+ */
+export interface PendingKeyChange {
+  keyId: string;
+  key: string;
+  ts: number;
+  reason: "5h-threshold" | "429";
 }

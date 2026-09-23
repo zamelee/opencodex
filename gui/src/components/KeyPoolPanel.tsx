@@ -248,19 +248,6 @@ export default function KeyPoolPanel({
               t={t}
             />
           ) : null}
-          {showTestButton ? (
-            <button
-              type="button"
-              className="btn btn-ghost btn-sm"
-              onClick={onTest}
-              title={t("prov.keyTestTitle")}
-              aria-label={t("prov.keyTestAria", { key: quota.label ?? quota.masked })}
-              data-testid="key-test"
-              style={{ fontSize: 11 }}
-            >
-              {t("prov.keyTest")}
-            </button>
-          ) : null}
           {onSwitch ? (
             <button
               type="button"
@@ -271,6 +258,19 @@ export default function KeyPoolPanel({
               style={{ fontSize: 11 }}
             >
               {active ? t("prov.accountActive") : t("prov.accountLogin")}
+            </button>
+          ) : null}
+          {showTestButton ? (
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              onClick={onTest}
+              title={t("prov.keyTestTitle") + " - " + t("prov.keyPoolTestHint")}
+              aria-label={t("prov.keyTestAria", { key: quota.label ?? quota.masked })}
+              data-testid="key-test"
+              style={{ fontSize: 11 }}
+            >
+              {t("prov.keyTest")}
             </button>
           ) : null}
           {onRemove ? (

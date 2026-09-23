@@ -423,13 +423,105 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
   if (url.pathname === "/api/providers" && req.method === "PATCH") {
     const name = url.searchParams.get("name")?.trim();
     if (!name || !isValidProviderName(name) || !hasOwnProvider(config.providers, name)) return jsonResponse({ error: "unknown provider" }, 404);
-    let body: { disabled?: unknown; setDefault?: unknown };
+    let body: { disabled?: unknown; setDefault?: unknown; provider?: unknown; renameTo?: unknown };
     try { body = await req.json(); } catch { return jsonResponse({ error: "invalid JSON body" }, 400); }
     const wantDisabled = typeof body.disabled === "boolean" ? body.disabled : undefined;
     const wantSetDefault = body.setDefault === true;
-    if (wantDisabled === undefined && !wantSetDefault) return jsonResponse({ error: "at least one of `disabled` or `setDefault` is required" }, 400);
+    const hasProviderEdit = body.provider !== undefined && body.provider !== null && typeof body.provider === "object";
+    if (wantDisabled === undefined && !wantSetDefault && !hasProviderEdit) return jsonResponse({ error: "at least one of `disabled`, `setDefault`, or `provider` is required" }, 400);
     if (body.disabled && name === config.defaultProvider) {
       return jsonResponse({ error: "cannot disable the default provider; set another default first" }, 400);
+    }
+    // Build a merged provider config from a safe subset of fields. We never let the edit
+    // path overwrite API keys, OAuth metadata, or any runtime state — those flows have
+    // dedicated endpoints (or are read-only). The whitelist below is the only surface.
+    let mergedProvider: OcxProviderConfig | null = null;
+    if (hasProviderEdit) {
+      const candidate = body.provider as Record<string, unknown>;
+      const current = config.providers[name];
+      const next: OcxProviderConfig = { ...current };
+      // adapter: required non-empty string
+    if (candidate.adapter !== undefined) {
+      if (typeof candidate.adapter !== "string" || !candidate.adapter.trim()) {
+        return jsonResponse({ error: "provider.adapter must be a non-empty string" }, 400);
+      }
+      next.adapter = candidate.adapter.trim();
+    }
+    // label: optional display string; empty string clears it (revert to using the map key).
+    if (candidate.label !== undefined) {
+      if (candidate.label === null || candidate.label === "") {
+        delete next.label;
+      } else if (typeof candidate.label === "string") {
+        const trimmed = candidate.label.trim();
+        if (trimmed) next.label = trimmed;
+        else delete next.label;
+      } else {
+        return jsonResponse({ error: "provider.label must be a string or empty" }, 400);
+      }
+    }
+    // baseUrl: required non-empty string (validate below)
+      if (candidate.baseUrl !== undefined) {
+        if (typeof candidate.baseUrl !== "string" || !candidate.baseUrl.trim()) {
+          return jsonResponse({ error: "provider.baseUrl must be a non-empty string" }, 400);
+        }
+        next.baseUrl = candidate.baseUrl.trim();
+      }
+      // defaultModel: optional string, empty string clears it
+      if (candidate.defaultModel !== undefined) {
+        if (candidate.defaultModel === null || candidate.defaultModel === "") {
+          delete next.defaultModel;
+        } else if (typeof candidate.defaultModel === "string") {
+          next.defaultModel = candidate.defaultModel.trim() || undefined;
+        } else {
+          return jsonResponse({ error: "provider.defaultModel must be a string or empty" }, 400);
+        }
+      }
+      // liveModels: boolean (defaults to true when undefined)
+      if (candidate.liveModels !== undefined) {
+        if (typeof candidate.liveModels !== "boolean") {
+          return jsonResponse({ error: "provider.liveModels must be a boolean" }, 400);
+        }
+        next.liveModels = candidate.liveModels;
+      }
+      // headers: optional Record<string,string>; an empty object clears them
+      if (candidate.headers !== undefined) {
+        if (candidate.headers === null) {
+          delete next.headers;
+        } else if (typeof candidate.headers === "object" && !Array.isArray(candidate.headers)) {
+          const h: Record<string, string> = {};
+          for (const [k, v] of Object.entries(candidate.headers as Record<string, unknown>)) {
+            if (typeof v !== "string") {
+              return jsonResponse({ error: `provider.headers.${k} must be a string` }, 400);
+            }
+            h[k] = v;
+          }
+          if (Object.keys(h).length === 0) delete next.headers;
+          else next.headers = h;
+        } else {
+          return jsonResponse({ error: "provider.headers must be an object" }, 400);
+        }
+      }
+      const validationError = providerManagementConfigError(name, next);
+      if (validationError) return jsonResponse({ error: validationError }, 400);
+      mergedProvider = next;
+    }
+    // renameTo: move this provider under a new key (used to be display label, but the user wanted
+    // the actual identifier renamed so the GUI shows the human-readable name in the URL too).
+    // The apiKeyPool is nested, so it moves with the provider. OAuth accounts are keyed by OAuth
+    // provider id (e.g. "anthropic"), not by OpenCodex provider name, so they survive untouched.
+    // Codex's model cache must be cleared for the OLD name so stale namespaced ids don't linger.
+    let renameTo: string | null = null;
+    if (typeof body.renameTo === "string" && body.renameTo.trim() !== "") {
+      const candidate = body.renameTo.trim();
+      if (candidate === name) {
+        // no-op rename; ignore silently
+      } else if (!isValidProviderName(candidate)) {
+        return jsonResponse({ error: "renameTo must use letters, numbers, dot, underscore, or hyphen and cannot be a reserved object key" }, 400);
+      } else if (hasOwnProvider(config.providers, candidate)) {
+        return jsonResponse({ error: `provider \"${candidate}\" already exists` }, 409);
+      } else {
+        renameTo = candidate;
+      }
     }
     // setDefault=true means "make this provider the new default". Previously only POST /api/providers
     // supported this (for newly added providers); extending PATCH lets the GUI switch default on
@@ -438,12 +530,34 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
       config.defaultProvider = name;
     }
     const { saveConfig: save } = await import("../config");
-    if (wantDisabled !== undefined) {
+    if (mergedProvider !== null) {
+      config.providers[name] = mergedProvider;
+    } else if (wantDisabled !== undefined) {
       config.providers[name] = { ...config.providers[name], disabled: wantDisabled };
     }
+    // Apply the rename LAST so any other patch fields are validated against the OLD name's
+    // config but written under the NEW name. Deep-copy via JSON to detach nested objects
+    // (apiKeyPool, headers, modelContextWindows, etc.) from the old reference.
+    let effectiveName = name;
+    if (renameTo !== null) {
+      const oldName = name;
+      const copied = JSON.parse(JSON.stringify(config.providers[oldName])) as OcxProviderConfig;
+      config.providers[renameTo] = copied;
+      delete config.providers[oldName];
+      if (config.defaultProvider === oldName) config.defaultProvider = renameTo;
+      effectiveName = renameTo;
+    }
     save(config);
+    if (renameTo !== null) {
+      const { clearModelCache: clearCache } = await import("../codex/model-cache");
+      // Clear cache entries that may still hold the OLD namespaced id (provider/model). The
+      // new name's cache slot is fresh by definition, but stale entries keyed by the old
+      // provider id can linger in codex's local state_5.sqlite until restart otherwise.
+      clearCache(renameTo);
+      clearCache(name); // `name` is still the original query-param value here (const)
+    }
     refreshCodexCatalogBestEffort();
-    return jsonResponse({ success: true, name, disabled: wantDisabled, defaultProvider: config.defaultProvider });
+    return jsonResponse({ success: true, name: effectiveName, renamed: renameTo !== null, disabled: wantDisabled, defaultProvider: config.defaultProvider });
   }
 
   if (url.pathname === "/api/providers" && req.method === "DELETE") {
@@ -1018,6 +1132,38 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
     const state = getKeyScheduleState(config, name);
     if (!state) return jsonResponse({ error: "unknown provider" }, 404);
     return jsonResponse(state);
+  }
+
+  // Update the proactive 5h-threshold for a provider's key scheduler. Accepts a partial
+  // body so the GUI can patch just `threshold` (or `enabled`) without re-uploading the full
+  // provider config. The 5h gate (default 0.85) is the user's main lever for tuning when
+  // opencodex proactively rotates away from a hot key.
+  if (url.pathname === "/api/providers/key-schedule" && req.method === "PATCH") {
+    const name = (url.searchParams.get("name") ?? "").trim();
+    if (!name || !isValidProviderName(name) || !hasOwnProvider(config.providers, name)) return jsonResponse({ error: "unknown provider" }, 404);
+    let body: { threshold?: unknown; enabled?: unknown };
+    try { body = await req.json() as { threshold?: unknown; enabled?: unknown }; }
+    catch { return jsonResponse({ error: "invalid JSON body" }, 400); }
+    const prov = config.providers[name]!;
+    let updated = false;
+    if (body.threshold !== undefined) {
+      const t = Number(body.threshold);
+      if (!Number.isFinite(t) || t < 0.5 || t > 0.99) {
+        return jsonResponse({ error: "threshold must be a number in [0.5, 0.99]" }, 400);
+      }
+      prov.keySchedule = { ...(prov.keySchedule ?? {}), threshold: t };
+      updated = true;
+    }
+    if (body.enabled !== undefined) {
+      if (typeof body.enabled !== "boolean") return jsonResponse({ error: "enabled must be a boolean" }, 400);
+      prov.keySchedule = { ...(prov.keySchedule ?? {}), enabled: body.enabled };
+      updated = true;
+    }
+    if (!updated) return jsonResponse({ error: "at least one of `threshold` or `enabled` is required" }, 400);
+    const { saveConfig: save } = await import("../config");
+    save(config);
+    const { getKeyScheduleState } = await import("../providers/key-scheduler");
+    return jsonResponse(getKeyScheduleState(config, name));
   }
 
   // Probe a pool entry's key against the provider's upstream. Read-only — does not persist,

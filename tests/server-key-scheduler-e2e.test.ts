@@ -96,9 +96,20 @@ describe("server quota-aware key scheduling (end-to-end)", () => {
         body: JSON.stringify({ model: "pooled/some-model", input: "hello", stream: false }),
       });
       expect(res.status).toBe(200);
-      // The FIRST upstream call already carries the rotated key — rotation happened
-      // pre-dispatch, no 429 round-trip needed.
-      expect(seenAuth[0]).toBe("Bearer key-beta-444555666777");
+      // Pending-mode semantics: maybeRotateForQuota stages pendingKeyChange instead of
+      // mutating provider.apiKey. Non-streaming requests don't go through trackStreamLifetime,
+      // so the commit happens at the start of the NEXT request (Location E in responses.ts).
+      // First request still uses the old key; only the second request uses the rotated one.
+      expect(seenAuth[0]).toBe("Bearer key-alpha-000111222333");
+      // Issue a second request — Location E force-commits the pendingKeyChange, so this
+      // request now sees the rotated key.
+      const res2 = await fetch(new URL("/v1/responses", server.url), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "pooled/some-model", input: "hello again", stream: false }),
+      });
+      expect(res2.status).toBe(200);
+      expect(seenAuth[1]).toBe("Bearer key-beta-444555666777");
 
       const sched = await originalFetch(new URL("/api/providers/key-schedule?name=pooled", server.url));
       expect(sched.status).toBe(200);

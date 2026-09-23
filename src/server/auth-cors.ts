@@ -235,12 +235,14 @@ export function safeConfigDTO(config: OcxConfig): unknown {
       hasHeaders: !!provider.headers && Object.keys(provider.headers).length > 0,
     };
     for (const key of [
+      "label",
       "defaultModel",
       "testModel",
       "disabled",
       "authMode",
       "liveModels",
       "models",
+      "headers",
       "contextWindow",
       "modelContextWindows",
       "reasoningEfforts",
@@ -250,9 +252,10 @@ export function safeConfigDTO(config: OcxConfig): unknown {
       "noTemperatureModels",
       "noTopPModels",
       "noPenaltyModels",
-      "autoToolChoiceOnlyModels",
-      "preserveReasoningContentModels",
-      "escapeBuiltinToolNames",
+     "autoToolChoiceOnlyModels",
+     "preserveReasoningContentModels",
+     "escapeBuiltinToolNames",
+      "keySchedule",
     ] as const) {
       copyIfDefined(dto, provider, key);
     }
