@@ -15,10 +15,17 @@ import type { OcxConfig, OcxProviderConfig } from "../types";
 
 interface KeyCooldown {
   cooldownUntil: number;
+  /** Discriminator so callers can tell 429 (server-rejected) from return (locally pinned) apart. */
+  reason: "429" | "return-cooldown";
 }
 
 const DEFAULT_COOLDOWN_MS = 60_000;
 const MAX_COOLDOWN_MS = 10 * 60_000; // cap at 10 min for api-key rotation
+
+/** How long a key just rotated from is pinned out of `pickBestKeyId` candidates.
+ * Long enough to absorb a few requests without thrashing, short enough that recovery
+ * (or a 5h-window reset) on the other key can still bring it back into play. */
+export const RETURN_COOLDOWN_MS = 5 * 60_000;
 
 /** Map<`${providerName}\0${keyId}`, KeyCooldown> */
 const keyCooldowns = new Map<string, KeyCooldown>();
@@ -54,6 +61,42 @@ export function isKeyInCooldown(providerName: string, keyId: string, now = Date.
   return true;
 }
 
+/** Pin a key out of `pickBestKeyId` candidates for `ms` milliseconds after the local
+ * scheduler rotated away from it. Prevents the "A -> B -> A -> B" thrash when both keys
+ * are over the 5h threshold (each rotation's STAGED commit lands a few seconds later,
+ * which is enough time for the destination key to also cross the threshold).
+ *
+ * Distinct from the 429 cooldown (which records that the upstream rejected this key):
+ * a return-cooldown is purely advisory and is cleared by `clearKeyCooldowns()`.
+ */
+export function markKeyReturnCooldown(
+  providerName: string,
+  keyId: string,
+  ms: number = RETURN_COOLDOWN_MS,
+  now: number = Date.now(),
+): void {
+  if (!keyId) return;
+  const clamped = Math.min(Math.max(ms, 1000), MAX_COOLDOWN_MS);
+  keyCooldowns.set(cooldownKey(providerName, keyId), {
+    cooldownUntil: now + clamped,
+    reason: "return-cooldown",
+  });
+}
+
+/** Exported for tests + future debug surfaces. */
+export function getKeyCooldownReason(
+  providerName: string,
+  keyId: string,
+  now: number = Date.now(),
+): "429" | "return-cooldown" | null {
+  const entry = keyCooldowns.get(cooldownKey(providerName, keyId));
+  if (!entry) return null;
+  if (entry.cooldownUntil <= now) {
+    keyCooldowns.delete(cooldownKey(providerName, keyId));
+    return null;
+  }
+  return entry.reason;
+}
 // ---- public API ----
 
 /**
@@ -94,6 +137,7 @@ export function rotateKeyOn429(
     const cooldownMs = parseRetryAfterMs(retryAfterHeader, now) ?? DEFAULT_COOLDOWN_MS;
     keyCooldowns.set(cooldownKey(providerName, currentEntry.id), {
       cooldownUntil: now + cooldownMs,
+      reason: "429",
     });
   }
 

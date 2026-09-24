@@ -25,9 +25,29 @@
  */
 import { saveConfig } from "../config";
 import type { OcxConfig, OcxProviderConfig } from "../types";
-import { isKeyInCooldown } from "./key-failover";
+import { isKeyInCooldown, markKeyReturnCooldown } from "./key-failover";
+import { RETURN_COOLDOWN_MS } from "./key-failover";
 import { isMinimaxChatReverseProxy, probeMinimaxKeyQuotas } from "./quota";
 import type { ProviderQuotaKey } from "./quota";
+
+/** Per-provider dedup of the "[all keys saturated]" warning so concurrent requests
+ * don't spam the log. Reset whenever a successful rotation lands. */
+const saturationWarnTs = new Map<string, number>();
+const SATURATION_WARN_RESYNC_MS = 60_000;
+
+/** Circuit-breaker (Layer 3) warning. Emitted when every candidate is gated out so the
+ * operator knows the proxy is about to start serving with no real key-switching headroom.
+ * Deduped per-provider with a 60s resync window; concurrent requests won't pile on. */
+function maybeEmitSaturationWarning(providerName: string, now: number): void {
+  const last = saturationWarnTs.get(providerName) ?? 0;
+  if (now - last < SATURATION_WARN_RESYNC_MS) return;
+  saturationWarnTs.set(providerName, now);
+  console.warn(
+    `[key-scheduler] ${providerName}: circuit-breaker — every alternative key is gated ` +
+    `(expired / weekly-exhausted / in cooldown). The active key will keep serving until ` +
+    `a candidate clears, or until upstream 429s.`,
+  );
+}
 
 export interface KeyRotationEvent {
   ts: number;
@@ -136,6 +156,62 @@ export function pickNextKey(
   return ranked[0]!.key.id;
 }
 
+/**
+ * Watchdog ranking (Layer 1 of the ping-pong fix). Returns the id of the BEST key in the
+ * pool — where "best" = lowest estimated 5h usage, with the active key winning ties.
+ *
+ * Unlike `pickNextKey` this INCLUDES the active key, so the caller can answer the question
+ * "am I the best of the bunch, or is there a strictly better candidate?". If the answer
+ * is "I'm the best", a rotation is a zero-improvement move that just opens the door to
+ * thrash — the watchdog vetoes it.
+ *
+ * Two semantic differences from `pickNextKey`:
+ *   - Serviceability + cooldown filters still apply (expired / weekly-dead / 429-cooldown
+ *     keys never win), but the threshold filter does NOT — we want to rank everyone.
+ *   - Unknown estimates rank LAST (headroom = -Infinity), pessimistically. This is the
+ *     opposite of `pickNextKey`'s "benefit of doubt" rule, because here "allow unknown"
+ *     would mean "let it block a known-good key from winning".
+ */
+export function pickBestKeyId(
+  keys: ProviderQuotaKey[],
+  providerName: string,
+  activeId: string | null,
+  now: number,
+  inCooldown: (keyId: string) => boolean,
+  estimate: (key: ProviderQuotaKey) => number | undefined = k => estFiveHour(k, providerName),
+): string | null {
+  const candidates = keys.filter(key => {
+    if (!isServiceable(key, now)) return false;
+    if (inCooldown(key.id)) return false;
+    return true;
+  });
+  if (candidates.length === 0) return null;
+  const ranked = candidates.map(key => {
+    const est = estimate(key);
+    return {
+      key,
+      isActive: key.id === activeId,
+      urgency: expiryUrgency(key, now),
+      // unknown → -Infinity → sorts last (pessimistic)
+      headroom: est === undefined ? -Infinity : 1 - est,
+    };
+  });
+  ranked.sort((a, b) => {
+    // Primary: lower estimated usage first (headroom descending) — this is the real
+    // "which key should we use" question.
+    if (a.headroom !== b.headroom) return b.headroom - a.headroom;
+    // Secondary: more-urgent expiry first (mirror `pickNextKey` policy).
+    if (a.urgency !== b.urgency) return b.urgency - a.urgency;
+    // Final tiebreaker: active wins when all else is equal — provides natural
+    // hysteresis on equal-utilization comparisons (both A and B at 87% → don't
+    // switch for nothing). Without this, equal-estimate rankings would be
+    // determined by sort stability alone, which is JS-engine-dependent.
+    if (a.isActive !== b.isActive) return a.isActive ? -1 : 1;
+    return b.headroom - a.headroom;
+  });
+  return ranked[0]!.key.id;
+}
+
 async function probeKeysCached(providerName: string, provider: OcxProviderConfig, now: number): Promise<ProviderQuotaKey[] | null> {
   const cached = probeCache.get(providerName);
   if (cached && now - cached.ts < PROBE_TTL_MS) return cached.keys;
@@ -198,8 +274,24 @@ export async function maybeRotateForQuota(config: OcxConfig, providerName: strin
   const activeEst = estFiveHour(activeQuota, providerName);
   if (activeEst === undefined || activeEst < threshold) return false;
 
-  const toId = pickNextKey(keys, providerName, active.id, threshold, now, id => isKeyInCooldown(providerName, id, now));
-  if (!toId) return false; // every alternative is gated out → stay; 429 failover remains
+  // Watchdog (Layer 1) + return-cooldown (Layer 2) + circuit breaker (Layer 3).
+  //
+  // `pickBestKeyId` includes the active key in the ranking. If the active key is still
+  // the best of the bunch despite being over threshold, we DON'T rotate — that's the
+  // watchdog veto. Keys that the local scheduler just rotated from are excluded by
+  // `markKeyReturnCooldown` so a flip-flopping A→B→A is impossible in the cooldown
+  // window. If `pickBestKeyId` returns null, every candidate is gated out (expired,
+  // weekly-dead, or in cooldown) — that's the circuit breaker: stay put + warn once.
+  const toId = pickBestKeyId(keys, providerName, active.id, now, id => isKeyInCooldown(providerName, id, now));
+  if (!toId) {
+    maybeEmitSaturationWarning(providerName, now);
+    return false;
+  }
+  if (toId === active.id) {
+    // Watchdog veto: the active key is rank #1 even though it's over threshold.
+    // No rotation; keep burning this key until something strictly better shows up.
+    return false;
+  }
   const next = pool.find(e => e.id === toId);
   if (!next) return false;
 
@@ -216,6 +308,13 @@ export async function maybeRotateForQuota(config: OcxConfig, providerName: strin
     reason: "5h-threshold",
   };
   provider.pendingKeyChange = pending;
+  // Layer 2: pin the key we just rotated from out of candidates for `RETURN_COOLDOWN_MS`.
+  // The pendingKeyChange commits when the current stream closes; until then, even if
+  // the destination key's localCalls push it over threshold, `isKeyInCooldown` will
+  // block the just-rotated-from key from being picked as the next target.
+  markKeyReturnCooldown(providerName, active.id, RETURN_COOLDOWN_MS, now);
+  // Reset saturation-warn dedup so the next "all gated" event re-logs.
+  saturationWarnTs.delete(providerName);
   for (const entry of pool) {
     entry.active = entry.id === toId;
   }
