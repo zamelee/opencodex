@@ -421,15 +421,22 @@ export default function Providers({ apiBase }: { apiBase: string }) {
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        notify(t('prov.thresholdSaveFail', { error: data.error ?? 'HTTP ' + res.status }), false);
+        notify(t(body.enabled !== undefined ? 'prov.autoSwitchSaveFail' : 'prov.thresholdSaveFail', { error: data.error ?? 'HTTP ' + res.status }), false);
         return null;
       }
       const updated = await res.json();
       setKeySchedules(prev => ({ ...prev, [providerName]: updated }));
-      notify(t('prov.thresholdSaved', { pct: String(Math.round(((body.threshold ?? updated.threshold) || 0) * 100)) }), true);
+      // Pick the success notification by what was actually patched. Toggle and threshold
+      // share the endpoint, but they have different UX intents (binary flip vs numeric set)
+      // so the toast text should match.
+      if (body.enabled !== undefined) {
+        notify(t('prov.autoSwitchSaved', { state: body.enabled ? t('prov.autoSwitchOn') : t('prov.autoSwitchOff') }), true);
+      } else {
+        notify(t('prov.thresholdSaved', { pct: String(Math.round(((body.threshold ?? updated.threshold) || 0) * 100)) }), true);
+      }
       return updated;
     } catch (err) {
-      notify(t('prov.thresholdSaveFail', { error: err instanceof Error ? err.message : String(err) }), false);
+      notify(t(body.enabled !== undefined ? 'prov.autoSwitchSaveFail' : 'prov.thresholdSaveFail', { error: err instanceof Error ? err.message : String(err) }), false);
       return null;
     } finally {
       setSavingThreshold((cur) => (cur === providerName ? null : cur));
@@ -1035,15 +1042,50 @@ export default function Providers({ apiBase }: { apiBase: string }) {
                             setThresholdDrafts(prev => ({ ...prev, [name]: null }));
                           };
                           const cancelDraft = () => setThresholdDrafts(prev => ({ ...prev, [name]: null }));
+                          // Auto-rotation toggle: binary, immediate save (no draft state).
+                          // Optimistic — flip the local view BEFORE the server confirms so the
+                          // user sees instant feedback; the patchKeySchedule response merges
+                          // authoritative server state back into keySchedules.
+                          const schedulerOn = keySched?.enabled ?? false;
+                          const toggleAutoSwitch = async () => {
+                            const next = !schedulerOn;
+                            setKeySchedules(prev => {
+                              const cur = prev[name];
+                              if (!cur) return prev;
+                              return { ...prev, [name]: { ...cur, enabled: next } };
+                            });
+                            const updated = await patchKeySchedule(name, { enabled: next });
+                            // patchKeySchedule returns null on failure (it already notified the
+                            // error); roll back the optimistic flip so the UI doesn't lie.
+                            if (!updated) {
+                              setKeySchedules(prev => {
+                                const cur = prev[name];
+                                if (!cur) return prev;
+                                return { ...prev, [name]: { ...cur, enabled: !next } };
+                              });
+                            }
+                          };
                           return (
                             <div
                               className="prov-account-row prov-sched-threshold"
                               style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, padding: "4px 8px" }}
                             >
+                              <button
+                                type="button"
+                                onClick={toggleAutoSwitch}
+                                className={`btn btn-sm ${schedulerOn ? "btn-primary" : "btn-ghost"}`}
+                                aria-label={schedulerOn ? t("prov.autoSwitchOnAria", { name }) : t("prov.autoSwitchOffAria", { name })}
+                                aria-pressed={schedulerOn}
+                                title={schedulerOn ? t("prov.autoSwitchOnTitle") : t("prov.autoSwitchOffTitle")}
+                                data-testid={`sched-toggle-${name}`}
+                                style={{ minWidth: 56, flexShrink: 0, fontWeight: 600 }}
+                              >
+                                {schedulerOn ? t("prov.autoSwitchOn") : t("prov.autoSwitchOff")}
+                              </button>
                               <label
                                 htmlFor={`sched-threshold-${name}`}
                                 className="muted"
-                                style={{ minWidth: 180, cursor: "pointer" }}
+                                style={{ minWidth: 180, cursor: schedulerOn ? "pointer" : "not-allowed", opacity: schedulerOn ? 1 : 0.55 }}
                               >
                                 {t("prov.thresholdLabel")}
                               </label>
@@ -1056,14 +1098,14 @@ export default function Providers({ apiBase }: { apiBase: string }) {
                                 id={`sched-threshold-${name}`}
                                 aria-label={t("prov.thresholdAria", { name })}
                                 title={t("prov.thresholdTitle")}
-                                style={{ flex: 1, minWidth: 0, cursor: "pointer" }}
+                                style={{ flex: 1, minWidth: 0, cursor: schedulerOn ? "pointer" : "not-allowed", opacity: schedulerOn ? 1 : 0.45 }}
                                 onChange={e => setThresholdDrafts(prev => ({ ...prev, [name]: Number(e.target.value) }))}
-                                disabled={savingThreshold === name}
+                                disabled={!schedulerOn || savingThreshold === name}
                                 data-testid={`sched-threshold-${name}`}
                               />
                               <span
                                 aria-live="polite"
-                                style={{ minWidth: 56, textAlign: "right", fontVariantNumeric: "tabular-nums", fontWeight: 600, flexShrink: 0 }}
+                                style={{ minWidth: 56, textAlign: "right", fontVariantNumeric: "tabular-nums", fontWeight: 600, flexShrink: 0, opacity: schedulerOn ? 1 : 0.55 }}
                               >
                                 {draftPct}%
                                 {dirty ? <span style={{ color: "var(--amber)", marginLeft: 4 }}>*</span> : null}
@@ -1079,14 +1121,14 @@ export default function Providers({ apiBase }: { apiBase: string }) {
                                   flexShrink: 0,
                                   minWidth: 132,
                                   justifyContent: "flex-end",
-                                  visibility: dirty ? "visible" : "hidden",
+                                  visibility: dirty && schedulerOn ? "visible" : "hidden",
                                 }}
                               >
                                 <button
                                   type="button"
                                   className="btn btn-ghost btn-sm"
                                   onClick={cancelDraft}
-                                  disabled={savingThreshold === name}
+                                  disabled={!schedulerOn || savingThreshold === name}
                                   data-testid={`sched-threshold-cancel-${name}`}
                                   title={t("prov.thresholdCancelTitle")}
                                 >
@@ -1096,7 +1138,7 @@ export default function Providers({ apiBase }: { apiBase: string }) {
                                   type="button"
                                   className="btn btn-primary btn-sm"
                                   onClick={saveDraft}
-                                  disabled={savingThreshold === name}
+                                  disabled={!schedulerOn || savingThreshold === name}
                                   data-testid={`sched-threshold-save-${name}`}
                                   title={t("prov.thresholdSaveTitle")}
                                 >
