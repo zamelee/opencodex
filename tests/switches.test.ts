@@ -11,6 +11,10 @@
  *  T7 - per-flag launcher=true routed=true native=false -> inject + journal + routed entries; native baseline removed
  *  T8 - proxy-only while a launcher-mode=true era journal exists -> journal proactively removed (reconcile), config.toml preserved
  *  T9 - launcher=true with syncResumeHistory=false -> syncResumeHistory opt-out still works independently
+ *  T10 - pass-through (enableCodexLauncherMode=false) does NOT touch the on-disk Codex catalog
+ *         (v10.20, 2026-09-24): Codex CLI reads the catalog via model_catalog_json in
+ *         config.toml and any opencodex write leaks base_instructions into Codex's prompt +
+ *         injects unresolvable <provider>/<model> slugs, breaking Codex startup.
  *
  * Convention: spawn bun evaluate scripts under a sandboxed env so we don't
  * touch the real ~/.codex or ~/.opencodex on the dev machine.
@@ -312,5 +316,89 @@ describe("Phase 5 launcher-mode flags", () => {
     `);
     expect(r.status).toBe(0);
     expect(r.data?.rolloutExists).toBe(true);
+  });
+
+  test("T10: pass-through leaves the on-disk Codex catalog untouched", () => {
+    // Pass-through means opencodex is a pure HTTP proxy and must not write any Codex file,
+    // including the model catalog. Codex CLI reads the catalog via model_catalog_json in
+    // config.toml; an opencodex write here would leak base_instructions into Codex's own
+    // system prompt and inject unresolvable <provider>/<model> slugs, breaking Codex
+    // startup. Regression guard for the v10.20 catalog-skip contract.
+    writeFileSync(join(sb.opencodexHome, "config.json"), JSON.stringify({
+      providers: {},
+      enableCodexLauncherMode: false,
+    }), "utf8");
+    // Pre-write a catalog file with known content; assert it survives the sync unchanged.
+    const catalogPath = join(sb.codexHome, "catalog.json");
+    const sentinel = JSON.stringify({
+      models: [{ slug: "gpt-5.5", display_name: "gpt-5.5", visibility: "list" }],
+      marker: "T10-sentinel",
+    });
+    writeFileSync(catalogPath, sentinel, "utf8");
+    writeFileSync(join(sb.codexHome, "config.toml"), `model_catalog_json = "catalog.json"\n`, "utf8");
+    const env = {
+      CODEX_HOME: sb.codexHome,
+      OPENCODEX_HOME: sb.opencodexHome,
+      OCX_LAUNCHER_MODE: "false",
+      OCX_PRESET: "",
+    };
+    const r = runPhase<{ added: number; path: string; contentsUnchanged: boolean }>(env, `
+      const { syncCatalogModels } = await import("./src/codex/catalog.ts");
+      const fs = await import("node:fs");
+      const path = await import("node:path");
+      const catalogPath = path.join(process.env.CODEX_HOME, "catalog.json");
+      const before = fs.readFileSync(catalogPath, "utf-8");
+      const result = await syncCatalogModels({
+        providers: {},
+        enableCodexLauncherMode: false,
+      });
+      const after = fs.readFileSync(catalogPath, "utf-8");
+      console.log(JSON.stringify({
+        added: result.added,
+        path: result.path,
+        contentsUnchanged: before === after,
+      }));
+    `);
+    expect(r.status).toBe(0);
+    expect(r.data?.added).toBe(0);
+    expect(r.data?.contentsUnchanged).toBe(true);
+    // Sentinel content survived: the catalog still has the user-supplied gpt-5.5 row, no
+    // opencodex base_instructions leaked in.
+    const finalContent = readFileSync(catalogPath, "utf-8");
+    expect(finalContent).toContain("T10-sentinel");
+    expect(finalContent).not.toContain("You are Codex, a coding agent based on GPT-5");
+  });
+
+  test("T10b: pass-through still returns the resolved catalog path (so inject downstream has a path to wire)", () => {
+    // Even when sync is skipped, syncCatalogModels must report the path CodexPlusPlus owns
+    // so downstream code (sync.ts) doesn't NPE on cat.path. Path is whatever
+    // model_catalog_json points at, falling back to the bundled default.
+    writeFileSync(join(sb.opencodexHome, "config.json"), JSON.stringify({
+      providers: {},
+      enableCodexLauncherMode: false,
+    }), "utf8");
+    writeFileSync(join(sb.codexHome, "config.toml"), `model_catalog_json = "catalog.json"\n`, "utf8");
+    const env = {
+      CODEX_HOME: sb.codexHome,
+      OPENCODEX_HOME: sb.opencodexHome,
+      OCX_LAUNCHER_MODE: "false",
+    };
+    const r = runPhase<{ path: string; added: number }>(env, `
+      const { syncCatalogModels } = await import("./src/codex/catalog.ts");
+      const path = await import("node:path");
+      const result = await syncCatalogModels({
+        providers: {},
+        enableCodexLauncherMode: false,
+      });
+      console.log(JSON.stringify({ path: result.path, added: result.added }));
+    `);
+    expect(r.status).toBe(0);
+    expect(r.data?.added).toBe(0);
+    // Path resolves under CODEX_HOME (absolute), pointing at the user-supplied catalog.json.
+    // Case-insensitive on Windows where tmpdir() returns C:\\Windows\\TEMP but the filesystem
+    // canonicalizes to Temp. Normalize both sides before substring match.
+    const norm = (s: string) => process.platform === "win32" ? s.toLowerCase() : s;
+    expect(norm(r.data?.path ?? "")).toContain("catalog.json");
+    expect(norm(r.data?.path ?? "")).toContain(norm(sb.codexHome));
   });
 });

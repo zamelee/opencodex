@@ -36,6 +36,8 @@ Phase 5 launcher-mode flag 透传：
 import argparse
 import errno
 import json
+import datetime
+import secrets
 import os
 import select
 import shutil
@@ -1190,26 +1192,232 @@ def parse_bool_arg(v: str | None) -> bool | None:
     return None
 
 
-def _menu_action_start(port: int, cli_overrides: dict, no_bootstrap: bool, in_tree: bool) -> int:
-    """[s] start the proxy. Sub-prompt: f=foreground, b=background, shim=install shim then fg."""
+# --- LAN bind helpers (added 2026-09-24) ---------------------------------------
+
+
+def _is_loopback_host(hostname: str) -> bool:
+    """True if hostname binds to a loopback address. Used by both [n] and [lan] paths."""
+    h = (hostname or "").strip().lower()
+    return h in ("", "127.0.0.1", "::1", "localhost", "[::1]")
+
+
+def _current_bind_hostname() -> str:
+    """Resolve effective bind: OCX_HOSTNAME env > config.hostname > 127.0.0.1."""
+    env_h = os.environ.get("OCX_HOSTNAME", "").strip()
+    if env_h:
+        return env_h
+    try:
+        if CONFIG.exists():
+            with CONFIG.open("r", encoding="utf-8") as f:
+                raw = json.load(f)
+            h = str((raw or {}).get("hostname") or "").strip()
+            if h:
+                return h
+    except (OSError, ValueError):
+        pass
+    return "127.0.0.1"
+
+
+def _has_api_auth(cfg: dict | None = None) -> bool:
+    """True if OPENCODEX_API_AUTH_TOKEN env or config.apiKeys[] is non-empty.
+
+    Non-loopback bind requires auth (see src/server/auth-cors.ts:144). We surface this
+    gate at menu time so the user sees the consequence BEFORE bun refuses to start.
+    """
+    if os.environ.get("OPENCODEX_API_AUTH_TOKEN", "").strip():
+        return True
+    raw = cfg if cfg is not None else _read_config_raw()
+    for k in (raw.get("apiKeys") or []):
+        if isinstance(k, dict) and str(k.get("key", "")).strip():
+            return True
+        if isinstance(k, str) and k.strip():
+            return True
+    return False
+
+
+def _read_config_raw() -> dict:
+    try:
+        if CONFIG.exists():
+            with CONFIG.open("r", encoding="utf-8") as f:
+                return json.load(f) or {}
+    except (OSError, ValueError):
+        pass
+    return {}
+
+
+def _backup_config(stamp_reason: str) -> None:
+    """§7 pre-write backup. Stamp = <reason>-YYYYMMDD-HHMMSS."""
+    if not CONFIG.exists():
+        return
+    ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    suffix = CONFIG.suffix
+    backup_path = CONFIG.with_name(f"{CONFIG.stem}.bak-{ts}-{stamp_reason}{suffix}")
+    try:
+        shutil.copy2(CONFIG, backup_path)
+    except OSError:
+        pass
+
+
+def _ensure_api_auth_for_bind(hostname: str) -> tuple[bool, str | None]:
+    """For non-loopback bind: ensure apiKeys[] has at least one entry.
+
+    Returns (auth_ready, generated_token_or_None). On auto-generation, a new
+    apiKeys[] entry is appended with the token plaintext — we MUST show the
+    plaintext once because the on-disk copy is the only persistent form.
+    """
+    if _is_loopback_host(hostname):
+        return (True, None)
+    cfg = _read_config_raw()
+    if _has_api_auth(cfg):
+        return (True, None)
+    raw_token = secrets.token_urlsafe(32)
+    full_token = f"ocx_{raw_token}"
+    api_keys = list(cfg.get("apiKeys") or [])
+    api_keys.append({
+        "id": secrets.token_hex(8),
+        "name": "auto-lan-bind",
+        "key": full_token,
+        "createdAt": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
+    })
+    cfg["apiKeys"] = api_keys
+    _backup_config("lan-bind-token")
+    try:
+        with CONFIG.open("w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+        return (True, full_token)
+    except OSError as e:
+        print(f"  [err] 写 apiKeys 失败: {e}", file=sys.stderr)
+        return (False, None)
+
+
+def _detect_local_ips() -> list[str]:
+    """List non-loopback IPv4 addresses for this machine. Best-effort cross-platform."""
+    candidates: list[str] = []
+    try:
+        infos = socket.getaddrinfo(socket.gethostname(), None, family=socket.AF_INET, type=socket.SOCK_STREAM)
+        for info in infos:
+            ip = info[4][0]
+            if not ip.startswith("127."):
+                candidates.append(ip)
+    except (socket.gaierror, OSError):
+        pass
+    seen: set[str] = set()
+    out: list[str] = []
+    for ip in candidates:
+        if ip not in seen:
+            seen.add(ip)
+            out.append(ip)
+    return out
+
+
+def _pick_local_ip_prompt() -> str | None:
+    """[3] sub-prompt: list detected local IPs, let user pick one. None = cancel."""
+    ips = _detect_local_ips()
+    if not ips:
+        print()
+        print("  ⚠ 没检测到任何非 loopback IPv4。可以手动输一个。")
+        try:
+            typed = input("  输入 IP / [回车]=取消: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return None
+        return typed or None
     print()
-    print("  启动方式:")
-    print("    [f] 前台 (Ctrl+C 停)")
-    print("    [b] 后台 (shell 立刻返回)")
+    print("  检测到本机 IPv4:")
+    for i, ip in enumerate(ips, 1):
+        print(f"    [{i}] {ip}")
+    print("    [0] 取消")
+    try:
+        raw = input("  选 > ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return None
+    if raw == "0" or not raw:
+        return None
+    try:
+        idx = int(raw) - 1
+        if 0 <= idx < len(ips):
+            return ips[idx]
+    except ValueError:
+        pass
+    print(f"  未识别: {raw!r}")
+    return None
+
+
+def _menu_action_start(port: int, cli_overrides: dict, no_bootstrap: bool, in_tree: bool) -> int:
+    """[s] start the proxy. 2-level wizard: (1) f/b, (2) bind choice (loopback/all/specific)."""
+    # Level 1 — run mode
+    print()
+    print("  启动方式 (Level 1):")
+    print("    [1] 前台 (Ctrl+C 停)")
+    print("    [2] 后台 (shell 立刻返回)")
     if in_tree:
-        print("    [shim] 安装 codex-shim + 前台启动")
-    print("    [返回] 上一级")
+        print("    [3] 安装 codex-shim + 前台启动")
+    print("    [0] 上一级")
     try:
         sub = input("  选 > ").strip().lower()
     except (EOFError, KeyboardInterrupt):
         return 0
-    if sub == "f":
-        return run_start(port, cli_overrides=cli_overrides, no_bootstrap=no_bootstrap)
-    if sub == "b" or sub == "":
-        return run_background(port, cli_overrides=cli_overrides, no_bootstrap=no_bootstrap)
-    if sub == "shim" and in_tree:
+    if sub in ("1", "f", "前台"):
+        run_mode = "fg"
+    elif sub in ("2", "b", "后台"):
+        run_mode = "bg"
+    elif sub in ("3", "shim") and in_tree:
         return run_shim_then_start(port, cli_overrides=cli_overrides, no_bootstrap=no_bootstrap)
-    return 0
+    elif sub in ("0", "返回", "back", "q", ""):
+        return 0
+    else:
+        print(f"  未识别: {sub!r}")
+        return 0
+
+    # Level 2 — bind choice
+    cur = _current_bind_hostname()
+    print()
+    print(f"  绑定方式 (Level 2):  当前 bind: {cur}")
+    print("    [1] 本机        127.0.0.1")
+    print("    [2] 所有 IP     0.0.0.0    (LAN 通用)")
+    print("    [3] 指定 IP     (从本机网卡选一个)")
+    print("    [0] 上一级")
+    try:
+        bind = input("  选 > ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return 0
+    if bind == "1":
+        bind_host = "127.0.0.1"
+    elif bind == "2":
+        bind_host = "0.0.0.0"
+    elif bind == "3":
+        bind_host = _pick_local_ip_prompt()
+        if not bind_host:
+            return 0
+    elif bind in ("0", "返回", "back", ""):
+        return 0
+    else:
+        print(f"  未识别: {bind!r}")
+        return 0
+
+    # Auth gate for non-loopback bind. Token (if generated) persists to config.apiKeys[];
+    # hostname choice is one-shot (overrides OCX_HOSTNAME for this run only, NOT written).
+    if not _is_loopback_host(bind_host):
+        auth_ready, gen_token = _ensure_api_auth_for_bind(bind_host)
+        if not auth_ready:
+            print("  [err] 切非 loopback 必须有 API auth，但自动生成 token 写 config 失败。", file=sys.stderr)
+            return 1
+        if gen_token:
+            print(f"  [auth] 自动生成 API token (本次会话一次性显示，请立即抄走):")
+            print()
+            print(f"           {gen_token}")
+            print()
+            print("         其它客户端调 proxy 时:")
+            print(f"           Authorization: Bearer {gen_token}")
+            print()
+
+    # One-shot override for this run only — do NOT write config.hostname.
+    effective = dict(cli_overrides or {})
+    effective["hostname"] = bind_host
+    print(f"  [run] bind = {bind_host} (一次性 override, 不写 config)")
+    if run_mode == "fg":
+        return run_start(port, cli_overrides=effective, no_bootstrap=no_bootstrap)
+    return run_background(port, cli_overrides=effective, no_bootstrap=no_bootstrap)
 
 
 def _menu_action_toggle_mode(port: int, cli_overrides: dict, no_bootstrap: bool) -> int:
@@ -1303,24 +1511,21 @@ def main_menu(port: int, cli_overrides: dict | None = None, no_bootstrap: bool =
 
         if in_tree:
             print("  动作:")
-            print("    [s] 启动  (f=前台 / b=后台 / shim=安 codex-shim)")
-            print("    [x] 停止  (停服务 + 恢复原生 Codex)")
-            print("    [m] 切换模式  (HTTP-only <-> Launcher)")
-            print("    [i] 查看影响  (列出当前模式会动哪些 Codex 文件)")
-            print("    [?] 查看状态  (proxy status)")
-            print("    [c] 配置 init  (首次安装 / 重新 init)")
-            print("    [r] 清理 dist  (gui/dist + dist)")
-            print("    [q] 退出")
+            print("    [1] 启动  (进前级 2 选 bind)")
+            print("    [2] 停止  (停服务)")
+            print("    [3] 查看状态  (proxy status)")
+            print("    [4] 配置 init  (首次安装 / 重新 init)")
+            print("    [5] 清理 dist  (gui/dist + dist)")
+            print("    [0] 退出")
         else:
             print("  动作 (out-of-tree，尚未 init):")
-            print("    [s] 启动  (含首次安装 bootstrap)")
-            print("    [x] 停止")
-            print("    [m] 切换模式  (需先 init)")
-            print("    [i] 查看影响")
-            print("    [?] 查看状态")
-            print("    [q] 退出")
+            print("    [1] 启动  (含首次安装 bootstrap)")
+            print("    [2] 停止")
+            print("    [3] 查看状态  (proxy status)")
+            print("    [4] 配置 init")
+            print("    [0] 退出")
             print()
-            print("  ⚠ 检测到未 init，请先运行 [s] bootstrap 。")
+            print("  ⚠ 检测到未 init，请先运行 [1] bootstrap 。")
         print()
         try:
             c = input("选 > ").strip().lower()
@@ -1328,39 +1533,31 @@ def main_menu(port: int, cli_overrides: dict | None = None, no_bootstrap: bool =
             print()
             return 0
 
-        if c == "q":
+        # Number-driven menu. 0 = back/exit (also q).
+        if c in ("0", "q"):
             return 0
-        if c == "x":
+        if c in ("2", "x"):
             return run_stop(port)
-        if c == "i":
-            _menu_action_view_impact()
-            continue
-        if c == "?":
+        if c in ("3", "?"):
             _menu_action_status(port)
             continue
-        if c == "c":
+        if c == "4":
             if not in_tree:
                 print("  out-of-tree 环境下 init 走 bootstrap 路径。")
                 continue
             run_init()
             continue
-        if c == "r":
+        if c == "5":
             run_clean()
             continue
-        if c == "m":
-            if not is_initialized():
-                print("  未 init，跳过。")
-                continue
-            _menu_action_toggle_mode(port, cli_overrides or {}, no_bootstrap)
-            continue
-        if c == "s" or c == "":
+        if c in ("1", "s", ""):
             if not in_tree:
                 # Out-of-tree: bootstrap (clone + install + init + background)
                 rc = run_bootstrap(port, None, None, cli_overrides=cli_overrides, no_bootstrap=no_bootstrap)
                 return rc
             return _menu_action_start(port, cli_overrides or {}, no_bootstrap, in_tree)
         # Unrecognized key: show hint, loop back.
-        print(f"  未识别的选项：{c!r}。按上面列表选。", file=sys.stderr)
+        print(f"  未识别的选项：{c!r}。按上面列表选 [0-5]。", file=sys.stderr)
 
 
 def build_cli_overrides(args: argparse.Namespace) -> dict:

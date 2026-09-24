@@ -1481,8 +1481,23 @@ export async function syncCatalogModels(config: OcxConfig): Promise<{ added: num
   // preservation independently. Default true so this stays backward-compatible.
   // - syncRoutedModels=false   -> orderedGoModels forced to [] (no namespaced entries)
   // - syncNativeOpenaiModels=false -> readNativeBaseline returns empty Map (no native priority merge)
-  // - enableCodexLauncherMode=false still allows this catalog write so CodexPlusPlus can pick up
-  //   the bare native slugs from this file via its custom_catalog_path.
+  //
+  // Pass-through contract (v10.20, 2026-09-24): when enableCodexLauncherMode=false, this
+  // function is a NO-OP. Codex CLI reads the on-disk catalog via config.toml's
+  // `model_catalog_json` pointer (which CodexPlusPlus owns in pass-through mode); any
+  // opencodex-side write leaks opencodex's `base_instructions` into Codex's own system
+  // prompt and injects `<provider>/<model>` slugs that Codex cannot resolve natively.
+  // The earlier "CodexPlusPlus reads it via custom_catalog_path" rationale no longer
+  // holds — Codex CLI's direct read of the same file means opencodex must leave it alone.
+  // Log message downstream in sync.ts:53 sees `added === 0` and skips the "+ N models
+  // appended" line entirely.
+  if (config.enableCodexLauncherMode === false) {
+    const catalogPath = readCodexCatalogPath();
+    // catalogExists is computed by refreshCodexModelCatalog after this returns, so sync.ts
+    // correctly distinguishes "pass-through skip" (silent) from "no catalog source found"
+    // (warning) — no extra field needed here.
+    return { added: 0, path: catalogPath };
+  }
   const syncRouted = config.syncRoutedModels !== false;
   const syncNative = config.syncNativeOpenaiModels !== false;
 
