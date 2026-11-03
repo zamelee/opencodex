@@ -1057,16 +1057,55 @@ function orphanToolResultText(msg: OcxToolResultMessage): string {
   const label = msg.toolName ? `${msg.toolName} (${msg.toolCallId})` : msg.toolCallId;
 
 
+  // Never inline image payloads here. A view_image tool result carries a base64
+  // data URL; JSON.stringify-ing it turns megabytes of base64 into TEXT, which
+  // upstream tokenizes at ~1.4 chars/token (a 4.6MB screenshot history became a
+  // 3.39M-token prompt and 400'd with "prompt is too long"). Images are hoisted
+  // into a sibling user message as native image blocks instead, so the model
+  // still sees them at vision cost.
   const content = typeof msg.content === "string"
 
 
     ? msg.content
 
 
-    : JSON.stringify(msg.content);
+    : msg.content
+      .filter((p) => p.type === "text")
+      .map((p) => p.text)
+      .join("");
 
 
   return `[tool_result without adjacent tool_use: ${label}]\n${content}`;
+
+
+}
+
+
+
+
+/**
+ * Image parts of an orphaned tool result (no adjacent tool_use).
+ *
+ * Anthropic rejects a standalone `tool_result` block, so the result is
+ * re-emitted as a plain user turn. Images cannot ride along as text, so they
+ * are returned separately and the caller appends them as native image blocks
+ * in a sibling user message — the model still sees them (verified: a solid
+ * green PNG is answered "Green") and the base64 is billed as vision instead
+ * of ~1.4 chars/token of text.
+ */
+function orphanToolResultImages(msg: OcxToolResultMessage): unknown[] {
+
+
+  if (typeof msg.content === "string") return [];
+
+
+  return msg.content
+
+
+    .filter((p) => p.type === "image")
+
+
+    .map((p) => toAnthropicContentPart(p));
 
 
 }
@@ -1267,6 +1306,9 @@ function messagesToAnthropicFormat(
           const orphanBlocks: Record<string, unknown>[] = [];
 
 
+          const orphanImages: unknown[] = [];
+
+
           const seen = new Set<string>();
 
 
@@ -1292,6 +1334,9 @@ function messagesToAnthropicFormat(
 
 
               orphanBlocks.push({ type: "text", text: orphanToolResultText(tr) });
+
+
+              orphanImages.push(...orphanToolResultImages(tr));
 
 
             }
@@ -1336,6 +1381,18 @@ function messagesToAnthropicFormat(
           messages.push({ role: "user", content: [...resultBlocks, ...orphanBlocks] });
 
 
+          // Hoisted orphan images ride in their own user message: Anthropic
+          // accepts image blocks in a user turn, and this keeps the base64 out
+          // of any text block (where it would be tokenized as text).
+          if (orphanImages.length > 0) {
+
+
+            messages.push({ role: "user", content: orphanImages });
+
+
+          }
+
+
           i = j - 1;
 
 
@@ -1357,7 +1414,24 @@ function messagesToAnthropicFormat(
         // assistant tool_use. Preserve the information as text instead of sending a 400-prone block.
 
 
-        messages.push({ role: "user", content: orphanToolResultText(msg as OcxToolResultMessage) });
+        const orphanMsg = msg as OcxToolResultMessage;
+
+
+        messages.push({ role: "user", content: orphanToolResultText(orphanMsg) });
+
+
+        // Hoist any images out of the textified result into their own user
+        // message as native image blocks — see orphanToolResultImages().
+        const orphanImgs = orphanToolResultImages(orphanMsg);
+
+
+        if (orphanImgs.length > 0) {
+
+
+          messages.push({ role: "user", content: orphanImgs });
+
+
+        }
 
 
         break;
@@ -2387,5 +2461,3 @@ export function createAnthropicAdapter(provider: OcxProviderConfig, cacheRetenti
 
 
 }
-
-

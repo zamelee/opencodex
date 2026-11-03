@@ -23,5 +23,8 @@ tests/.tmp-*/
 # Python bytecode caches
 __pycache__/
 
+# TypeScript incremental build cache
+tsconfig.tsbuildinfo
+
 # Local scratch / transient scripts (ocx-start.py helpers, patches, etc.)
 tmp/

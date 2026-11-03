@@ -11,7 +11,15 @@ export function classifyError(status: number, type: string, message: string): Oc
     text.includes("context window") ||
     text.includes("context length") ||
     text.includes("maximum context") ||
-    text.includes("too many tokens")
+    text.includes("too many tokens") ||
+    // MiniMax / Anthropic-compatible relays phrase the same overflow as
+    // "prompt is too long: N tokens > M maximum" (code 11115) or
+    // "context window exceeds limit". Without these keywords the overflow is
+    // classified as a generic invalid_request_error, so Codex never enters its
+    // ContextWindowExceeded path and never auto-compacts — the turn just dies.
+    text.includes("prompt is too long") ||
+    text.includes("prompt_too_long") ||
+    text.includes("input is too long")
   ) {
     return { message, type: "invalid_request_error", code: "context_length_exceeded" };
   }

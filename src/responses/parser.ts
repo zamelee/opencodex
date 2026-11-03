@@ -201,7 +201,16 @@ function ensureAssistantPlaceholder(messages: OcxMessage[], modelId: string, now
  * Never inlines an image_url as text (that would explode the token count).
  */
 function outputToToolResultContent(output: string | unknown[] | undefined): string | OcxContentPart[] {
-  if (typeof output === "string") return output;
+  if (typeof output === "string") {
+    // Codex may serialize the content-items array as a JSON string. Left as a
+    // string, a screenshot's base64 data URL stays inline and upstream bills it
+    // as text (~1.4 chars/token) instead of vision — a 4.6MB history became a
+    // 3.39M-token prompt and 400'd with "prompt is too long". Parse it back
+    // into parts so the image becomes a real image block.
+    const parsed = parseJsonContentItems(output);
+    if (parsed) return outputToToolResultContent(parsed);
+    return output;
+  }
   if (!Array.isArray(output)) return "";
   const parts: OcxContentPart[] = [];
   let hasImage = false;
@@ -221,6 +230,30 @@ function outputToToolResultContent(output: string | unknown[] | undefined): stri
   }
   if (!hasImage) return parts.map(p => (p.type === "text" ? p.text : "")).join("");
   return parts;
+}
+
+/**
+ * Parse a tool output that is a JSON-encoded array of content items.
+ *
+ * Returns the decoded array when the string really is a content-items array
+ * (objects carrying `type` plus `text` / `image_url`), else null so the caller
+ * keeps the original string. Only arrays are accepted: a bare JSON object or
+ * scalar is not a content-items payload.
+ */
+function parseJsonContentItems(text: string): unknown[] | null {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) return null;
+  if (!trimmed.includes("input_image") && !trimmed.includes("output_text")) return null;
+  try {
+    const decoded: unknown = JSON.parse(trimmed);
+    if (!Array.isArray(decoded) || decoded.length === 0) return null;
+    const allItems = decoded.every(
+      (raw) => isObj(raw) && typeof (raw as { type?: unknown }).type === "string",
+    );
+    return allItems ? decoded : null;
+  } catch {
+    return null;
+  }
 }
 
 /**

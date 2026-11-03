@@ -18,6 +18,28 @@ export const MANY_IMAGE_MAX_DIMENSION = 2000;
 export const ABSOLUTE_MAX_DIMENSION = 8000;
 export const MAX_IMAGES_PER_REQUEST = 100;
 
+/**
+ * Preflight budget for base64 that would be billed as TEXT.
+ *
+ * Screenshots arrive as base64 data URLs. When they ride as native image
+ * blocks they cost vision tokens (11 real screenshots = 4.59MB base64 =
+ * 33K tokens). But when base64 ends up inside a TEXT block — a tool result
+ * that cannot be paired with its tool_use, or a payload that arrives
+ * JSON-encoded as a string — upstream counts ~1.4 chars/token, so the same
+ * 4.59MB becomes a ~3.28M-token prompt and the request 400s with
+ * "prompt is too long" (observed: 3,393,866 tokens > 1,048,576 maximum).
+ *
+ * So this rule finds base64 data URLs that leaked into text blocks and strips
+ * the payload, leaving a marker. Native image blocks are untouched — they are
+ * not the billing hazard. The upstream symptom is a 400 that kills the whole
+ * turn, so losing a screenshot is strictly better than losing the turn.
+ */
+export const MAX_BASE64_TEXT_CHARS = 2_000_000;
+/** A data URL embedded in a text block, e.g. `data:image/png;base64,AAAA...`. */
+const DATA_URL_IN_TEXT = /data:[a-z0-9.+-]+\/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=]+/gi;
+
+const STRIPPED_TEXT = "[image omitted: base64 payload stripped from text to stay within the context budget]";
+
 const OMITTED_TEXT = "[image omitted: Anthropic request exceeded the 20-image limit for large images; older screenshots were dropped]";
 const OVERSIZED_TEXT = "[image omitted: exceeds Anthropic's 8000px per-side limit]";
 
@@ -153,6 +175,13 @@ function textify(ref: ImageBlockRef, text: string): void {
  * images until <=20 so the 8000px allowance applies; always cap at 100 images.
  */
 export function enforceAnthropicImageLimits(messages: unknown[]): void {
+
+  // Rule 0 (always runs): strip base64 payloads that leaked into TEXT blocks.
+  // This is the shape upstream bills as text (~1.4 chars/token), and it is
+  // reachable with zero image blocks (a tool result whose payload arrived as a
+  // JSON string), so it must not sit behind the image-block early return.
+  stripBase64FromText(messages);
+
   const refs = collectImageRefs(messages);
   if (refs.length === 0) return;
 
@@ -192,4 +221,44 @@ export function enforceAnthropicImageLimits(messages: unknown[]): void {
       live.delete(i);
     }
   }
+
+}
+
+/**
+ * Remove base64 data URLs from text blocks, keeping a marker in their place.
+ *
+ * Walks message content and `tool_result` content (the two places a text
+ * block can carry a leaked data URL), replacing each match with a short
+ * marker. Returns the number of stripped payloads.
+ */
+export function stripBase64FromText(messages: unknown[]): number {
+  let stripped = 0;
+
+  const stripText = (text: string): string =>
+    text.replace(DATA_URL_IN_TEXT, () => { stripped++; return STRIPPED_TEXT; });
+
+  const walk = (arr: unknown[]): void => {
+    for (let i = 0; i < arr.length; i++) {
+      const block = arr[i];
+      if (typeof block !== "object" || block === null) continue;
+      const b = block as { type?: unknown; text?: unknown; content?: unknown };
+      if (b.type === "text" && typeof b.text === "string" && b.text.includes("base64,")) {
+        arr[i] = { type: "text", text: stripText(b.text) };
+      } else if (b.type === "tool_result" && Array.isArray(b.content)) {
+        walk(b.content);
+      } else if (b.type === "tool_result" && typeof b.content === "string" && b.content.includes("base64,")) {
+        // A tool_result whose content is a plain string still carries the
+        // payload as text — the same billing hazard.
+        (b as { content: string }).content = stripText(b.content);
+      }
+    }
+  };
+  for (const msg of messages) {
+    const content = (msg as { content?: unknown })?.content;
+    if (Array.isArray(content)) walk(content);
+    else if (typeof content === "string" && content.includes("base64,")) {
+      (msg as { content: string }).content = stripText(content);
+    }
+  }
+  return stripped;
 }
