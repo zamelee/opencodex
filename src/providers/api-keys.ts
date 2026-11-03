@@ -9,6 +9,7 @@
 import { createHash } from "node:crypto";
 import { saveConfig } from "../config";
 import { validateApiKey } from "../oauth/key-providers";
+import { buildAuthHeaders, defaultStrategiesFor, isReverseProxyProvider, stripBase } from "./auth-matrix";
 import type { OcxConfig, OcxProviderConfig } from "../types";
 
 export interface ProviderApiKeyInfo {
@@ -139,34 +140,255 @@ export function revealProviderApiKey(config: OcxConfig, name: string, id: string
 
 /** Result of probing an upstream API key against its provider. `unknown` covers transport /
  *  non-auth errors so the UI can render "couldn't tell" instead of a misleading pass/fail. */
-export type ProviderApiKeyTestResult = { ok: true | false | "unknown"; latencyMs: number };
+export type ProviderApiKeyTestResult = {
+  ok: true | false | "unknown";
+  latencyMs: number;
+  /** Upstream response body / transport error, truncated. Surfaced in the result dialog. */
+  detail?: string;
+};
 
-/** Probe a pool entry's key against its provider's upstream (anthropic messages, google
- *  models.list, or openai-compatible /models). Pure read — never persists config. */
+/** Cheap, token-free probe path for each adapter family. Reverse proxies expose a
+ *  /v1/usage balance endpoint; everything else answers model discovery. Either way this
+ *  costs no completion tokens, which is what separates 余量探测 from 测试. */
+function cheapProbePath(provider: OcxProviderConfig): string {
+  return isReverseProxyProvider(provider.baseUrl ?? "") ? "/v1/usage" : "/v1/models";
+}
+
+/** Probe a pool entry's key against its provider's upstream. Pure read — never persists
+ *  config and never spends completion tokens. Auth headers come from the auth matrix
+ *  (`defaultStrategiesFor`), so this probe and the 测试 button agree about which header
+ *  the provider expects. */
 export async function testProviderApiKey(config: OcxConfig, name: string, id: string): Promise<ProviderApiKeyTestResult | { error: string }> {
   const provider = config.providers[name];
   if (!provider || !isKeyAuthProvider(provider)) return { error: "provider does not use API-key auth" };
   const entry = ensurePool(provider).find(e => e.id === id);
   if (!entry) return { error: "key not found" };
   if (isEnvReference(entry.key)) return { error: "env-referenced keys cannot be tested directly" };
-  // All providers (including minimax.chat reverse proxy) go through validateApiKey so the
-  // probe mirrors what the proxy actually does at runtime: POST /v1/messages + max_tokens=1 +
-  // provider.testModel ?? defaultModel. This means a key that passes /v1/usage but fails
-  // /v1/messages (different gateway routes) is correctly flagged, and a key that works for
-  // inference but not quota is also correctly flagged.
-  // Reuse the dashboard-flow validator with a synthetic registry entry shaped from the saved
-  // provider config — only adapter / baseUrl / googleMode / defaultModel are read by the probe.
-  const googleMode = (provider as unknown as { googleMode?: "ai-studio" | "vertex" | "cloud-code-assist" }).googleMode;
-  const synthetic = {
-    label: name,
-    baseUrl: provider.baseUrl,
-    adapter: provider.adapter,
-    dashboardUrl: "",
-    ...(provider.testModel ? { testModel: provider.testModel } : {}),
-    ...(provider.defaultModel ? { defaultModel: provider.defaultModel } : {}),
-    ...(googleMode ? { googleMode } : {}),
-  };
+
+  // Google has its own discovery contract (x-goog-api-key, v1beta) that the matrix does
+  // not model, so keep the dedicated validator for it instead of guessing a header.
+  if ((provider.adapter ?? "").toLowerCase() === "google") {
+    const googleMode = (provider as unknown as { googleMode?: "ai-studio" | "vertex" | "cloud-code-assist" }).googleMode;
+    const synthetic = {
+      label: name,
+      baseUrl: provider.baseUrl,
+      adapter: provider.adapter,
+      dashboardUrl: "",
+      ...(provider.testModel ? { testModel: provider.testModel } : {}),
+      ...(provider.defaultModel ? { defaultModel: provider.defaultModel } : {}),
+      ...(googleMode ? { googleMode } : {}),
+    };
+    const startedAt = Date.now();
+    const ok = await validateApiKey(synthetic as Parameters<typeof validateApiKey>[0], entry.key);
+    return { ok, latencyMs: Date.now() - startedAt };
+  }
+
+  const base = stripBase(provider.baseUrl ?? "");
+  if (!base) return { error: "provider has no baseUrl" };
+  const url = `${base}${cheapProbePath(provider)}`;
+
   const started = Date.now();
-  const ok = await validateApiKey(synthetic as Parameters<typeof validateApiKey>[0], entry.key);
-  return { ok, latencyMs: Date.now() - started };
+  let sawAuthRejection = false;
+  let lastError: string | undefined;
+  // Try the matrix's candidate strategies in order (a locked modelListAuth yields one).
+  for (const strategy of defaultStrategiesFor(provider)) {
+    try {
+      const res = await fetch(url, {
+        method: "GET",
+        headers: buildAuthHeaders(strategy, entry.key),
+        signal: AbortSignal.timeout(10000),
+      });
+      if (res.ok) return { ok: true, latencyMs: Date.now() - started };
+      const text = (await res.text().catch(() => "")).slice(0, 240);
+      // Keep the HTTP status visible: without it a bare error body is hard to act on.
+      const detail = text ? `HTTP ${res.status}: ${text}` : `HTTP ${res.status}`;
+      if (res.status === 401 || res.status === 403) {
+        sawAuthRejection = true;
+        lastError = detail;
+        continue;
+      }
+      // 404 / 5xx / anything else is not an auth verdict — report "couldn't tell".
+      return { ok: "unknown", latencyMs: Date.now() - started, detail };
+    } catch (err) {
+      const nm = err instanceof Error ? err.name : String(err);
+      lastError = nm === "AbortError" || nm === "TimeoutError"
+        ? "请求超时 (10s)"
+        : (err instanceof Error ? err.message : String(err)).slice(0, 200);
+    }
+  }
+  return {
+    ok: sawAuthRejection ? false : "unknown",
+    latencyMs: Date.now() - started,
+    ...(lastError ? { detail: lastError } : {}),
+  };
+}
+
+export interface ChatTestOpts {
+  id?: string;
+  model?: string;
+  prompt?: string;
+}
+
+export interface ChatTestResult {
+  ok: boolean;
+  status: number | "timeout" | "error";
+  latencyMs: number;
+  /** Reply text snippet (first 240 chars), if any. */
+  reply?: string;
+  /** Token usage from upstream, if reported. */
+  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+  error?: string;
+}
+
+/**
+ * Send a real chat completion using the matrix-selected (adapter, auth) combo for
+ * the provider. Adapter decides URL path, authMatrix decides headers. The model is
+ * taken from `opts.model` first, then `provider.testModel`, then `provider.defaultModel`.
+ */
+interface ChatProbeOpts {
+  model: string;
+  prompt: string;
+  maxTokens: number;
+  /** Request deadline. The 1-token quota probe wants a much tighter bound than a real chat. */
+  timeoutMs?: number;
+}
+
+/**
+ * Shared core for both per-key actions. Builds the request from the matrix-locked
+ * (adapter, auth) pair so 余量探测 and 测试 can never disagree about which endpoint or
+ * header the provider expects. Returns the raw status plus, on success, the parsed reply.
+ */
+async function runChatProbe(
+  provider: OcxProviderConfig,
+  key: string,
+  opts: ChatProbeOpts,
+): Promise<ChatTestResult> {
+  const adapter = (provider.adapter ?? "").toLowerCase();
+  const authStrategy = provider.modelListAuth ?? "bearer";
+  const base = (provider.baseUrl ?? "").replace(/\/+$/, "");
+  if (!base) return { ok: false, status: "error", latencyMs: 0, error: "provider has no baseUrl" };
+
+  const headers = buildAuthHeaders(authStrategy as Parameters<typeof buildAuthHeaders>[0], key);
+  const allHeaders: Record<string, string> = { "Content-Type": "application/json", ...headers };
+
+  const model = opts.model;
+  if (!model) return { ok: false, status: "error", latencyMs: 0, error: "no model selected (defaultModel empty, testModel empty, and none passed in request)" };
+
+  // Build URL + body per adapter
+  let url: string;
+  let body: unknown;
+  if (adapter === "anthropic") {
+    url = `${base.replace(/\/v1\/?$/, "")}/v1/messages`;
+    body = { model, max_tokens: opts.maxTokens, messages: [{ role: "user", content: opts.prompt }] };
+  } else if (adapter === "openai-chat") {
+    url = `${base}/v1/chat/completions`;
+    body = { model, max_tokens: opts.maxTokens, messages: [{ role: "user", content: opts.prompt }] };
+  } else if (adapter === "openai-responses") {
+    url = `${base}/v1/responses`;
+    body = { model, max_tokens: opts.maxTokens, input: opts.prompt };
+  } else {
+    return { ok: false, status: "error", latencyMs: 0, error: `chat-test not implemented for adapter "${adapter}"` };
+  }
+
+  const started = Date.now();
+  const timeoutMs = opts.timeoutMs ?? 25000;
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: allHeaders,
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    const latencyMs = Date.now() - started;
+    const text = await res.text().catch(() => "");
+    if (!res.ok) {
+      return {
+        ok: false,
+        status: res.status,
+        latencyMs,
+        error: text.slice(0, 240),
+      };
+    }
+    let reply: string | undefined;
+    let usage: ChatTestResult["usage"];
+    try {
+      const parsed = JSON.parse(text) as Record<string, unknown>;
+      // Anthropic: content[0].text
+      const content = parsed["content"];
+      if (Array.isArray(content) && content[0] && typeof (content[0] as Record<string, unknown>)["text"] === "string") {
+        reply = ((content[0] as Record<string, string>)["text"]).slice(0, 240);
+      }
+      // OpenAI chat-completion: choices[0].message.content
+      const choices = parsed["choices"];
+      if (Array.isArray(choices) && choices[0]) {
+        const msg = (choices[0] as Record<string, Record<string, string>>)["message"];
+        if (msg && typeof msg["content"] === "string") reply = msg["content"].slice(0, 240);
+      }
+      // OpenAI responses: output[0].content[0].text
+      const output = parsed["output"];
+      if (Array.isArray(output) && output[0] && !reply) {
+        const contentArr = (output[0] as Record<string, unknown[]>)["content"];
+        if (Array.isArray(contentArr) && contentArr[0]) {
+          const txt = (contentArr[0] as Record<string, string>)["text"];
+          if (typeof txt === "string") reply = txt.slice(0, 240);
+        }
+      }
+      const u = parsed["usage"];
+      if (u && typeof u === "object") {
+        // Anthropic reports input_tokens/output_tokens; OpenAI reports
+        // prompt_tokens/completion_tokens. Normalize so the dialog has one shape.
+        const raw = u as Record<string, unknown>;
+        const num = (v: unknown) => (typeof v === "number" ? v : undefined);
+        const prompt = num(raw["prompt_tokens"]) ?? num(raw["input_tokens"]);
+        const completion = num(raw["completion_tokens"]) ?? num(raw["output_tokens"]);
+        const total = num(raw["total_tokens"]) ?? (prompt !== undefined && completion !== undefined ? prompt + completion : undefined);
+        if (prompt !== undefined || completion !== undefined || total !== undefined) {
+          usage = {
+            ...(prompt !== undefined ? { prompt_tokens: prompt } : {}),
+            ...(completion !== undefined ? { completion_tokens: completion } : {}),
+            ...(total !== undefined ? { total_tokens: total } : {}),
+          };
+        }
+      }
+    } catch {
+      // ignore parse error, still report ok if status was 200
+    }
+    return { ok: true, status: res.status, latencyMs, reply, usage };
+  } catch (err) {
+    const latencyMs = Date.now() - started;
+    const name = err instanceof Error ? err.name : String(err);
+    return {
+      ok: false,
+      status: name === "AbortError" || name === "TimeoutError" ? "timeout" : "error",
+      latencyMs,
+      error: name === "AbortError" || name === "TimeoutError"
+        ? `请求超时 (${Math.round(timeoutMs / 1000)}s)`
+        : (err instanceof Error ? err.message : String(err)).slice(0, 200),
+    };
+  }
+}
+
+/**
+ * Send a real chat completion using the matrix-selected (adapter, auth) combo for
+ * the provider. Adapter decides URL path, modelListAuth decides headers. The model is
+ * taken from `opts.model` first, then `provider.testModel`, then `provider.defaultModel`.
+ */
+export async function chatTestProvider(
+  provider: OcxProviderConfig,
+  opts: ChatTestOpts = {},
+): Promise<ChatTestResult> {
+  // Pick the key to test
+  let key: string | undefined;
+  if (opts.id && provider.apiKeyPool) {
+    const entry = provider.apiKeyPool.find((e) => e.id === opts.id);
+    if (entry) key = entry.key;
+  }
+  if (!key) key = provider.apiKey;
+  if (!key) return { ok: false, status: "error", latencyMs: 0, error: "no API key configured" };
+
+  return runChatProbe(provider, key, {
+    model: opts.model ?? provider.testModel ?? provider.defaultModel ?? "",
+    prompt: opts.prompt ?? "hi",
+    maxTokens: 100,
+  });
 }

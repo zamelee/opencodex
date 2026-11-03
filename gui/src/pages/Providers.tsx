@@ -8,20 +8,14 @@ import type { AccountQuota } from "../codex-quota-utils";
 import { formatRelativeTime } from "../codex-quota-utils";
 import QuotaBars from "../components/QuotaBars";
 import KeyPoolPanel from "../components/KeyPoolPanel";
+import AuthMatrixPanel from "../components/AuthMatrixPanel";
+import TestModelBadge from "../components/TestModelBadge";
+import KeyTestResultDialog, {
+  type ChatTestResult,
+  type QuotaProbeResult,
+} from "../components/KeyTestResultDialog";
+import { hasFreshMatrixCache } from "../components/AuthMatrixPanel";
 import { providerIconSrc } from "../provider-icons";
-
-interface ProbeAdapterResult {
-  adapter: "anthropic" | "openai-responses" | "openai-chat";
-  ok: boolean;
-  status?: number;
-  modelCount: number;
-  models: string[];
-  warning?: string;
-}
-interface AdapterProbeResponse {
-  recommended: ProbeAdapterResult["adapter"];
-  results: ProbeAdapterResult[];
-}
 
 interface Config {
   port: number;
@@ -38,6 +32,10 @@ interface Config {
     authMode?: string;
     disabled?: boolean;
     liveModels?: boolean;
+    /** Auth header strategy locked by the auth matrix, null = auto-detect. */
+    modelListAuth?: string | null;
+    /** Header VALUES are fetched on demand from /api/providers/headers — they are
+     *  secrets, so they never ride in this config payload. */
     headers?: Record<string, string>;
   }>;
 }
@@ -67,6 +65,68 @@ const OAUTH_LABELS: Record<string, string> = {
   kimi: "Kimi (Moonshot)",
 };
 const oauthLabel = (id: string) => OAUTH_LABELS[id] ?? id;
+
+/** Skeleton row used while /api/providers/keys is still in flight. One per
+ *  expected key — wide enough to read like a real row so the card doesn't
+ *  visibly pop in once the data arrives. */
+function AccountRowSkeleton({ tone = "dim" }: { tone?: "dim" | "muted" }) {
+  return (
+    <div className="prov-account-row prov-account-skeleton" style={{ cursor: "default" }}>
+      <span className={`dot dot-${tone}`} aria-hidden="true" />
+      <span className="prov-account-skeleton-bar" aria-hidden="true" />
+    </div>
+  );
+}
+
+/** Per-provider visual identity: a left-border accent + a faint tinted
+ *  background, picked by adapter so each card is recognisable at a glance
+ *  even before the user reads the URL/adapter chip. Colors lean into the
+ *  existing palette (warm/cool/violet/green) without colliding with the
+ *  default blue used for the default-provider badge. */
+function providerAccent(adapter: string | undefined): { border: string; tint: string } {
+  const a = (adapter ?? "").toLowerCase();
+  if (a.startsWith("anthropic")) return { border: "#e09a5f", tint: "rgba(224,154,95,0.06)" };
+  if (a === "openai-chat") return { border: "#5fb1e3", tint: "rgba(95,177,227,0.06)" };
+  if (a === "openai-responses") return { border: "#a285f5", tint: "rgba(162,133,245,0.06)" };
+  if (a.startsWith("google")) return { border: "#5fc18a", tint: "rgba(95,193,138,0.06)" };
+  if (a.startsWith("xai")) return { border: "#c98ad6", tint: "rgba(201,138,214,0.06)" };
+  if (a === "kimi") return { border: "#d6c25f", tint: "rgba(214,194,95,0.06)" };
+  if (a === "kiro") return { border: "#e35f7f", tint: "rgba(227,95,127,0.06)" };
+  if (a === "cursor") return { border: "#7fc9c8", tint: "rgba(127,201,200,0.06)" };
+  if (a === "chatgpt" || a === "openai-responses-forward") return { border: "#7a7a7a", tint: "rgba(122,122,122,0.05)" };
+  return { border: "var(--blue)", tint: "rgba(88,166,255,0.05)" };
+}
+
+/** Tiny top-corner mark keyed off `authMode` so the three keyless/oauth/passthrough
+ *  groups are distinguishable even before the badge row reads out. */
+function authModeMark(authMode: string | undefined): string | null {
+  switch (authMode) {
+    case "oauth": return "oauth";
+    case "forward": return "passthrough";
+    case undefined:
+    case "":
+      return null;
+    default:
+      return null;
+  }
+}
+
+
+// Browser-local (localStorage) storage for the 测试模型 dropdown selection. This is
+// deliberately NOT part of the provider config: it is a per-machine UI preference that
+// only decides which model the next 测试 / 拉取模型 call uses.
+const testModelStorageKey = (name: string) => `ocx.testModel.${name}`;
+
+function readTestModelLocal(name: string): string | null {
+  try { return localStorage.getItem(testModelStorageKey(name)); } catch { return null; }
+}
+
+function writeTestModelLocal(name: string, value: string): void {
+  try {
+    if (value) localStorage.setItem(testModelStorageKey(name), value);
+    else localStorage.removeItem(testModelStorageKey(name));
+  } catch { /* private mode / quota — keep the in-memory value only */ }
+}
 
 export default function Providers({ apiBase }: { apiBase: string }) {
   const t = useT();
@@ -109,28 +169,19 @@ export default function Providers({ apiBase }: { apiBase: string }) {
   // (already in /api/config response) so we don't have to keep them in sync. We only need
   // transient loading + error state per provider for the 拉取模型 button.
   const [pullingModels, setPullingModels] = useState<Record<string, boolean>>({});
-  const [probingAdapters, setProbingAdapters] = useState<Record<string, boolean>>({});
-  const [adapterProbeResult, setAdapterProbeResult] = useState<Record<string, AdapterProbeResponse | undefined>>({});
-  const probeAdapters = async (provider: string) => {
-    setProbingAdapters(prev => ({ ...prev, [provider]: true }));
-    try {
-      const res = await fetch(`${apiBase}/api/providers/probe-adapters`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: provider }),
-      });
-      const data = await res.json() as AdapterProbeResponse | { error?: string };
-      if (!res.ok || "error" in (data as Record<string, unknown>)) {
-        notify(("error" in data ? (data as { error?: string }).error : null) || `HTTP ${res.status}`, false);
-        return;
-      }
-      setAdapterProbeResult(prev => ({ ...prev, [provider]: data as AdapterProbeResponse }));
-    } catch (err) {
-      notify(String(err), false);
-    } finally {
-      setProbingAdapters(prev => ({ ...prev, [provider]: false }));
-    }
-  };
+  const [authMatrixOpen, setAuthMatrixOpen] = useState<string | null>(null);
   const [providerModelError, setProviderModelError] = useState<Record<string, string | undefined>>({});
+  // Per-provider "test model" chosen in the 测试模型 dropdown. Purely local to the
+  // browser (localStorage) and never synced back to provider.testModel /
+  // provider.defaultModel: it only steers the NEXT 测试 / 拉取 call. Initial value
+  // comes from provider.defaultModel, which stays the single source of truth.
+  const [testModelLocal, setTestModelLocal] = useState<Record<string, string>>({});
+  // Result of the real chat test (POST /api/providers/keys/chat-test), keyed by
+  // provider then key id. Kept separate from `keyTests` (余量探测) so the dialog
+  // can show both panes.
+  const [keyChatTests, setKeyChatTests] = useState<Record<string, Record<string, ChatTestResult>>>({});
+  // Which (provider, keyId) has the result dialog open, plus which pane to focus.
+  const [testDialog, setTestDialog] = useState<{ provider: string; keyId: string; keyLabel: string; tab: "quota" | "chat" } | null>(null);
 
   const aliveRef = useRef(true);
 
@@ -320,9 +371,45 @@ export default function Providers({ apiBase }: { apiBase: string }) {
         setKeyTests(prev => ({ ...prev, [provider]: { ...(prev[provider] ?? {}), [id]: { status: "fail", error: body.error } } }));
         return;
       }
-      setKeyTests(prev => ({ ...prev, [provider]: { ...(prev[provider] ?? {}), [id]: { status: body.ok === true ? "ok" : body.ok === false ? "fail" : "unknown", ...(typeof body.latencyMs === "number" ? { latencyMs: body.latencyMs } : {}) } } }));
+      const detail = (body as { detail?: string }).detail;
+      setKeyTests(prev => ({ ...prev, [provider]: { ...(prev[provider] ?? {}), [id]: { status: body.ok === true ? "ok" : body.ok === false ? "fail" : "unknown", ...(typeof body.latencyMs === "number" ? { latencyMs: body.latencyMs } : {}), ...(detail ? { error: detail } : {}) } } }));
     } catch (err) {
       setKeyTests(prev => ({ ...prev, [provider]: { ...(prev[provider] ?? {}), [id]: { status: "fail", error: String(err) } } }));
+    }
+  };
+
+  // Real chat test: sends a minimal completion through the matrix-selected
+  // (adapter, auth) using the dropdown's model, and returns the model's reply plus
+  // token usage. This is the only button that proves "the key can actually talk".
+  const chatTestOne = async (provider: string, id: string) => {
+    const model = testModelLocal[provider] ?? "";
+    setKeyChatTests(prev => ({ ...prev, [provider]: { ...(prev[provider] ?? {}), [id]: { status: "loading" } } }));
+    try {
+      const res = await fetch(`${apiBase}/api/providers/keys/chat-test`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: provider, id, ...(model ? { model } : {}) }),
+      });
+      const body = await res.json() as {
+        ok?: boolean; status?: number | string; latencyMs?: number;
+        reply?: string; usage?: ChatTestResult["usage"]; error?: string;
+      };
+      const result: ChatTestResult = body.ok === true
+        ? {
+            status: "ok",
+            ...(typeof body.latencyMs === "number" ? { latencyMs: body.latencyMs } : {}),
+            ...(body.reply ? { reply: body.reply } : {}),
+            ...(body.usage ? { usage: body.usage } : {}),
+            ...(model ? { model } : {}),
+          }
+        : {
+            status: "fail",
+            ...(typeof body.latencyMs === "number" ? { latencyMs: body.latencyMs } : {}),
+            error: body.error ?? (typeof body.status === "number" ? `HTTP ${body.status}` : String(body.status ?? "unknown error")),
+            ...(model ? { model } : {}),
+          };
+      setKeyChatTests(prev => ({ ...prev, [provider]: { ...(prev[provider] ?? {}), [id]: result } }));
+    } catch (err) {
+      setKeyChatTests(prev => ({ ...prev, [provider]: { ...(prev[provider] ?? {}), [id]: { status: "fail", error: String(err) } } }));
     }
   };
 
@@ -348,25 +435,6 @@ export default function Providers({ apiBase }: { apiBase: string }) {
       setProviderModelError(prev => ({ ...prev, [provider]: String(err) }));
     } finally {
       setPullingModels(prev => ({ ...prev, [provider]: false }));
-    }
-  };
-
-  // Persist the user's selection of test model. Empty string = clear override (use defaultModel).
-  const selectTestModel = async (provider: string, model: string) => {
-    try {
-      const res = await fetch(`${apiBase}/api/providers/test-model`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: provider, model: model === "" ? null : model }),
-      });
-      const body = await res.json() as { testModel?: string | null; error?: string };
-      if (!res.ok || body.error) {
-        notify(body.error || `HTTP ${res.status}`, false);
-        return;
-      }
-      // Refresh full config so the saved testModel shows up.
-      fetchConfig();
-    } catch (err) {
-      notify(String(err), false);
     }
   };
 
@@ -404,6 +472,43 @@ export default function Providers({ apiBase }: { apiBase: string }) {
   useEffect(() => {
     if (keyCardProviders.length > 0) fetchKeyPools(keyCardProviders);
   }, [apiBase, keyCardKey]);
+
+  // Seed the 测试模型 dropdown from localStorage, falling back to provider.defaultModel.
+  // Runs whenever the set of providers changes so a newly added provider appears with
+  // the right default without clobbering a user's existing picks.
+  const providerNamesKey = config ? Object.keys(config.providers).join("\u0000") : "";
+  useEffect(() => {
+    if (!config) return;
+    setTestModelLocal(prev => {
+      const next = { ...prev };
+      for (const [name, prov] of Object.entries(config.providers)) {
+        if (next[name] !== undefined) continue;
+        next[name] = readTestModelLocal(name) ?? prov.defaultModel ?? "";
+      }
+      return next;
+    });
+  }, [providerNamesKey]);
+
+  const setTestModelLocalValue = (name: string, value: string) => {
+    setTestModelLocal(prev => ({ ...prev, [name]: value }));
+    writeTestModelLocal(name, value);
+  };
+
+  // Auto-expand a provider's auth matrix when a fresh (< 5min) probe is cached, so a
+  // page reload does not hide results the user just generated. Only applied once per
+  // provider, and never collapses a panel the user opened manually.
+  const autoExpandedRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!config) return;
+    for (const name of Object.keys(config.providers)) {
+      if (autoExpandedRef.current.has(name)) continue;
+      autoExpandedRef.current.add(name);
+      if (hasFreshMatrixCache(name)) {
+        setAuthMatrixOpen(prev => prev ?? name);
+        break;
+      }
+    }
+  }, [providerNamesKey]);
 
   // Local threshold patch: PATCH /api/providers/key-schedule?name=<p>
   // Persists provider.keySchedule.threshold (and optionally enabled) without forcing
@@ -562,16 +667,32 @@ export default function Providers({ apiBase }: { apiBase: string }) {
   // ----- Edit provider (adapter / baseUrl / defaultModel / liveModels / headers) -----
   // Edit opens a focused modal; API keys and OAuth accounts stay on their own flows.
   const [editTarget, setEditTarget] = useState<EditableProvider | null>(null);
-  const openEditModal = (name: string) => {
+  const openEditModal = async (name: string) => {
     const prov = config?.providers?.[name];
     if (!prov) return;
+    // Header values are secrets and are not part of the config payload — fetch
+    // them for this provider only, so the modal can prefill the edit form.
+    let headerValues: Record<string, string> = {};
+    let headersLoaded = false;
+    try {
+      const res = await fetch(`${apiBase}/api/providers/headers?name=${encodeURIComponent(name)}`);
+      if (res.ok) {
+        const body = await res.json().catch(() => ({}));
+        headerValues = body.headers ?? {};
+        headersLoaded = true;
+      }
+    } catch {
+      // Leave headers empty; the modal still edits the other fields, and saving
+      // without touching headers leaves the stored values untouched.
+    }
     setEditTarget({
       name,
       adapter: prov.adapter ?? "",
       baseUrl: prov.baseUrl ?? "",
       defaultModel: prov.defaultModel ?? "",
       liveModels: prov.liveModels !== false,
-      headers: prov.headers ?? {},
+      headers: headerValues,
+      headersLoaded,
       models: prov.models ?? [],
       label: prov.label ?? "",
     });
@@ -742,14 +863,50 @@ export default function Providers({ apiBase }: { apiBase: string }) {
             const isKeyAuth = prov.authMode !== "oauth" && prov.authMode !== "forward";
             const keyPool = isKeyAuth && prov.hasApiKey ? (keyPools[name] ?? []) : [];
             const keySched = keySchedules[name] ?? null;
-            const showAccounts = (!!accountSet && accountSet.accounts.length > 0) || keyPool.length > 0;
+            // Distinguish three states per axis so the card can render a skeleton
+            // instead of a blank hole during the first paint:
+            //   undefined → not loaded yet (skeleton)
+            //   []         → loaded, empty (explicit empty hint + add button)
+            //   [...]      → loaded, has rows
+            // The previous boolean (`showAccounts`) was hiding the entire list while
+            // data was in flight, which read as "waiting for the page to settle".
+            const oauthLoaded = accountSet !== undefined;
+            const keyPoolLoaded = keyPools[name] !== undefined;
+            const showAccounts =
+              (isKeyAuth && prov.hasApiKey) ? keyPoolLoaded
+              : prov.authMode === "oauth" ? oauthLoaded
+              : prov.authMode === "forward" ? false
+              : false;
             const accountsOpen = openAccounts[name] !== false;
             const dropdownCount = accountSet?.accounts.length ?? keyPool.length;
+            const accent = providerAccent(prov.adapter);
             let baseHost = "";
             try { baseHost = new URL(prov.baseUrl).host; } catch { baseHost = ""; }
             return (
-              <div key={name} className={`card prov-card${isDisabled ? " prov-card-disabled" : ""}`}>
+              <div
+                key={name}
+                className={`card prov-card${isDisabled ? " prov-card-disabled" : ""}`}
+                style={{
+                  borderLeft: `6px solid ${accent.border}`,
+                  backgroundImage: `linear-gradient(${accent.tint}, transparent 220px)`,
+                  borderTop: "1px solid var(--border)",
+                  borderRight: "1px solid var(--border)",
+                  borderBottom: "1px solid var(--border)",
+                  marginTop: 8,
+                  overflow: "hidden",
+                }}
+              >
                 <div className="prov-card-main">
+                  {authModeMark(prov.authMode) ? (
+                    <span
+                      className={`prov-authmode-mark prov-authmode-${prov.authMode}`}
+                      data-authmode={prov.authMode}
+                      aria-label={`auth mode ${prov.authMode}`}
+                      title={prov.authMode === "oauth" ? "OAuth 登录" : "Pass-through 直通"}
+                    >
+                      <span aria-hidden="true">{prov.authMode === "oauth" ? "\u{1F511}" : "\u21AA\uFE0F"}</span>
+                    </span>
+                  ) : null}
                   <div className="prov-card-info">
                     {icon && <span className="provider-icon"><img src={icon} alt="" aria-hidden="true" /></span>}
                     <div className="prov-card-copy">
@@ -789,6 +946,23 @@ export default function Providers({ apiBase }: { apiBase: string }) {
                     </div>
                   </div>
                   <div className="provider-actions">
+                    {isKeyAuth && addingKeyFor !== name ? (
+                      <button
+                        className="btn btn-primary btn-sm"
+                        onClick={() => { setAddingKeyFor(name); setNewKeyValue(""); }}
+                        title={t("prov.keyAddTitle")}
+                      >
+                        <IconPlus style={{ width: 12, height: 12 }} />{t("prov.keyAdd")}
+                      </button>
+                    ) : null}
+                    {isKeyAuth && addingKeyFor === name ? (
+                      <button
+                        className="btn btn-ghost btn-sm"
+                        onClick={() => { setAddingKeyFor(null); setNewKeyValue(""); }}
+                      >
+                        {t("common.cancel")}
+                      </button>
+                    ) : null}
                     <button
                       className={`btn ${isDisabled ? "btn-primary" : "btn-ghost"} btn-sm`}
                       onClick={() => setProviderDisabled(name, !isDisabled)}
@@ -820,45 +994,8 @@ export default function Providers({ apiBase }: { apiBase: string }) {
                 )}
                 {showAccounts && (
                   <>
-                    <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-                      <button
-                        className={`prov-accounts-toggle${accountsOpen ? " open" : ""}`}
-                        onClick={() => setOpenAccounts(prev => ({ ...prev, [name]: !accountsOpen }))}
-                        aria-expanded={accountsOpen !== false}
-                        aria-label={t("prov.accountsAria", { name })}
-                      >
-                        {t("prov.accounts", { n: String(dropdownCount) })}
-                        <span className="chev"><IconChevron /></span>
-                      </button>
-                      {isKeyAuth ? (
-                        addingKeyFor === name ? (
-                          <button className="btn btn-ghost btn-sm" onClick={() => { setAddingKeyFor(null); setNewKeyValue(""); }}>
-                            {t("common.cancel")}
-                          </button>
-                        ) : (
-                          <button
-                            className="btn btn-primary btn-sm"
-                            onClick={() => { setAddingKeyFor(name); setNewKeyValue(""); }}
-                            title={t("prov.keyAddTitle")}
-                          >
-                            <IconPlus style={{ width: 12, height: 12 }} />{t("prov.keyAdd")}
-                          </button>
-                        )
-                      ) : null}
-                      {isKeyAuth && keyPool.length > 1 ? (
-                        <button
-                          className="btn btn-ghost btn-sm"
-                          onClick={() => toggleShowAll(name, keyPool)}
-                          title={showAll[name] ? t("prov.keyHideAllTitle") : t("prov.keyRevealAllTitle")}
-                          aria-pressed={showAll[name] === true}
-                        >
-                          {showAll[name] ? t("prov.keyHideAll") : t("prov.keyRevealAll")}
-                        </button>
-                      ) : null}
-                    </div>
-                                        {accountsOpen !== false && isKeyAuth ? (() => {
+                                      {accountsOpen !== false && isKeyAuth ? (() => {
                       const provConf = config.providers[name];
-                      const provTestModel = provConf?.testModel;
                       const provModels: string[] = Array.isArray(provConf?.models) ? provConf.models : [];
                       return (
                         <div className="prov-test-model" style={{
@@ -868,19 +1005,7 @@ export default function Providers({ apiBase }: { apiBase: string }) {
                           background: "var(--raised)",
                         }}>
                           <label className="muted" style={{ fontSize: 11 }}>{t("prov.testModel")}</label>
-                          <select
-                            className="input-sm"
-                            value={provTestModel ?? ""}
-                            onChange={e => selectTestModel(name, e.target.value)}
-                            aria-label={t("prov.testModel")}
-                            style={{ flex: "1 1 160px", minWidth: 120 }}
-                            disabled={!!pullingModels[name]}
-                          >
-                            <option value="">{t("prov.testModelDefault")}</option>
-                            {provModels.map(m => (
-                              <option key={m} value={m}>{m}</option>
-                            ))}
-                          </select>
+                          <TestModelBadge adapter={prov.adapter} modelListAuth={prov.modelListAuth} />
                           <button
                             className="btn btn-ghost btn-sm"
                             onClick={() => pullProviderModels(name, false)}
@@ -895,74 +1020,28 @@ export default function Providers({ apiBase }: { apiBase: string }) {
                               t("prov.pullModels")
                             )}
                           </button>
+                          <select
+                            className="input-sm"
+                            value={testModelLocal[name] ?? ""}
+                            onChange={e => setTestModelLocalValue(name, e.target.value)}
+                            aria-label={t("prov.testModel")}
+                            title={t("prov.testModelHint")}
+                            style={{ flex: "1 1 160px", minWidth: 120 }}
+                            disabled={!!pullingModels[name]}
+                          >
+                            <option value="">{t("prov.testModelDefault")}</option>
+                            {provModels.map(m => (
+                              <option key={m} value={m}>{m}</option>
+                            ))}
+                          </select>
                           <button
                             className="btn btn-ghost btn-sm"
-                            onClick={() => probeAdapters(name)}
-                            disabled={!!probingAdapters[name]}
-                            aria-label={t("prov.probeAdaptersAria", { name })}
-                            title={t("prov.probeAdapters")}
-                            style={{ fontSize: 11 }}
+                            onClick={() => setAuthMatrixOpen(authMatrixOpen === name ? null : name)}
+                            style={{ fontSize: 11, marginLeft: "auto" }}
+                            aria-label={`Show auth matrix for ${name}`}
                           >
-                            {probingAdapters[name] ? (
-                              <><span className="spin" />{t("prov.probeAdaptersLoading")}</>
-                            ) : (
-                              t("prov.probeAdapters")
-                            )}
+                            {authMatrixOpen === name ? "收起认证矩阵" : "认证矩阵"}
                           </button>
-                          {adapterProbeResult[name] ? (() => {
-                            const r = adapterProbeResult[name]!;
-                            return (
-                              <div
-                                className="prov-adapter-probe"
-                                data-testid="adapter-probe-result"
-                                style={{
-                                  display: "flex",
-                                  flexDirection: "column",
-                                  gap: 4,
-                                  marginTop: 6,
-                                  padding: "6px 8px",
-                                  border: "1px solid var(--border)",
-                                  borderRadius: 4,
-                                  fontSize: 11,
-                                }}
-                              >
-                                <span style={{ color: "var(--muted)" }}>
-                                  {t("prov.probeAdaptersRecommended")}: <strong>{r.recommended}</strong>
-                                </span>
-                                {r.results.map((row) => (
-                                  <label
-                                    key={row.adapter}
-                                    className="prov-adapter-probe-row"
-                                    style={{
-                                      display: "flex",
-                                      alignItems: "center",
-                                      gap: 8,
-                                      padding: "2px 0",
-                                      cursor: row.ok && row.modelCount > 0 ? "pointer" : "default",
-                                    }}
-                                  >
-                                    <input
-                                      type="radio"
-                                      name={`adapter-choice-${name}`}
-                                      disabled={!(row.ok && row.modelCount > 0)}
-                                      onChange={() => {
-                                        notify(`Adapter ${row.adapter} selected — edit provider JSON to apply.`, true);
-                                      }}
-                                      data-testid={`adapter-choice-${row.adapter}`}
-                                    />
-                                    <code style={{ minWidth: 130 }}>{row.adapter}</code>
-                                    {row.ok && row.modelCount > 0 ? (
-                                      <span style={{ color: "#4ade80" }}>✓ {row.modelCount} models</span>
-                                    ) : row.ok ? (
-                                      <span style={{ color: "#facc15" }}>⚠ empty (200, data[])</span>
-                                    ) : (
-                                      <span style={{ color: "var(--red)" }}>✗ {row.warning ?? "failed"}</span>
-                                    )}
-                                  </label>
-                                ))}
-                              </div>
-                            );
-                          })() : null}
                           {provModels.length > 0 ? (
                             <span className="muted" style={{ fontSize: 10.5 }}>
                               {t("prov.modelsJustPulled", { count: provModels.length })}
@@ -976,8 +1055,72 @@ export default function Providers({ apiBase }: { apiBase: string }) {
                         </div>
                       );
                     })() : null}
+                    {(() => {
+                      const isAuthOpen = authMatrixOpen === name;
+                      if (!isAuthOpen) return null;
+                      return (
+                        <div style={{ padding: "0 8px 8px 8px", borderTop: "1px solid var(--border-soft)", borderBottom: isAuthOpen ? "1px solid var(--border-soft)" : "none", background: "var(--raised)" }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, marginTop: 6 }}>
+                            <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text)" }}>
+                              拉模型认证矩阵
+                            </span>
+                            <button
+                              className="btn btn-ghost btn-sm"
+                              onClick={() => setAuthMatrixOpen(null)}
+                              style={{ fontSize: 10, padding: "2px 8px", marginLeft: "auto" }}
+                              aria-label={`Collapse auth matrix for ${name}`}
+                            >
+                              收起
+                            </button>
+                          </div>
+                          <AuthMatrixPanel
+                            apiBase={apiBase}
+                            providerName={name}
+                            onStrategyChanged={fetchConfig}
+                          />
+                        </div>
+                      );
+                    })()}
                     {accountsOpen !== false && (
                       <div className="prov-accounts-list">
+                        {/* Skeleton state: emit a couple of placeholder rows while the
+                            keys/accounts request is in flight, so the card doesn't appear
+                            to "appear" after a beat. Replaced in place once data arrives. */}
+                        {isKeyAuth && prov.hasApiKey && !keyPoolLoaded ? (
+                          <>
+                            <AccountRowSkeleton />
+                            <AccountRowSkeleton />
+                          </>
+                        ) : null}
+                        {!isKeyAuth && prov.authMode === "oauth" && !oauthLoaded ? (
+                          <>
+                            <AccountRowSkeleton tone="muted" />
+                            <AccountRowSkeleton tone="muted" />
+                          </>
+                        ) : null}
+                        {isKeyAuth ? (
+                          <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 8 }}>
+                            <button
+                              className={`prov-accounts-toggle${accountsOpen ? " open" : ""}`}
+                              onClick={() => setOpenAccounts(prev => ({ ...prev, [name]: !accountsOpen }))}
+                              aria-expanded={accountsOpen}
+                              aria-label={t("prov.accountsAria", { name })}
+                            >
+                              {t("prov.accounts", { n: String(dropdownCount) })}
+                              <span className="chev"><IconChevron /></span>
+                            </button>
+                            {isKeyAuth && keyPool.length > 1 ? (
+                              <button
+                                className="btn btn-ghost btn-sm"
+                                onClick={() => toggleShowAll(name, keyPool)}
+                                title={showAll[name] ? t("prov.keyHideAllTitle") : t("prov.keyRevealAllTitle")}
+                                aria-pressed={showAll[name] === true}
+                              >
+                                {showAll[name] ? t("prov.keyHideAll") : t("prov.keyRevealAll")}
+                              </button>
+                            ) : null}
+                          </div>
+                        ) : null}
                         {(accountSet?.accounts ?? []).map(account => (
                           <button
                             key={account.id}
@@ -1008,6 +1151,8 @@ export default function Providers({ apiBase }: { apiBase: string }) {
                           const quotaProp = qk
                             ? { ...qk, label: qk.label ?? entry.label }
                             : { id: entry.id, label: entry.label, masked: entry.masked, active: entry.active, updatedAt: 0 };
+                          const keyLabel = entry.label ?? entry.masked;
+                          const chatResult = keyChatTests[name]?.[entry.id];
                           return (
                             <KeyPoolPanel
                               key={entry.id}
@@ -1020,8 +1165,16 @@ export default function Providers({ apiBase }: { apiBase: string }) {
                               {...(revealedKeys[name]?.[entry.id] !== undefined ? { revealedKey: revealedKeys[name]![entry.id]! } : {})}
                               onReveal={() => revealOne(name, entry.id)}
                               onHide={() => hideOne(name, entry.id)}
-                              onTest={() => testOne(name, entry.id)}
+                              onQuotaProbe={() => {
+                                setTestDialog({ provider: name, keyId: entry.id, keyLabel, tab: "quota" });
+                                testOne(name, entry.id);
+                              }}
+                              onChatTest={() => {
+                                setTestDialog({ provider: name, keyId: entry.id, keyLabel, tab: "chat" });
+                                chatTestOne(name, entry.id);
+                              }}
                               {...(keyTests[name]?.[entry.id] ? { testStatus: keyTests[name]![entry.id]!.status, ...(keyTests[name]![entry.id]!.latencyMs !== undefined ? { testLatencyMs: keyTests[name]![entry.id]!.latencyMs } : {}), ...(keyTests[name]![entry.id]!.error ? { testError: keyTests[name]![entry.id]!.error } : {}) } : {})}
+                              {...(chatResult ? { chatStatus: chatResult.status } : {})}
                               t={t}
                             />
                           );
@@ -1216,6 +1369,34 @@ export default function Providers({ apiBase }: { apiBase: string }) {
         onClose={closeEditModal}
         onSave={saveEditProvider}
       />
+      {testDialog ? (() => {
+        const prov = config.providers[testDialog.provider];
+        const authLabel = prov?.modelListAuth ?? "auto";
+        const quota = keyTests[testDialog.provider]?.[testDialog.keyId] ?? null;
+        const chat = keyChatTests[testDialog.provider]?.[testDialog.keyId] ?? null;
+        // Chat-test runtime model: the dropdown pick when set, otherwise the provider default.
+        const runtimeChat: ChatTestResult | null = chat
+          ? { ...chat, model: chat.model ?? (testModelLocal[testDialog.provider] || prov?.defaultModel || undefined) }
+          : null;
+        const runtimeQuota: QuotaProbeResult | null = quota
+          ? { ...quota, status: quota.status === "loading" ? "loading" : quota.status }
+          : null;
+        return (
+          <KeyTestResultDialog
+            open
+            onClose={() => setTestDialog(null)}
+            initialTab={testDialog.tab}
+            keyLabel={testDialog.keyLabel}
+            adapter={prov?.adapter ?? "?"}
+            strategy={authLabel}
+            quota={runtimeQuota}
+            chat={runtimeChat}
+            tQuota={t("prov.resultDialogQuota")}
+            tChat={t("prov.resultDialogChat")}
+            tClose={t("common.close")}
+          />
+        );
+      })() : null}
     </>
   );
 }

@@ -383,6 +383,21 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
     })));
   }
 
+  // Provider custom headers carry whatever the operator put in them (often an
+  // Authorization or X-Api-Key value). They are therefore NOT part of the
+  // general config DTO — that endpoint is fetched by the dashboard shell and
+  // rendered into a raw-JSON textarea, so shipping values there would put
+  // them in a plaintext view (and in any screenshot of it). This endpoint
+  // returns the values for ONE named provider so the edit modal can prefill
+  // them; it sits behind the same management auth as the rest of /api/*.
+  if (url.pathname === "/api/providers/headers" && req.method === "GET") {
+    const name = (url.searchParams.get("name") ?? "").trim();
+    if (!name || !isValidProviderName(name) || !hasOwnProvider(config.providers, name)) {
+      return jsonResponse({ error: "unknown provider" }, 404);
+    }
+    return jsonResponse({ name, headers: config.providers[name].headers ?? {} });
+  }
+
   // Add (or overwrite) a single provider. Merges into the live in-memory config and
   // persists — existing providers' real keys are never round-tripped (unlike PUT /api/config,
   // which would re-save the masked keys from GET). Live routing picks it up immediately.
@@ -1182,6 +1197,20 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
     return jsonResponse(result);
   }
 
+  // Real chat completion test - sends a minimal /v1/messages or /v1/chat/completions
+  // request using the matrix-selected adapter + auth. Body: { name, id?, model? }.
+  if (url.pathname === "/api/providers/keys/chat-test" && req.method === "POST") {
+    let rb: { name?: string; id?: string; model?: string; prompt?: string };
+    try { rb = await req.json() as { name?: string; id?: string; model?: string; prompt?: string }; }
+    catch { return jsonResponse({ error: "invalid JSON body" }, 400); }
+    const name = (rb.name ?? "").trim();
+    if (!name || !isValidProviderName(name) || !hasOwnProvider(config.providers, name)) return jsonResponse({ error: "unknown provider" }, 404);
+    const provider = config.providers[name]!;
+    const { chatTestProvider } = await import("../providers/api-keys");
+    const result = await chatTestProvider(provider, { id: rb.id, model: rb.model, prompt: rb.prompt });
+    return jsonResponse(result, "ok" in result && result.ok ? 200 : 400);
+  }
+
   // Concurrent probe of all three adapters. Returns ordered results for the
   // user to pick from; never persists anything (read-only diagnostic).
   if (url.pathname === "/api/providers/probe-adapters" && req.method === "POST") {
@@ -1255,6 +1284,75 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
     }
     saveConfig(config);
     return jsonResponse({ testModel: provider.testModel ?? null });
+  }
+
+  // Probe all auth strategies for one provider (matrix UI). Body `{ name }`. Returns
+  // per-strategy probe results so the dashboard can show the user which auth header
+  // combination actually works at /v1/models. Read-only - does NOT modify config.
+  if (url.pathname === "/api/providers/auth-matrix" && req.method === "POST") {
+    let rb: { name?: string };
+    try { rb = await req.json() as { name?: string }; }
+    catch { return jsonResponse({ error: "invalid JSON body" }, 400); }
+    const name = (rb.name ?? "").trim();
+    if (!name || !isValidProviderName(name) || !hasOwnProvider(config.providers, name)) return jsonResponse({ error: "unknown provider" }, 404);
+    const provider = config.providers[name];
+    const pool: Array<{ key: string }> = [];
+    if (provider.apiKeyPool && provider.apiKeyPool.length > 0) {
+      for (const entry of provider.apiKeyPool) pool.push({ key: entry.key });
+    } else if (provider.apiKey) {
+      pool.push({ key: provider.apiKey });
+    }
+    if (pool.length === 0) return jsonResponse({ error: "no keys configured" }, 400);
+    const { probeAuthMatrix, AUTH_STRATEGIES, defaultStrategiesFor, SUPPORTED_ADAPTERS } = await import("../providers/auth-matrix");
+    const key = pool[0].key;
+    const matrix = await probeAuthMatrix(provider, name, key);
+    return jsonResponse({
+      name,
+      current: provider.modelListAuth ?? null,
+      currentAdapter: matrix.currentAdapter,
+      recommended: matrix.recommended,
+      probeTimeoutMs: matrix.probeTimeoutMs,
+      adapters: SUPPORTED_ADAPTERS,
+      strategies: AUTH_STRATEGIES,
+      rows: matrix.rows.map((r) => ({
+        adapter: r.adapter,
+        cells: Object.fromEntries(
+          AUTH_STRATEGIES.map((s) => [s, r.cells[s]]),
+        ),
+      })),
+    });
+  }
+
+  // Persist the user's choice of auth strategy for one provider. Body
+  // `{ name, strategy }`. Pass `strategy: null` to clear the explicit override and
+  // fall back to auto-detection.
+  if (url.pathname === "/api/providers/auth" && req.method === "POST") {
+    let rb: { name?: string; strategy?: string | null; adapter?: string | null };
+    try { rb = await req.json() as { name?: string; strategy?: string | null; adapter?: string | null }; }
+    catch { return jsonResponse({ error: "invalid JSON body" }, 400); }
+    const name = (rb.name ?? "").trim();
+    if (!name || !isValidProviderName(name) || !hasOwnProvider(config.providers, name)) return jsonResponse({ error: "unknown provider" }, 404);
+    const { AUTH_STRATEGIES } = await import("../providers/auth-matrix");
+    const provider = config.providers[name];
+    const raw = rb.strategy;
+    if (raw === null || raw === "") {
+      delete provider.modelListAuth;
+    } else if (typeof raw !== "string" || !AUTH_STRATEGIES.includes(raw as typeof AUTH_STRATEGIES[number])) {
+      return jsonResponse({ error: `strategy must be one of: ${AUTH_STRATEGIES.join(", ")}, or null to clear` }, 400);
+    } else {
+      provider.modelListAuth = raw as typeof AUTH_STRATEGIES[number];
+    }
+    if (rb.adapter !== undefined) {
+      const { SUPPORTED_ADAPTERS } = await import("../providers/auth-matrix");
+      if (rb.adapter !== null && rb.adapter !== "" && (typeof rb.adapter !== "string" || !(SUPPORTED_ADAPTERS as readonly string[]).includes(rb.adapter))) {
+        return jsonResponse({ error: `adapter must be one of: ${SUPPORTED_ADAPTERS.join(", ")}, or null` }, 400);
+      }
+      if (typeof rb.adapter === "string" && rb.adapter !== "") {
+        provider.adapter = rb.adapter;
+      }
+    }
+    saveConfig(config);
+    return jsonResponse({ adapter: provider.adapter, modelListAuth: provider.modelListAuth ?? null });
   }
 
   // ---------------------------------------------------------------------------

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { saveCodexAccountCredential } from "../src/codex/account-store";
 import { clearAccountNeedsReauth, clearAccountQuota, updateAccountQuota } from "../src/codex/auth-api";
@@ -206,6 +207,68 @@ describe("server local API auth", () => {
     expect(dto.providers.leaky.baseUrl).toBe("https://example.test/v1");
     expect(JSON.stringify(dto)).not.toContain("pass");
     expect(JSON.stringify(dto)).not.toContain("secret");
+  });
+
+  test("safeConfigDTO never exposes provider header VALUES", () => {
+    // Regression: the provider-edit modal needed header values to prefill its
+    // form, so "headers" was added to the DTO whitelist — which put custom
+    // header values (often Authorization / X-Api-Key) into the general config
+    // payload, which the dashboard renders into a raw-JSON textarea.
+    const dto = safeConfigDTO(config("127.0.0.1")) as {
+      providers: Record<string, Record<string, unknown>>;
+    };
+    expect(JSON.stringify(dto)).not.toContain("provider-secret");
+    expect(dto.providers.openai).not.toHaveProperty("headers");
+    // The GUI still needs to know that headers exist.
+    expect(dto.providers.openai.hasHeaders).toBe(true);
+  });
+
+  test("the per-provider headers endpoint returns values for exactly one provider", async () => {
+    // The dedicated endpoint (admin-authed, one provider at a time) is what the
+    // edit modal uses to prefill header values.
+    const cfg = config("127.0.0.1");
+    cfg.providers.second = {
+      adapter: "openai-chat",
+      baseUrl: "https://second.example.test/v1",
+      apiKey: "sk-second-secret",
+      headers: { "X-Second": "second-secret" },
+    };
+    // Use a DEDICATED config home: TEST_DIR is shared with the other tests in
+    // this file, and both the config and the usage log it writes would leak
+    // into their /api/usage assertions. It also keeps saveConfig away from
+    // the real ~/.opencodex/config.json.
+    const headersHome = mkdtempSync(join(tmpdir(), "ocx-server-auth-headers-"));
+    const previousHome = process.env.OPENCODEX_HOME;
+    process.env.OPENCODEX_HOME = headersHome;
+    saveConfig(cfg);
+    const server = startServer(0);
+    try {
+      const res = await fetch(new URL("/api/providers/headers?name=openai", server.url), {
+        headers: { "x-opencodex-api-key": "local-secret" },
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json() as { name: string; headers: Record<string, string> };
+      expect(body.name).toBe("openai");
+      expect(body.headers).toEqual({ "X-Custom": "provider-secret" });
+
+      // Another provider's values are not reachable through this request.
+      const other = await fetch(new URL("/api/providers/headers?name=second", server.url), {
+        headers: { "x-opencodex-api-key": "local-secret" },
+      });
+      expect((await other.json() as { headers: Record<string, string> }).headers)
+        .toEqual({ "X-Second": "second-secret" });
+
+      // Unknown providers are rejected rather than echoing the whole config.
+      const missing = await fetch(new URL("/api/providers/headers?name=nope", server.url), {
+        headers: { "x-opencodex-api-key": "local-secret" },
+      });
+      expect(missing.status).toBe(404);
+    } finally {
+      await server.stop(true);
+      if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
+      else process.env.OPENCODEX_HOME = previousHome;
+      rmSync(headersHome, { recursive: true, force: true });
+    }
   });
 
   test("safeConfigDTO does not echo malformed provider URLs back to the GUI", () => {

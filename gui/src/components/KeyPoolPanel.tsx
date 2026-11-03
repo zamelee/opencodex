@@ -26,14 +26,20 @@ interface Props {
   onReveal?: () => Promise<void> | void;
   onHide?: () => void;
   /**
-   * Per-key upstream probe. When set, a Test button + result pill appear
-   * in the right action column.
+   * Per-key upstream quota probe (ping only). Opens the shared result dialog.
    */
-  onTest?: () => Promise<void> | void;
+  onQuotaProbe?: () => Promise<void> | void;
+  /**
+   * Per-key real chat test (sends a minimal completion). Opens the same dialog,
+   * focused on the chat tab.
+   */
+  onChatTest?: () => Promise<void> | void;
   testStatus?: TestStatus;
   testLatencyMs?: number;
   /** Backend error message when testStatus === "fail". Surfaces the real reason. */
   testError?: string;
+  /** Status of the sibling chat test, shown as a small dot next to the 测试 button. */
+  chatStatus?: TestStatus;
 }
 
 /** Format "1234 / 2500 (12.3%)" — falls back gracefully when raw counts are absent. */
@@ -46,52 +52,17 @@ function fmtCount(pct: number | undefined, used: number | undefined, limit: numb
   return pctText;
 }
 
-/** Compact result pill for the per-key upstream probe. */
-function TestPill({
-  status,
-  latencyMs,
-  errorText,
-  t,
-}: {
-  status: TestStatus;
-  latencyMs?: number;
-  errorText?: string;
-  t: TFn;
-}) {
-  if (status === "loading") {
-    return (
-      <span className="prov-key-test-pill prov-key-test-loading" data-testid="key-test-loading">
-        {t("prov.keyTestLoading")}
-      </span>
-    );
-  }
-  if (status === "ok") {
-    return (
-      <span className="prov-key-test-pill prov-key-test-ok">
-        {t("prov.keyTestOk", { ms: latencyMs ?? 0 })}
-      </span>
-    );
-  }
-  if (status === "fail") {
-    // Prefer the actual backend error. Fall back to the generic "rejected" string
-    // when the backend didn't surface one.
-    const label = errorText ? errorText : t("prov.keyTestFail");
-    return (
-      <span
-        className="prov-key-test-pill prov-key-test-fail"
-        data-testid="key-test-fail"
-        title={errorText ?? undefined}
-      >
-        {label}
-      </span>
-    );
-  }
-  // "unknown" - backend reachable but unsure.
-  return (
-    <span className="prov-key-test-pill prov-key-test-unknown">
-      {t("prov.keyTestUnknown", { ms: latencyMs ?? 0 })}
-    </span>
-  );
+/**
+ * Compact result indicator for a key action. The detail (latency, replay text, raw
+ * upstream error) lives in the result dialog; the row only needs a glanceable colour.
+ */
+function StatusDot({ status, latencyMs, title }: { status?: TestStatus; latencyMs?: number; title?: string }) {
+  if (!status || status === "loading") return null;
+  const cls = status === "ok" ? "dot-green" : status === "fail" ? "dot-red" : "dot-amber";
+  const label = status === "ok" ? "通过" : status === "fail" ? "失败" : "未知";
+  const tooltip = [label, latencyMs !== undefined ? `${latencyMs} ms` : null, title]
+    .filter(Boolean).join(" · ");
+  return <span className={`dot ${cls}`} title={tooltip} aria-hidden="true" />;
 }
 
 /**
@@ -116,18 +87,19 @@ export default function KeyPoolPanel({
   revealedKey,
   onReveal,
   onHide,
-  onTest,
+  onQuotaProbe,
+  onChatTest,
   testStatus,
   testLatencyMs,
   testError,
+  chatStatus,
 }: Props) {
   const id = `(${String(index + 1).padStart(2, "0")})`;
   const isRevealed = revealedKey !== undefined;
   const showReveal = !!onReveal && !only;
-  const showTest = !!onTest && !only;
+  const showQuotaProbe = !!onQuotaProbe && !only;
+  const showChatTest = !!onChatTest && !only;
   const showActions = !only && (onSwitch || onRemove);
-  // When a result is in, hide the Test button - the pill says everything.
-  const showTestButton = showTest && !testStatus;
 
   return (
     <div
@@ -240,13 +212,37 @@ export default function KeyPoolPanel({
             gridColumn: 4,
           }}
         >
-          {testStatus ? (
-            <TestPill
-              status={testStatus}
-              latencyMs={testLatencyMs}
-              errorText={testError}
-              t={t}
-            />
+          {showQuotaProbe ? (
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                onClick={onQuotaProbe}
+                title={t("prov.keyQuotaProbeTitle")}
+                aria-label={t("prov.keyQuotaProbeAria", { key: quota.label ?? quota.masked })}
+                data-testid="key-quota-probe"
+                style={{ fontSize: 11 }}
+              >
+                {testStatus === "loading" ? <><span className="spin" />{t("prov.keyQuotaProbeLoading")}</> : t("prov.keyQuotaProbe")}
+              </button>
+              <StatusDot status={testStatus} latencyMs={testLatencyMs} title={testError} />
+            </span>
+          ) : null}
+          {showChatTest ? (
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                onClick={onChatTest}
+                title={t("prov.keyChatTestTitle")}
+                aria-label={t("prov.keyChatTestAria", { key: quota.label ?? quota.masked })}
+                data-testid="key-chat-test"
+                style={{ fontSize: 11 }}
+              >
+                {chatStatus === "loading" ? <><span className="spin" />{t("prov.keyChatTestLoading")}</> : t("prov.keyChatTest")}
+              </button>
+              <StatusDot status={chatStatus} />
+            </span>
           ) : null}
           {onSwitch ? (
             <button
@@ -258,19 +254,6 @@ export default function KeyPoolPanel({
               style={{ fontSize: 11 }}
             >
               {active ? t("prov.accountActive") : t("prov.accountLogin")}
-            </button>
-          ) : null}
-          {showTestButton ? (
-            <button
-              type="button"
-              className="btn btn-ghost btn-sm"
-              onClick={onTest}
-              title={t("prov.keyTestTitle") + " - " + t("prov.keyPoolTestHint")}
-              aria-label={t("prov.keyTestAria", { key: quota.label ?? quota.masked })}
-              data-testid="key-test"
-              style={{ fontSize: 11 }}
-            >
-              {t("prov.keyTest")}
             </button>
           ) : null}
           {onRemove ? (

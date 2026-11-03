@@ -9,6 +9,12 @@ export interface EditableProvider {
   defaultModel?: string;
   liveModels?: boolean;
   headers?: Record<string, string>;
+  /**
+   * False when the header values could not be loaded (e.g. the fetch failed).
+   * The modal then omits `headers` from the patch entirely so a failed read
+   * cannot silently erase the stored headers.
+   */
+  headersLoaded?: boolean;
   label?: string;
   models?: string[];
 }
@@ -157,6 +163,10 @@ export default function EditProviderModal({ open, provider, apiBase, existingPro
         return;
       }
     }
+    // When the header values were never loaded, omit `headers` from the patch
+    // so the stored headers are left alone instead of being wiped by an
+    // empty replacement.
+    const headerPatch = provider.headersLoaded === false ? undefined : headersObj;
     await onSave({
       label: trimmedLabel || undefined,
       renameTo: wantsRename ? trimmedRename : undefined,
@@ -164,7 +174,7 @@ export default function EditProviderModal({ open, provider, apiBase, existingPro
       baseUrl: trimmedBaseUrl,
       defaultModel: trimmedDefaultModel || undefined,
       liveModels,
-      headers: headersObj,
+      ...(headerPatch !== undefined ? { headers: headerPatch } : {}),
     });
     } catch (err) {
       setError(String((err as Error)?.message ?? err));

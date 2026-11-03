@@ -242,7 +242,6 @@ export function safeConfigDTO(config: OcxConfig): unknown {
       "authMode",
       "liveModels",
       "models",
-      "headers",
       "contextWindow",
       "modelContextWindows",
       "reasoningEfforts",

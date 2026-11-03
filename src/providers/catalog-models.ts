@@ -6,18 +6,16 @@
  */
 import type { OcxProviderConfig } from "../types";
 
-/** Strip trailing `/v1` or `/` from a base URL so we can append endpoints safely. */
-export function stripBase(url: string): string {
-  // Collapse repeated slashes only AFTER the protocol separator (which
-  // is the only legal place for `//`); strip trailing slashes, then
-  // strip one optional trailing `/v1` segment.
-  const parts = (url ?? "").split("://", 2);
-  const head = parts.length === 2 ? parts[0] + "://" : "";
-  const tail = (parts[1] ?? "").replace(/\/{2,}/g, "/");
-  return (head + tail).replace(/\/+$/, "").replace(/\/v1$/, "");
-}
+import {
+  AUTH_STRATEGIES,
+  buildAuthHeaders,
+  defaultStrategiesFor,
+  stripBase,
+  type AuthStrategy,
+} from "./auth-matrix";
 
-/** Common shape: we extract `id` and `data[]` (OpenAI shape) and `data[]`/`models[]` (anthropic). */
+export { stripBase } from "./auth-matrix";
+
 function parseModelIds(json: unknown): string[] {
   if (!json || typeof json !== "object") return [];
   const obj = json as Record<string, unknown>;
@@ -29,17 +27,20 @@ function parseModelIds(json: unknown): string[] {
   }
   return [];
 }
+// stripBase + parseModelIds are now in ./auth-matrix (re-exported above)
 
 async function fetchAnthropicModels(provider: OcxProviderConfig, key: string): Promise<{ ok: true; models: string[] } | { ok: false; error: string }> {
   const base = stripBase(provider.baseUrl);
   try {
     const res = await fetch(`${base}/v1/models`, {
       method: "GET",
-      // m.aiio.chat (and other minimax reverse proxies) reject any request
-      // carrying extra headers beyond `x-api-key` with 401. Match the
-      // dashboard JS bundle's fetch exactly: one header, the key.
-      headers: { "x-api-key": key },
-      signal: AbortSignal.timeout(8000),
+      // Strategy dispatch: explicit modelListAuth wins, else auto-detect from
+      // baseUrl. Try Bearer first for non-reverse-proxy providers (covers
+      // baollm.rqez.cn and most modern OpenAI-compatible endpoints), then
+      // x-api-key+anthropic-version, then x-api-key-only (the legacy
+      // m.aiio.chat / minimax.chat path that rejects every extra header).
+      headers: buildAuthHeaders((provider.modelListAuth ?? defaultStrategiesFor(provider)[0]), key),
+      signal: AbortSignal.timeout(25000),
     });
     if (!res.ok) {
       const body = await res.text().catch(() => "");
@@ -55,13 +56,13 @@ async function fetchAnthropicModels(provider: OcxProviderConfig, key: string): P
 async function fetchOpenAiModels(provider: OcxProviderConfig, key: string): Promise<{ ok: true; models: string[] } | { ok: false; error: string }> {
   const base = stripBase(provider.baseUrl);
   try {
-    const res = await fetch(`${base}/models`, {
+    const res = await fetch(`${base}/v1/models`, {
       method: "GET",
       headers: {
         Authorization: `Bearer ${key}`,
         Accept: "application/json",
       },
-      signal: AbortSignal.timeout(8000),
+      signal: AbortSignal.timeout(25000),
     });
     if (!res.ok) {
       const body = await res.text().catch(() => "");
@@ -79,7 +80,7 @@ async function fetchGoogleModels(provider: OcxProviderConfig, key: string): Prom
     const res = await fetch(`${provider.baseUrl}/v1beta/models?pageSize=100`, {
       method: "GET",
       headers: { "x-goog-api-key": key },
-      signal: AbortSignal.timeout(8000),
+      signal: AbortSignal.timeout(25000),
     });
     if (!res.ok) {
       const body = await res.text().catch(() => "");

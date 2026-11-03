@@ -342,4 +342,121 @@ describe("provider API key pool", () => {
       globalThis.fetch = realFetch;
     }
   });
+
+  // The 余量探测 button must speak the same dialect the auth matrix locked in: a user
+  // who fixes "anthropic + x-api-key" for a provider expects the probe to use that
+  // header, not a hardcoded Authorization: Bearer.
+  test("keys/test honours the matrix-locked modelListAuth instead of hardcoding Bearer", async () => {
+    const realFetch = globalThis.fetch;
+    const seen: Array<{ url: string; headers: Record<string, string> }> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.endsWith("/v1/models")) {
+        seen.push({ url, headers: (init?.headers ?? {}) as Record<string, string> });
+        return new Response(JSON.stringify({ data: [{ id: "m" }] }), {
+          status: 200, headers: { "content-type": "application/json" },
+        });
+      }
+      return realFetch(input as Request | string | URL, init);
+    }) as typeof fetch;
+
+    const server = startServer(0);
+    try {
+      const add = await fetch(new URL("/api/providers/keys", server.url), {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "opencode-go", key: "locked-key-ccccccccccc" }),
+      });
+      const { id } = await add.json() as { id: string };
+
+      // Lock the matrix choice the way the AuthMatrixPanel cell click does.
+      const lock = await fetch(new URL("/api/providers/auth", server.url), {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "opencode-go", strategy: "x-api-key" }),
+      });
+      expect(lock.status).toBe(200);
+
+      const test = await fetch(new URL("/api/providers/keys/test", server.url), {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "opencode-go", id }),
+      });
+      expect((await test.json() as { ok: boolean }).ok).toBe(true);
+
+      expect(seen.length).toBeGreaterThan(0);
+      const hit = seen[seen.length - 1]!;
+      expect(hit.headers["x-api-key"]).toBe("locked-key-ccccccccccc");
+      expect(hit.headers["Authorization"]).toBeUndefined();
+    } finally {
+      await server.stop(true);
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  // An unlocked, non-reverse-proxy provider falls back to the matrix default order,
+  // which starts at Bearer.
+  test("keys/test defaults to the Bearer strategy when no matrix choice is locked", async () => {
+    const realFetch = globalThis.fetch;
+    const seen: Array<Record<string, string>> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.endsWith("/v1/models")) {
+        seen.push((init?.headers ?? {}) as Record<string, string>);
+        return new Response(JSON.stringify({ data: [{ id: "m" }] }), {
+          status: 200, headers: { "content-type": "application/json" },
+        });
+      }
+      return realFetch(input as Request | string | URL, init);
+    }) as typeof fetch;
+
+    const server = startServer(0);
+    try {
+      const add = await fetch(new URL("/api/providers/keys", server.url), {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "opencode-go", key: "auto-key-ddddddddddddd" }),
+      });
+      const { id } = await add.json() as { id: string };
+
+      const test = await fetch(new URL("/api/providers/keys/test", server.url), {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "opencode-go", id }),
+      });
+      expect((await test.json() as { ok: boolean }).ok).toBe(true);
+
+      expect(seen.length).toBeGreaterThan(0);
+      expect(seen[seen.length - 1]!["Authorization"]).toBe("Bearer auto-key-ddddddddddddd");
+    } finally {
+      await server.stop(true);
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  // A provider that answers the cheap probe with 404 (e.g. a proxy without /v1/models)
+  // must report "couldn't tell" rather than a misleading pass or auth failure.
+  test("keys/test reports unknown (not fail) on a non-auth error status", async () => {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.endsWith("/v1/models")) return new Response("not found", { status: 404 });
+      return realFetch(input as Request | string | URL, init);
+    }) as typeof fetch;
+
+    const server = startServer(0);
+    try {
+      const add = await fetch(new URL("/api/providers/keys", server.url), {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "opencode-go", key: "no-route-key-eeeeeeee" }),
+      });
+      const { id } = await add.json() as { id: string };
+
+      const test = await fetch(new URL("/api/providers/keys/test", server.url), {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "opencode-go", id }),
+      });
+      const body = await test.json() as { ok: boolean | "unknown"; detail?: string };
+      expect(body.ok).toBe("unknown");
+      expect(body.detail).toContain("404");
+    } finally {
+      await server.stop(true);
+      globalThis.fetch = realFetch;
+    }
+  });
 });

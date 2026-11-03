@@ -513,8 +513,18 @@ export interface OcxProviderConfig {
    * Fetch the provider's live `/models` endpoint. Defaults to true.
    * Set false when `models` is an intentional allowlist or a provider's live catalog is too large
    * or too flaky for startup/catalog sync.
-   */
+  */
   liveModels?: boolean;
+  /**
+   * Auth header strategy for `/v1/models` discovery (the "拉取模型" button + matrix UI).
+   * - "bearer" (default for non-reverse-proxy): Authorization: Bearer <key>
+   * - "x-api-key" (default for m.aiio.chat / minimax.chat reverse proxies): x-api-key: <key>
+   * - "x-api-key+anthropic-version": x-api-key: <key> + anthropic-version: 2023-06-01
+   *
+   * When unset, opencodex auto-detects from adapter + baseUrl and falls back across variants.
+   * Setting this explicitly forces one strategy (use when auto-detection picks wrong).
+   */
+  modelListAuth?: "bearer" | "x-api-key" | "x-api-key+anthropic-version";
   /**
    * Per-provider catalog allowlist. When non-empty, ONLY these model ids are emitted to Codex's
    * catalog and `/v1/models` — live discovery still runs, this just narrows what ships (so a proxy
