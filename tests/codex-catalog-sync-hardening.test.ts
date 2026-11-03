@@ -75,7 +75,7 @@ describe("Codex catalog sync hardening", () => {
 
     const r = runScript(codexHome, opencodexHome, `
       const { syncCatalogModels } = require("./src/codex/catalog");
-      syncCatalogModels({ providers: {} }).then(res => console.log(JSON.stringify(res)));
+      syncCatalogModels({ providers: {}, enableCodexLauncherMode: true }).then(res => console.log(JSON.stringify(res)));
     `);
     expect(r.status).toBe(0);
 
@@ -107,7 +107,7 @@ describe("Codex catalog sync hardening", () => {
     // config has NO providers => gatherRoutedModels returns [] (transient empty fetch).
     const r = runScript(codexHome, opencodexHome, `
       const { syncCatalogModels } = require("./src/codex/catalog");
-      syncCatalogModels({ providers: {} }).then(res => console.log(JSON.stringify(res)));
+      syncCatalogModels({ providers: {}, enableCodexLauncherMode: true }).then(res => console.log(JSON.stringify(res)));
     `);
     expect(r.status).toBe(0);
     expect(r.stderr).toContain("routed model fetch returned empty; preserving 2 existing routed entries");
@@ -132,7 +132,7 @@ describe("Codex catalog sync hardening", () => {
 
     const r = runScript(codexHome, opencodexHome, `
       const { syncCatalogModels } = require("./src/codex/catalog");
-      syncCatalogModels({ providers: {} }).then(res => console.log(JSON.stringify(res)));
+      syncCatalogModels({ providers: {}, enableCodexLauncherMode: true }).then(res => console.log(JSON.stringify(res)));
     `);
     expect(r.status).toBe(0);
     expect(r.stderr).toContain("routed model fetch returned empty; preserving 2 existing routed entries");
@@ -157,6 +157,7 @@ describe("Codex catalog sync hardening", () => {
     const r = runScript(codexHome, opencodexHome, `
       const { syncCatalogModels } = require("./src/codex/catalog");
       syncCatalogModels({
+        enableCodexLauncherMode: true,
         providers: {
           openai: {
             adapter: "openai-chat",
@@ -189,6 +190,7 @@ describe("Codex catalog sync hardening", () => {
     const r = runScript(codexHome, opencodexHome, `
       const { syncCatalogModels } = require("./src/codex/catalog");
       syncCatalogModels({
+        enableCodexLauncherMode: true,
         providers: {
           cursor: {
             adapter: "cursor",

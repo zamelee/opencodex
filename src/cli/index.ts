@@ -2,6 +2,7 @@
 import { spawn } from "node:child_process";
 import { rmSync } from "node:fs";
 import { restoreNativeCodex, shouldInjectApiAuthHeader } from "../codex/inject";
+import { isLauncherModeEnabled } from "../codex/launcher-mode";
 import { restoreLegacyOpenaiHistory } from "../codex/history-provider";
 import { writeJournal, reconcileJournal } from "../codex/journal";
 import {
@@ -180,7 +181,7 @@ async function handleStart(options: { block?: boolean } = {}) {
   //     enableCodexLauncherMode; this aligns the guardian with the same contract.
   const historyGuardian = !shouldInjectApiAuthHeader(config)
     && config.syncResumeHistory !== false
-    && config.enableCodexLauncherMode !== false
+    && isLauncherModeEnabled(config)
     ? startHistoryMigrationGuardian()
     : undefined;
 

@@ -16,11 +16,20 @@ interface RevealEntry { key: string; timer: number; }
 const REVEAL_TTL_MS = 30_000;
 const COPY_FEEDBACK_MS = 1500;
 
+/** Mirrors src/lib/local-addresses.ts::isLoopbackHost — the GUI is a separate vite
+ *  project and cannot import the server tree. */
+function isLoopbackHost(hostname: string): boolean {
+  const host = hostname.trim().toLowerCase().replace(/^\[|\]$/g, "");
+  return host === "localhost" || host === "::1" || host.startsWith("127.");
+}
+
 export default function ApiKeys({ apiBase }: { apiBase: string }) {
   const { t, locale } = useI18n();
   const localeTag = LOCALES.find(l => l.code === locale)?.htmlLang;
   const [keys, setKeys] = useState<ApiKeyEntry[]>([]);
   const [endpoint, setEndpoint] = useState("");
+  // LAN variants of the endpoint — the addresses a colleague can actually paste.
+  const [altEndpoints, setAltEndpoints] = useState<string[]>([]);
   const [newName, setNewName] = useState("");
   const [creating, setCreating] = useState(false);
   const [newKey, setNewKey] = useState<string | null>(null);
@@ -42,6 +51,7 @@ export default function ApiKeys({ apiBase }: { apiBase: string }) {
         const data = await res.json();
         setKeys(data.keys ?? []);
         setEndpoint(data.endpoint ?? "");
+        setAltEndpoints(Array.isArray(data.altEndpoints) ? data.altEndpoints : []);
       }
     } catch { /* proxy down */ }
   }, [apiBase]);
@@ -55,7 +65,17 @@ export default function ApiKeys({ apiBase }: { apiBase: string }) {
     });
   }, []);
 
-  const responseEndpoint = endpoint || "http://127.0.0.1:10100/v1/responses";
+  // The endpoint must be usable AS SHOWN:
+  //   - reached over the LAN (any non-loopback host) -> follow the address the browser
+  //     actually used, so copying it works on the caller's machine;
+  //   - reached over loopback -> keep the loopback endpoint and list every address the
+  //     machine answers on, so the user can hand the LAN one to somebody else.
+  const browserHost = typeof window === "undefined" ? "" : window.location.hostname;
+  const reachedOverLan = browserHost !== "" && !isLoopbackHost(browserHost);
+  const browserOrigin = typeof window === "undefined" ? "" : `${window.location.protocol}//${window.location.host}`;
+  const responseEndpoint = reachedOverLan
+    ? `${browserOrigin}/v1/responses`
+    : (endpoint || "http://127.0.0.1:10100/v1/responses");
 
   const handleCreate = async () => {
     setCreating(true);
@@ -201,6 +221,14 @@ export default function ApiKeys({ apiBase }: { apiBase: string }) {
         <h3 className="panel-title">{t("api.endpoint")}</h3>
         <code className="api-code api-code-inline">{responseEndpoint}</code>
         <p className="muted small">{t("api.endpointNote")}</p>
+        {altEndpoints.length > 0 ? (
+          <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
+            <span className="muted small">{t("api.lanEndpoints", { n: String(altEndpoints.length) })}</span>
+            {altEndpoints.map(url => (
+              <code key={url} className="api-code api-code-inline" style={{ wordBreak: "break-all" }}>{url}</code>
+            ))}
+          </div>
+        ) : null}
       </div>
 
       {newKey && (

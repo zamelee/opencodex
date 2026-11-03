@@ -544,6 +544,7 @@ export const ko: Record<TKey, string> = {
   "api.subtitle": "생성한 API 키로 외부 앱에서 opencodex 프록시에 접근합니다. {authHeader} 또는 {altHeader} 헤더로 인증합니다.",
   "api.endpoint": "엔드포인트",
   "api.endpointNote": "OpenAI Responses API 형식과 호환됩니다.",
+  "api.lanEndpoints": "LAN에서도 접근 가능 ({n}개 주소):",
   "api.newKeyTitle": "새 키 생성됨",
   "api.newKeyNote": "지금 키를 복사하세요. 다시 표시되지 않습니다.",
   "api.copy": "복사",

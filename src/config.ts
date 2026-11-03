@@ -382,12 +382,11 @@ export function getDefaultConfig(): OcxConfig {
     websockets: false,
     codexAutoStart: true,
     preset: "full-pass-through",
-    // Phase 5: write the three launchermode flags explicitly. The hot-path guard in
-    // src/codex/inject.ts:372 reads cfg.enableCodexLauncherMode === false, and the
-    // effective-value computation in src/server/management-api.ts:123 is !== false.
-    // Without these explicit alses, undefined -> true at runtime and Codex files
-    // (config.toml / state_5.sqlite / opencodex-journal.json) get injected into even
-    // when the preset says otherwise. Mirrors the preset contract verbatim.
+    // Phase 5: write the three launchermode flags explicitly. The hot-path guard is
+    // src/codex/launcher-mode.ts isLauncherModeEnabled(): launcher mode is ON only
+    // when the field is explicitly true, so a MISSING field is safe as well.
+    // These explicit falses keep the default config self-describing and are what
+    // the preset contract materialises.
     enableCodexLauncherMode: false,
     syncRoutedModels: false,
     syncNativeOpenaiModels: false,

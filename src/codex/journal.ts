@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { atomicWriteFile } from "../config";
 import { CODEX_HOME, CODEX_CONFIG_PATH, CODEX_PROFILE_PATH } from "./paths";
 import { loadConfig } from "../config";
+import { isLauncherModeEnabled } from "./launcher-mode";
 
 const JOURNAL_PATH = join(CODEX_HOME, "opencodex-journal.json");
 
@@ -34,7 +35,7 @@ export function writeJournal(): void {
   // journal in the first place. Without this guard a future opt-IN back to launcher mode
   // would see a journal referencing the ORIGINAL config (pre-any-inject), and restoreJournalState
   // would clobber the user-owned config.toml that was edited while launcher_mode was off.
-  if (loadConfig().enableCodexLauncherMode === false) return;
+  if (!isLauncherModeEnabled(loadConfig())) return;
   if (existsSync(JOURNAL_PATH) && readJournal()) return;
   if (!existsSync(CODEX_CONFIG_PATH)) return;
   const config = readFileSync(CODEX_CONFIG_PATH, "utf-8");
@@ -120,7 +121,7 @@ export function reconcileJournal(): boolean {
   // from a journal left over from a previous launcher_mode=true session — that journal
   // references a pre-inject config that the user has since owned/edited freely. Drop the
   // journal so the user-edited config.toml is preserved verbatim on the next launcher boot.
-  if (loadConfig().enableCodexLauncherMode === false) {
+  if (!isLauncherModeEnabled(loadConfig())) {
     removeJournal();
     return false;
   }

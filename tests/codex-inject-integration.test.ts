@@ -9,7 +9,7 @@ const repoRoot = dirname(fileURLToPath(new URL("../package.json", import.meta.ur
 
 // Full injectCodexConfig runs in a subprocess with isolated CODEX_HOME/OPENCODEX_HOME so
 // module-level path constants bind to the temp dirs (same pattern as codex-journal.test.ts).
-function runInject(codexHome: string, ocxHome: string, configJson = "{}"): { stdout: string; status: number } {
+function runInject(codexHome: string, ocxHome: string, configJson = '{"enableCodexLauncherMode": true}'): { stdout: string; status: number } {
   const script = `
     const { injectCodexConfig } = require("./src/codex/inject");
     injectCodexConfig(10100, JSON.parse(process.env.TEST_OCX_CONFIG)).then(r => {
@@ -104,7 +104,7 @@ describe("injectCodexConfig integration (Design B)", () => {
   test("non-loopback hostname still uses the legacy provider-table injection", () => {
     writeFileSync(join(codexHome, "config.toml"), 'model = "gpt-5.5"\n', "utf8");
 
-    const r = runInject(codexHome, ocxHome, JSON.stringify({ hostname: "192.168.1.20" }));
+    const r = runInject(codexHome, ocxHome, JSON.stringify({ hostname: "192.168.1.20", enableCodexLauncherMode: true }));
     expect(r.status).toBe(0);
     expect(JSON.parse(r.stdout).success).toBe(true);
 

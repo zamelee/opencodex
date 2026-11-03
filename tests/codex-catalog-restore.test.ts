@@ -139,6 +139,8 @@ describe("Codex catalog restore", () => {
           port: 10100,
           providers: {},
           defaultProvider: "openai",
+          enableCodexLauncherMode: true,
+          enableCodexLauncherMode: true,
           subagentModels: ["gpt-5.5"],
         });
         console.log(JSON.stringify(result));
@@ -183,6 +185,8 @@ describe("Codex catalog restore", () => {
           port: 10100,
           providers: {},
           defaultProvider: "openai",
+          enableCodexLauncherMode: true,
+          enableCodexLauncherMode: true,
           subagentModels: ["gpt-5.5", "gpt-5.4", "gpt-5.3-codex-spark", "gpt-5.6-sol"],
         });
         console.log(JSON.stringify(result));

@@ -544,6 +544,7 @@ export const zh: Record<TKey, string> = {
   "api.subtitle": "使用生成的 API 密钥从外部应用访问 opencodex 代理。通过 {authHeader} 或 {altHeader} 请求头进行认证。",
   "api.endpoint": "端点",
   "api.endpointNote": "兼容 OpenAI Responses API 格式。",
+  "api.lanEndpoints": "局域网也可访问（{n} 个地址）：",
   "api.newKeyTitle": "已创建新密钥",
   "api.newKeyNote": "请立即复制此密钥，它不会再次显示。",
   "api.copy": "复制",

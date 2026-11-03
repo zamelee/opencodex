@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import type { CatalogModel } from "../codex/catalog";
 import { invalidateCodexModelsCache, nativeModelRows } from "../codex/catalog";
+import { isLauncherModeEnabled } from "../codex/launcher-mode";
 import {
   DEFAULT_SUBAGENT_MODELS,
   codexAutoStartEnabled,
@@ -121,7 +122,10 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
   // so the GUI can render switches in their effective state.
   if (url.pathname === "/api/opencodex/config" && req.method === "GET") {
     return jsonResponse({
-      enableCodexLauncherMode: config.enableCodexLauncherMode !== false,
+      // Effective values, not raw config: launcher mode is ON only when explicitly
+      // enabled, so a hand-written config that omits the field reports "off" instead
+      // of "on" (the old `!== false` reading made a missing field mean ENABLED).
+      enableCodexLauncherMode: isLauncherModeEnabled(config),
       syncRoutedModels: config.syncRoutedModels !== false,
       syncNativeOpenaiModels: config.syncNativeOpenaiModels !== false,
       preset: config.preset ?? null,
@@ -175,7 +179,7 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
     saveConfig(config);
     return jsonResponse({
       ok: true,
-      enableCodexLauncherMode: config.enableCodexLauncherMode !== false,
+      enableCodexLauncherMode: isLauncherModeEnabled(config),
       syncRoutedModels: config.syncRoutedModels !== false,
       syncNativeOpenaiModels: config.syncNativeOpenaiModels !== false,
       preset: config.preset ?? null,
@@ -1380,7 +1384,20 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
   // ---------------------------------------------------------------------------
   if (url.pathname === "/api/keys" && req.method === "GET") {
     const keys = config.apiKeys ?? [];
-    return jsonResponse({ keys: keys.map(k => ({ id: k.id, name: k.name, prefix: k.key.slice(0, 8) + "...", createdAt: k.createdAt })), endpoint: `http://${config.hostname ?? "127.0.0.1"}:${config.port ?? 10100}/v1/responses` }, 200, req, config);
+    const port = config.port ?? 10100;
+    const bind = config.hostname ?? "127.0.0.1";
+    const { listLanHosts } = await import("../lib/local-addresses");
+    // The LAN variants are what a colleague can actually paste; `bind` may be 0.0.0.0
+    // (meaning "all interfaces", not a usable address) so it is never shown as one.
+    const lanHosts = listLanHosts();
+    return jsonResponse({
+      keys: keys.map(k => ({ id: k.id, name: k.name, prefix: k.key.slice(0, 8) + "...", createdAt: k.createdAt })),
+      endpoint: `http://${bind === "0.0.0.0" ? "127.0.0.1" : bind}:${port}/v1/responses`,
+      bindHostname: bind,
+      port,
+      lanHosts,
+      altEndpoints: lanHosts.map(host => `http://${host}:${port}/v1/responses`),
+    }, 200, req, config);
   }
 
   if (url.pathname === "/api/keys" && req.method === "POST") {

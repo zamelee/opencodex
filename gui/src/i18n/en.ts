@@ -545,6 +545,7 @@ export const en = {
   "api.subtitle": "Use generated API keys to access the opencodex proxy from external apps. Keys authenticate via the {authHeader} or {altHeader} header.",
   "api.endpoint": "Endpoint",
   "api.endpointNote": "Compatible with OpenAI Responses API format.",
+  "api.lanEndpoints": "Also reachable on the LAN ({n} address(es)):",
   "api.newKeyTitle": "New key created",
   "api.newKeyNote": "Copy this key now — it won't be shown again.",
   "api.copy": "Copy",

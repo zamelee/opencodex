@@ -2,6 +2,7 @@ import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { atomicWriteFile, loadConfig, websocketsEnabled } from "../config";
 import { markJournalInjectedState, restoreJournalState, writeJournal } from "./journal";
 import { restoreCodexCatalog } from "./catalog";
+import { isLauncherModeEnabled } from "./launcher-mode";
 import { migrateHistoryToOpenai, syncCodexHistoryProvider } from "./history-provider";
 import { CODEX_CONFIG_PATH, CODEX_PROFILE_PATH, DEFAULT_CATALOG_PATH, parseTomlString, readRootTomlString, resolveCodexConfigPath, tomlString } from "./paths";
 import type { OcxConfig } from "../types";
@@ -369,8 +370,10 @@ export async function injectCodexConfig(port: number, config?: OcxConfig, option
   // AND do NOT write the journal. Returning early here (before writeJournal) keeps the journal write
   // symmetric with the journal.ts[3/10] guards. CodexPlusPlus or another launcher owns config.toml in this mode.
   const cfg = config ?? loadConfig();
-  if (cfg.enableCodexLauncherMode === false) {
-    return { success: true, message: "Skipped: enable_codex_launcher_mode=false (opencodex acts as pure HTTP proxy)." };
+  if (!isLauncherModeEnabled(cfg)) {
+    // Keep the `enable_codex_launcher_mode=false` wording: it is what the CLI/GUI and
+    // existing assertions match on. "not set" reads the same way for a missing field.
+    return { success: true, message: "Skipped: enable_codex_launcher_mode=false (or not set) — opencodex acts as pure HTTP proxy." };
   }
 
   writeJournal();
@@ -568,7 +571,7 @@ export function restoreNativeCodex(): { success: boolean; message: string } {
   let skipWhenProvablyNoop = false;
   try {
     const activeCfg = loadConfig();
-    skipWhenProvablyNoop = !shouldInjectApiAuthHeader(activeCfg) || activeCfg.enableCodexLauncherMode === false;
+    skipWhenProvablyNoop = !shouldInjectApiAuthHeader(activeCfg) || !isLauncherModeEnabled(activeCfg);
   } catch { /* unreadable config: keep the conservative write-open restore */ }
   const history = syncCodexHistoryProvider("openai", undefined, undefined, { skipWhenProvablyNoop });
   const msg = cat.removed > 0

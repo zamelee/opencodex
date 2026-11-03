@@ -4,6 +4,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync } from 
 import { delimiter, dirname, join, resolve } from "node:path";
 import { atomicWriteFile, expandUserPath, getConfigDir, websocketsEnabled } from "../config";
 import { CODEX_CONFIG_PATH, CODEX_MODELS_CACHE_PATH, DEFAULT_CATALOG_PATH, readRootTomlString, resolveCodexConfigPath } from "./paths";
+import { isLauncherModeEnabled } from "./launcher-mode";
 import { DEFAULT_MODEL_CACHE_TTL_MS, getFreshCached, getStaleCached, isModelsFetchCoolingDown, markModelsFetchFailure, setCached } from "./model-cache";
 import { buildModelsRequest, resolveModelsAuthToken } from "../oauth";
 import type { OcxConfig, OcxProviderConfig } from "../types";
@@ -1491,7 +1492,7 @@ export async function syncCatalogModels(config: OcxConfig): Promise<{ added: num
   // holds — Codex CLI's direct read of the same file means opencodex must leave it alone.
   // Log message downstream in sync.ts:53 sees `added === 0` and skips the "+ N models
   // appended" line entirely.
-  if (config.enableCodexLauncherMode === false) {
+  if (!isLauncherModeEnabled(config)) {
     const catalogPath = readCodexCatalogPath();
     // catalogExists is computed by refreshCodexModelCatalog after this returns, so sync.ts
     // correctly distinguishes "pass-through skip" (silent) from "no catalog source found"

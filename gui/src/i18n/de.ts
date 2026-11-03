@@ -524,6 +524,7 @@ export const de = {
   "api.subtitle": "Nutze generierte API-Schlüssel, um von externen Apps auf den opencodex-Proxy zuzugreifen. Schlüssel authentifizieren über den {authHeader}- oder {altHeader}-Header.",
   "api.endpoint": "Endpunkt",
   "api.endpointNote": "Kompatibel mit dem OpenAI Responses API-Format.",
+  "api.lanEndpoints": "Auch im LAN erreichbar ({n} Adresse(n)):",
   "api.newKeyTitle": "Neuer Schlüssel erstellt",
   "api.newKeyNote": "Kopiere diesen Schlüssel jetzt — er wird nicht erneut angezeigt.",
   "api.copy": "Kopieren",

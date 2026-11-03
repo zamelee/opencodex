@@ -211,7 +211,7 @@ describe("codex-journal", () => {
     const r = runScript(testDir, `
       const { injectCodexConfig, restoreNativeCodex } = require("./src/codex/inject");
       (async () => {
-        await injectCodexConfig(10100, { port: 10100, providers: {}, defaultProvider: "openai" }, { catalogPath: null });
+        await injectCodexConfig(10100, { port: 10100, providers: {}, defaultProvider: "openai", enableCodexLauncherMode: true }, { catalogPath: null });
         const result = restoreNativeCodex();
         console.log(JSON.stringify({ success: result.success }));
       })();
@@ -231,7 +231,7 @@ describe("codex-journal", () => {
       const path = require("path");
       const { injectCodexConfig, restoreNativeCodex } = require("./src/codex/inject");
       (async () => {
-        await injectCodexConfig(10100, { port: 10100, providers: {}, defaultProvider: "openai" }, { catalogPath: null });
+        await injectCodexConfig(10100, { port: 10100, providers: {}, defaultProvider: "openai", enableCodexLauncherMode: true }, { catalogPath: null });
         fs.appendFileSync(path.join(process.env.CODEX_HOME, "config.toml"), "\\n[tools]\\nweb_search = true\\n", "utf8");
         const result = restoreNativeCodex();
         console.log(JSON.stringify({ success: result.success, message: result.message }));
@@ -257,7 +257,7 @@ describe("codex-journal", () => {
       const path = require("path");
       const { injectCodexConfig, restoreNativeCodex } = require("./src/codex/inject");
       (async () => {
-        await injectCodexConfig(10100, { port: 10100, providers: {}, defaultProvider: "openai" }, { catalogPath: null });
+        await injectCodexConfig(10100, { port: 10100, providers: {}, defaultProvider: "openai", enableCodexLauncherMode: true }, { catalogPath: null });
         fs.appendFileSync(path.join(process.env.CODEX_HOME, "config.toml"), "\\n[tools]\\nweb_search = true\\n", "utf8");
         const result = restoreNativeCodex();
         console.log(JSON.stringify({ success: result.success, message: result.message }));
