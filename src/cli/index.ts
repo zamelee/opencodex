@@ -11,6 +11,7 @@ import {
   readPid,
   readPidFileValue,
   readRuntimePort,
+  readConfigDiagnostics,
   removePid,
   removePidIfValueIs,
   removeRuntimePort,
@@ -49,7 +50,11 @@ const command = args[0];
   }
   // Patch 2: emit red stderr banner when launcher-mode will actually write Codex files.
   // Banner is gated by wouldWriteCodex() so it stays silent in the default safe config.
-  const _codexOverlay = resolveLauncherFlags(merged, loadConfig());
+  // Read the config DIAGNOSTICALLY here: this block runs before every subcommand, and
+  // loadConfig() repairs/backs-up a malformed config (writing config.json.invalid-*
+  // next to it and logging to stderr). A read-only diagnostic like `ocx status --json`
+  // must not mutate the user's config dir.
+  const _codexOverlay = resolveLauncherFlags(merged, readConfigDiagnostics().config);
   logCodexWriteBannerIfNeeded(_codexOverlay);
 }
 

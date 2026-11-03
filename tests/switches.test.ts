@@ -2,8 +2,10 @@
  * Phase 5 launcher-mode test suite.
  *
  * Covers 9 cases that exercise every guard wired up in [1/10]-[7/10]:
- *  T1 - default (no config) -> launches as launcher, writes journal, injects config.toml
- *  T2 - preset=launcher explicitly -> same as T1
+ *  T1 - default (no config) -> safe default full-pass-through: no journal, config.toml untouched
+ *       (changed by ec5a59bf "safe-default full-pass-through": opencodex is a pure
+ *        translation relay by default and never touches ~/.codex)
+ *  T2 - preset=launcher explicitly -> launcher mode: writes journal, injects config.toml
  *  T3 - preset=proxy-only -> config.toml untouched, journal absent, catalog contains only native
  *  T4 - preset=full-pass-through -> config.toml untouched, journal absent, catalog empty
  *  T5 - per-flag launcher=false routed=true native=true -> no journal, no config inject, routed entries still in catalog
@@ -58,6 +60,26 @@ function makeSandbox(): Sandbox {
   };
 }
 
+/**
+ * Write a SCHEMA-VALID opencodex config into the sandbox home.
+ *
+ * Why this helper exists: the config schema requires `defaultProvider` to name an
+ * existing provider. A config like `{ providers: {} }` fails validation, gets
+ * "repaired" back to getDefaultConfig() — i.e. full-pass-through with
+ * enableCodexLauncherMode=false — which silently flips the case under test.
+ * Every case that cares about launcher mode must therefore state it in a valid file.
+ */
+function writeOcxConfig(sandbox: Sandbox, overrides: Record<string, unknown> = {}): void {
+  writeFileSync(join(sandbox.opencodexHome, "config.json"), JSON.stringify({
+    port: 10100,
+    providers: {
+      dummy: { adapter: "openai-chat", baseUrl: "https://example.invalid/v1", apiKey: "sk-test-dummy" },
+    },
+    defaultProvider: "dummy",
+    ...overrides,
+  }), "utf8");
+}
+
 function runPhase<T>(env: Record<string, string>, script: string): { status: number; data: T | null; stderr: string } {
   const result = spawnSync(process.execPath, ["--eval", script], {
     cwd: repoRoot,
@@ -76,7 +98,9 @@ describe("Phase 5 launcher-mode flags", () => {
   beforeEach(() => { sb = makeSandbox(); });
   afterEach(() => { sb.cleanup(); });
 
-  test("T1: default (no config) acts as launcher-mode and writes journal", () => {
+  test("T1: default (no config) is the safe full-pass-through default -> no journal, config untouched", () => {
+    // Truly "no config": drop the sandbox seed so loadConfig() falls back to defaults.
+    rmSync(join(sb.opencodexHome, "config.json"), { force: true });
     const env = { CODEX_HOME: sb.codexHome, OPENCODEX_HOME: sb.opencodexHome };
     const r = runPhase<{ journalExists: boolean; configTouched: boolean; configSha: string; originalSha: string }>(env, `
       const { writeJournal } = await import("./src/codex/journal.ts");
@@ -94,14 +118,18 @@ describe("Phase 5 launcher-mode flags", () => {
         configTouched: after !== original,
         originalSha: original.length,
         configSha: after.length,
+        injectMessage: inj.message,
       }));
     `);
     expect(r.status).toBe(0);
-    expect(r.data?.journalExists).toBe(true);
-    expect(r.data?.configTouched).toBe(true);
+    expect(r.data?.journalExists).toBe(false);
+    expect(r.data?.configTouched).toBe(false);
+    expect(r.data?.injectMessage).toMatch(/enable_codex_launcher_mode=false/);
   });
 
-  test("T2: preset=launcher behaves identically to T1", () => {
+  test("T2: preset=launcher -> launcher mode: journal written, config.toml injected", () => {
+    // preset=launcher is what ocx-start.py writes; the runtime reads the raw flag.
+    writeOcxConfig(sb, { preset: "launcher", enableCodexLauncherMode: true });
     const env = { CODEX_HOME: sb.codexHome, OPENCODEX_HOME: sb.opencodexHome, OCX_PRESET: "launcher" };
     const r = runPhase<{ journalExists: boolean; configTouched: boolean }>(env, `
       const { writeJournal } = await import("./src/codex/journal.ts");
@@ -121,11 +149,7 @@ describe("Phase 5 launcher-mode flags", () => {
   });
 
   test("T3: preset=proxy-only -> config.toml untouched, journal absent", () => {
-    writeFileSync(join(sb.opencodexHome, "config.json"), JSON.stringify({
-      providers: {},
-      preset: "proxy-only",
-      enableCodexLauncherMode: false,
-    }), "utf8");
+    writeOcxConfig(sb, { preset: "proxy-only", enableCodexLauncherMode: false });
     const env = { CODEX_HOME: sb.codexHome, OPENCODEX_HOME: sb.opencodexHome, OCX_PRESET: "proxy-only" };
     const r = runPhase<{ journalExists: boolean; configTouched: boolean; injectMessage: string }>(env, `
       const { writeJournal } = await import("./src/codex/journal.ts");
@@ -146,11 +170,7 @@ describe("Phase 5 launcher-mode flags", () => {
   });
 
   test("T4: preset=full-pass-through -> config.toml untouched, journal absent", () => {
-    writeFileSync(join(sb.opencodexHome, "config.json"), JSON.stringify({
-      providers: {},
-      preset: "full-pass-through",
-      enableCodexLauncherMode: false,
-    }), "utf8");
+    writeOcxConfig(sb, { preset: "full-pass-through", enableCodexLauncherMode: false });
     const env = { CODEX_HOME: sb.codexHome, OPENCODEX_HOME: sb.opencodexHome, OCX_PRESET: "full-pass-through" };
     const r = runPhase<{ journalExists: boolean; configTouched: boolean; injectMessage: string }>(env, `
       const { writeJournal } = await import("./src/codex/journal.ts");
@@ -171,12 +191,11 @@ describe("Phase 5 launcher-mode flags", () => {
   });
 
   test("T5: per-flag launcher=false routed=true native=true -> routes still injected but config.toml untouched", () => {
-    writeFileSync(join(sb.opencodexHome, "config.json"), JSON.stringify({
-      providers: {},
+    writeOcxConfig(sb, {
       enableCodexLauncherMode: false,
       syncRoutedModels: true,
       syncNativeOpenaiModels: true,
-    }), "utf8");
+    });
     const env = {
       CODEX_HOME: sb.codexHome,
       OPENCODEX_HOME: sb.opencodexHome,
@@ -203,6 +222,11 @@ describe("Phase 5 launcher-mode flags", () => {
   });
 
   test("T6: per-flag launcher=true routed=false native=true -> inject + journal, no routed entries", () => {
+    writeOcxConfig(sb, {
+      enableCodexLauncherMode: true,
+      syncRoutedModels: false,
+      syncNativeOpenaiModels: true,
+    });
     const env = {
       CODEX_HOME: sb.codexHome,
       OPENCODEX_HOME: sb.opencodexHome,
@@ -228,6 +252,11 @@ describe("Phase 5 launcher-mode flags", () => {
   });
 
   test("T7: per-flag launcher=true routed=true native=false -> inject + journal, native baseline skipped", () => {
+    writeOcxConfig(sb, {
+      enableCodexLauncherMode: true,
+      syncRoutedModels: true,
+      syncNativeOpenaiModels: false,
+    });
     const env = {
       CODEX_HOME: sb.codexHome,
       OPENCODEX_HOME: sb.opencodexHome,
@@ -265,11 +294,7 @@ describe("Phase 5 launcher-mode flags", () => {
       timestamp: new Date().toISOString(),
     }), "utf8");
 
-    writeFileSync(join(sb.opencodexHome, "config.json"), JSON.stringify({
-      providers: {},
-      preset: "proxy-only",
-      enableCodexLauncherMode: false,
-    }), "utf8");
+    writeOcxConfig(sb, { preset: "proxy-only", enableCodexLauncherMode: false });
 
     const env = { CODEX_HOME: sb.codexHome, OPENCODEX_HOME: sb.opencodexHome, OCX_PRESET: "proxy-only" };
     const r = runPhase<{ journalBeforePresent: boolean; journalAfterPresent: boolean; configExists: boolean }>(env, `
@@ -292,6 +317,7 @@ describe("Phase 5 launcher-mode flags", () => {
   test("T9: syncResumeHistory=false still independently works when launcher-mode is on", () => {
     // Save the user config, call inject; verify resume-history code path is gated by syncResumeHistory,
     // not by launcher_mode. (We invoke the function but check the gate, not the side effects.)
+    writeOcxConfig(sb, { enableCodexLauncherMode: true });
     const env = {
       CODEX_HOME: sb.codexHome,
       OPENCODEX_HOME: sb.opencodexHome,
@@ -324,10 +350,7 @@ describe("Phase 5 launcher-mode flags", () => {
     // config.toml; an opencodex write here would leak base_instructions into Codex's own
     // system prompt and inject unresolvable <provider>/<model> slugs, breaking Codex
     // startup. Regression guard for the v10.20 catalog-skip contract.
-    writeFileSync(join(sb.opencodexHome, "config.json"), JSON.stringify({
-      providers: {},
-      enableCodexLauncherMode: false,
-    }), "utf8");
+    writeOcxConfig(sb, { enableCodexLauncherMode: false });
     // Pre-write a catalog file with known content; assert it survives the sync unchanged.
     const catalogPath = join(sb.codexHome, "catalog.json");
     const sentinel = JSON.stringify({
@@ -373,10 +396,7 @@ describe("Phase 5 launcher-mode flags", () => {
     // Even when sync is skipped, syncCatalogModels must report the path CodexPlusPlus owns
     // so downstream code (sync.ts) doesn't NPE on cat.path. Path is whatever
     // model_catalog_json points at, falling back to the bundled default.
-    writeFileSync(join(sb.opencodexHome, "config.json"), JSON.stringify({
-      providers: {},
-      enableCodexLauncherMode: false,
-    }), "utf8");
+    writeOcxConfig(sb, { enableCodexLauncherMode: false });
     writeFileSync(join(sb.codexHome, "config.toml"), `model_catalog_json = "catalog.json"\n`, "utf8");
     const env = {
       CODEX_HOME: sb.codexHome,

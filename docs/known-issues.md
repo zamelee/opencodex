@@ -180,7 +180,7 @@ When Codex Desktop (CodeX++ fork) is configured with base_url = http://localhost
 
 ### Reproduction (raw payload from the live Codex thread)
 
-[codex://threads/01a01e86 line 16222-16225](/C:/Users/Bliss/.codex/sessions/2026/08/20/rollout-2026-08-20T17-35-39-01a01e86-99ff-7820-8a56-3cdfe121e18e.jsonl) shows:
+[codex://threads/01a01e86 line 16222-16225](/C:/Users/user/.codex/sessions/2026/08/20/rollout-2026-08-20T17-35-39-01a01e86-99ff-7820-8a56-3cdfe121e18e.jsonl) shows:
 
 agent_message payload contains literal bytes (verified hex dump):
   efbc81 3c 746f6f6c 5f63 616c 6c 3e = U+FEFF + tool_call (with ZWSP prefix)

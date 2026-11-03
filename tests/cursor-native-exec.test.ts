@@ -286,13 +286,16 @@ describe("Cursor native exec bridge", () => {
     const dir = mkdtempSync(join(tmpdir(), "ocx-cursor-shell-"));
     const shell = decode((await handleCursorNativeExec(execMessage({
       case: "shellArgs",
-      value: create(ShellArgsSchema, { command: "printf cursor-ok", workingDirectory: dir }),
+      // `echo` works in both POSIX sh and cmd.exe; `printf` only exists in POSIX shells,
+      // so a printf-based case fails on Windows (shell: true -> cmd.exe /c).
+      value: create(ShellArgsSchema, { command: "echo cursor-ok", workingDirectory: dir }),
     }), { unsafeAllowNativeLocalExec: true }))[0]);
 
     expect(shell.message.case).toBe("shellResult");
     expect(shell.message.value.result.case).toBe("success");
     if (shell.message.value.result.case === "success") {
-      expect(shell.message.value.result.value.stdout).toBe("cursor-ok");
+      // cmd.exe emits "cursor-ok\r\n", sh emits "cursor-ok\n".
+      expect(shell.message.value.result.value.stdout.trim()).toBe("cursor-ok");
     }
   });
 
@@ -300,7 +303,7 @@ describe("Cursor native exec bridge", () => {
     const dir = mkdtempSync(join(tmpdir(), "ocx-cursor-stream-"));
     const replies = await handleCursorNativeExec(execMessage({
       case: "shellStreamArgs",
-      value: create(ShellArgsSchema, { command: "printf stream-ok", workingDirectory: dir }),
+      value: create(ShellArgsSchema, { command: "echo stream-ok", workingDirectory: dir }),
     }), { unsafeAllowNativeLocalExec: true });
     const decodedAll = replies.map(reply => fromBinary(AgentClientMessageSchema, reply));
     const execFrames = decodedAll

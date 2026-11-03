@@ -1,5 +1,5 @@
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -10,7 +10,13 @@ const repoRoot = dirname(fileURLToPath(new URL("../package.json", import.meta.ur
 function runScript(codexHome: string, script: string): { stdout: string; stderr: string; status: number } {
   const result = spawnSync(process.execPath, ["--eval", script], {
     cwd: repoRoot,
-    env: { ...process.env, CODEX_HOME: codexHome },
+    // OPENCODEX_HOME must point at an isolated, launcher-mode-ON config:
+    //   - inheriting the ambient one makes the test depend on the developer's
+    //     own ~/.opencodex/config.json (on a full-pass-through install the
+    //     journal is never written, and the case fails for the wrong reason);
+    //   - the journal mechanism only exists in launcher mode, so a case that
+    //     exercises write/reconcile/restore must switch it on explicitly.
+    env: { ...process.env, CODEX_HOME: codexHome, OPENCODEX_HOME: join(codexHome, "opencodex-home") },
     encoding: "utf8",
   });
   return { stdout: result.stdout?.trim() ?? "", stderr: result.stderr?.trim() ?? "", status: result.status ?? 1 };
@@ -22,6 +28,17 @@ describe("codex-journal", () => {
   beforeEach(() => {
     testDir = mkdtempSync(join(tmpdir(), "ocx-journal-"));
     writeFileSync(join(testDir, "config.toml"), "# original config\nmodel_provider = \"openai\"\n", "utf8");
+    // Isolated launcher-mode-ON opencodex home (see runScript).
+    const ocxHome = join(testDir, "opencodex-home");
+    mkdirSync(ocxHome, { recursive: true });
+    writeFileSync(join(ocxHome, "config.json"), JSON.stringify({
+      port: 10100,
+      providers: {
+        dummy: { adapter: "openai-chat", baseUrl: "https://example.invalid/v1", apiKey: "sk-test-dummy" },
+      },
+      defaultProvider: "dummy",
+      enableCodexLauncherMode: true,
+    }), "utf8");
   });
 
   afterEach(() => {

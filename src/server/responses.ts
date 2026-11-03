@@ -598,6 +598,11 @@ export async function handleResponses(
 
   let authCtx: CodexAuthContext;
   let selectedForwardHeaders: Headers;
+  // Headers used to call the ChatGPT *forward* backend for the sidecars (vision describe, web
+  // search). They are NOT the routed provider's headers: a key-auth provider must never receive
+  // the caller's ChatGPT credential, so `selectedForwardHeaders` stays empty for key routes while
+  // the sidecars still get the credential they need.
+  let sidecarForwardHeaders: Headers;
   // Only resolve a Codex OAuth context when the routed provider actually uses Codex account
   // forwarding. key-auth providers (custom API keys, local mocks) must skip the pool
   // resolution entirely; otherwise we 401 on unrelated Codex pool-account state.
@@ -606,6 +611,7 @@ export async function handleResponses(
     try {
       authCtx = options.authContext ?? await resolveCodexAuthContext(req.headers, config);
       selectedForwardHeaders = options.selectedForwardHeaders ?? headersForCodexAuthContext(req.headers, authCtx);
+      sidecarForwardHeaders = selectedForwardHeaders;
     } catch (err) {
       if (err instanceof CodexAccountCooldownError) {
         return formatErrorResponse(429, "rate_limit_error", "Selected Codex account is cooling down");
@@ -626,6 +632,10 @@ export async function handleResponses(
     // operate on well-typed non-undefined values.
     authCtx = options.authContext ?? ({ kind: "main", accountId: null } as CodexAuthContext);
     selectedForwardHeaders = options.selectedForwardHeaders ?? new Headers();
+    // key-auth route: don't touch the Codex account pool (that 401s unrelated pool state), but
+    // still forward the caller's ChatGPT credential to the sidecars — derived from the incoming
+    // request only, never from the pool.
+    sidecarForwardHeaders = options.selectedForwardHeaders ?? headersForCodexAuthContext(req.headers, authCtx);
   }
 
   if (providerUsesCodexAuth) {
@@ -666,10 +676,10 @@ export async function handleResponses(
   // Vision sidecar: the routed model can't see images (provider.noVisionModels). Give it "eyes" —
   // describe each attached image with a gpt vision model via the ChatGPT passthrough and replace it
   // with text BEFORE the main call, so the text-only model can reason about it.
-  const visionPlan = planVisionSidecar(config, route.provider, route.modelId, parsed, selectedForwardHeaders, authCtx);
+  const visionPlan = planVisionSidecar(config, route.provider, route.modelId, parsed, sidecarForwardHeaders, authCtx);
   const recordSidecarOutcome = sidecarOutcomeRecorder(config, authCtx);
   if (visionPlan) {
-    await describeImagesInPlace(parsed, visionPlan.forwardProvider, selectedForwardHeaders, visionPlan.settings, options.abortSignal, recordSidecarOutcome);
+    await describeImagesInPlace(parsed, visionPlan.forwardProvider, sidecarForwardHeaders, visionPlan.settings, options.abortSignal, recordSidecarOutcome);
   } else if (modelInList(route.provider.noVisionModels, route.modelId)) {
     // Sidecar-covered model but NO plan (no forward provider / missing forwarded auth / sidecar
     // disabled): fail closed — never forward raw images to a text-only upstream.
@@ -928,14 +938,14 @@ export async function handleResponses(
   // Web-search sidecar: Codex enabled web_search but this is a routed (non-OpenAI) model that can't
   // run it server-side. Expose web_search as a function tool and run searches via the gpt-mini sidecar
   // through the ChatGPT passthrough, looping until the model answers. Otherwise take the normal path.
-  const wsPlan = planWebSearch(config, parsed, false, selectedForwardHeaders, route.provider, route.modelId, authCtx);
+  const wsPlan = planWebSearch(config, parsed, false, sidecarForwardHeaders, route.provider, route.modelId, authCtx);
   if (wsPlan) {
     parsed.context.tools = [...(parsed.context.tools ?? []), buildWebSearchTool()];
     const wsResponse = await runWithWebSearch({
       parsed, adapter,
       forwardProvider: wsPlan.forwardProvider,
       hostedTool: wsPlan.hostedTool,
-      selectedForwardHeaders,
+      selectedForwardHeaders: sidecarForwardHeaders,
       settings: wsPlan.settings,
       maxSearches: wsPlan.maxSearches,
       forceEmptyResponseId: true,

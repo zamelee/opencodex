@@ -29,7 +29,7 @@ function nativeTemplate(): Record<string, unknown> {
 }
 
 const EXPECTED_KEY_PROVIDER_IDS = [
-  "anthropic-apikey", "openai-apikey", "umans", "opencode-go", "neuralwatt", "openrouter", "groq", "google", "google-vertex", "azure-openai",
+  "openai-apikey", "umans", "opencode-go", "neuralwatt", "openrouter", "groq", "google", "google-vertex", "azure-openai",
   "deepseek", "cerebras", "together", "fireworks", "firepass", "moonshot",
   "huggingface", "nvidia", "venice", "zai", "nanogpt", "synthetic", "qwen-portal",
   "qianfan", "alibaba", "parallel", "zenmux", "litellm", "ollama-cloud", "mistral",
@@ -173,18 +173,17 @@ describe("provider registry parity", () => {
     expect(routeModel(config, "zai/glm-5.2[1m]").provider.modelSuffixBracketStrip).toBe(true);
   });
 
-  test("Anthropic API-key provider mirrors the OAuth entry's models on the key flow", () => {
+  test("Anthropic API-key stays a Custom provider (no built-in preset)", () => {
     const anthropicOauth = PROVIDER_REGISTRY.find(entry => entry.id === "anthropic");
-    expect(KEY_LOGIN_PROVIDERS["anthropic-apikey"]).toMatchObject({
-      label: "Anthropic (API key)",
-      adapter: "anthropic",
-      baseUrl: "https://api.anthropic.com",
-      dashboardUrl: "https://console.anthropic.com/settings/keys",
-      defaultModel: "claude-sonnet-5",
-      liveModels: true,
-    });
-    expect(KEY_LOGIN_PROVIDERS["anthropic-apikey"].models).toEqual(anthropicOauth?.models);
-    expect(KEY_LOGIN_PROVIDERS["anthropic-apikey"].modelContextWindows).toEqual(anthropicOauth?.modelContextWindows);
+    // The `anthropic-apikey` preset was removed on purpose: a direct Anthropic key is reachable
+    // through Custom (adapter=anthropic + baseUrl=https://api.anthropic.com + sk-ant-* key),
+    // so there is no built-in key-login entry to mirror the OAuth one.
+    expect(KEY_LOGIN_PROVIDERS["anthropic-apikey"]).toBeUndefined();
+    expect(Object.keys(KEY_LOGIN_PROVIDERS)).not.toContain("anthropic-apikey");
+    expect(deriveKeyLoginMap()["anthropic-apikey"]).toBeUndefined();
+    expect(deriveFeaturedProviderIds()).not.toContain("anthropic-apikey");
+    expect(anthropicOauth?.authKind).toBe("oauth");
+    expect(anthropicOauth?.models).toContain("claude-sonnet-5");
   });
 
   test("Kimi coding aliases preserve model context and capability parity", () => {
@@ -377,7 +376,7 @@ describe("provider registry parity", () => {
   test("GUI preset projection preserves current featured set plus key catalog and custom", () => {
     const featured = deriveFeaturedProviderIds();
     expect(featured).toEqual([
-      "openai", "xai", "anthropic", "anthropic-apikey", "kimi", "openai-apikey", "umans", "opencode-go", "openrouter",
+      "openai", "xai", "anthropic", "kimi", "openai-apikey", "umans", "opencode-go", "openrouter",
       "groq", "google", "azure-openai", "ollama", "vllm", "lm-studio",
     ]);
 
@@ -430,8 +429,6 @@ describe("provider registry parity", () => {
     expect(deriveJawcodeAliases()).toEqual({
       xai: "xai",
       anthropic: "anthropic",
-      "anthropic-apikey": "anthropic",
-      "anthropic-key": "anthropic",
       kimi: "moonshot",
       "opencode-go": "opencode-go",
       openrouter: "openrouter",

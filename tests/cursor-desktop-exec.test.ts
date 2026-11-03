@@ -24,13 +24,19 @@ function echoJson(json: string): string {
   return `cat >/dev/null; printf '%s' '${json}'`;
 }
 
+// The external executor hooks are executed via `sh -c` (see
+// src/adapters/cursor/native-exec-desktop.ts). Windows hosts have no `sh`
+// unless one is on PATH (e.g. Git Bash), so these cases only run on POSIX.
+// The Linux/macOS CI legs still cover them for real.
+const posixOnly = test.skipIf(process.platform === "win32");
+
 describe("Cursor desktop executor hooks", () => {
   test("desktopDepsFromConfig returns empty deps when nothing configured", () => {
     expect(desktopDepsFromConfig(undefined)).toEqual({});
     expect(desktopDepsFromConfig({})).toEqual({});
   });
 
-  test("computer-use success through external executor", async () => {
+  posixOnly("computer-use success through external executor", async () => {
     const deps = desktopDepsFromConfig({ computerUseCommand: echoJson('{"durationMs":42}') });
     const reply = decode((await handleCursorNativeExec(execMessage({
       case: "computerUseArgs",
@@ -44,7 +50,7 @@ describe("Cursor desktop executor hooks", () => {
     }
   });
 
-  test("computer-use executor error payload maps to ComputerUseError", async () => {
+  posixOnly("computer-use executor error payload maps to ComputerUseError", async () => {
     const deps = desktopDepsFromConfig({ computerUseCommand: echoJson('{"error":"no display"}') });
     const reply = decode((await handleCursorNativeExec(execMessage({
       case: "computerUseArgs",
@@ -65,7 +71,7 @@ describe("Cursor desktop executor hooks", () => {
     expect(reply.message.value.result.case).toBe("error");
   });
 
-  test("record-screen startSuccess through external executor", async () => {
+  posixOnly("record-screen startSuccess through external executor", async () => {
     const deps = desktopDepsFromConfig({ recordScreenCommand: echoJson('{"startSuccess":{"wasPriorRecordingCancelled":true}}') });
     const reply = decode((await handleCursorNativeExec(execMessage({
       case: "recordScreenArgs",
