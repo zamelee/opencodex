@@ -264,15 +264,29 @@ async function runChatProbe(
   opts: ChatProbeOpts,
 ): Promise<ChatTestResult> {
   const adapter = (provider.adapter ?? "").toLowerCase();
-  const authStrategy = provider.modelListAuth ?? "bearer";
   const base = (provider.baseUrl ?? "").replace(/\/+$/, "");
   if (!base) return { ok: false, status: "error", latencyMs: 0, error: "provider has no baseUrl" };
 
-  const headers = buildAuthHeaders(authStrategy as Parameters<typeof buildAuthHeaders>[0], key);
-  const allHeaders: Record<string, string> = { "Content-Type": "application/json", ...headers };
+  // Model resolution, in the order the doc comment promises: explicit request >
+  // provider.testModel > provider.defaultModel > first entry of provider.models.
+  // Without the fallbacks the "默认" option in the GUI (which sends no model) dead-ends
+  // with "no model selected" for every provider that has no defaultModel/testModel.
+  const model = (opts.model ?? "").trim()
+    || (provider.testModel ?? "").trim()
+    || (provider.defaultModel ?? "").trim()
+    || (provider.models?.[0] ?? "").trim();
+  if (!model) {
+    return {
+      ok: false, status: "error", latencyMs: 0,
+      error: "no model available: 请求未指定模型，且 provider 没有 defaultModel / testModel / models —— 请在上方「当前的拉取方式」选一个模型，或给该 provider 配 defaultModel",
+    };
+  }
 
-  const model = opts.model;
-  if (!model) return { ok: false, status: "error", latencyMs: 0, error: "no model selected (defaultModel empty, testModel empty, and none passed in request)" };
+  // Auth strategies, same dispatch as the quota probe: an explicit modelListAuth
+  // locks one strategy; otherwise try the matrix order and fall through on 401/403.
+  // Hardcoding "bearer" here would disagree with what the runtime actually sends
+  // (x-api-key for reverse proxies) and could report a false failure.
+  const strategies = defaultStrategiesFor(provider);
 
   // Build URL + body per adapter
   let url: string;
@@ -292,16 +306,28 @@ async function runChatProbe(
 
   const started = Date.now();
   const timeoutMs = opts.timeoutMs ?? 25000;
-  try {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: allHeaders,
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
+  let lastAuthError: { status: number; error: string } | null = null;
+  for (const strategy of strategies) {
+    const allHeaders: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...buildAuthHeaders(strategy, key),
+    };
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: allHeaders,
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
     const latencyMs = Date.now() - started;
     const text = await res.text().catch(() => "");
     if (!res.ok) {
+        // 401/403 = this auth strategy is wrong for this provider; try the next one.
+        // Anything else (404/5xx/body error) is a real verdict — report it as-is.
+        if (res.status === 401 || res.status === 403) {
+          lastAuthError = { status: res.status, error: text.slice(0, 240) };
+          continue;
+        }
       return {
         ok: false,
         status: res.status,
@@ -354,7 +380,7 @@ async function runChatProbe(
       // ignore parse error, still report ok if status was 200
     }
     return { ok: true, status: res.status, latencyMs, reply, usage };
-  } catch (err) {
+    } catch (err) {
     const latencyMs = Date.now() - started;
     const name = err instanceof Error ? err.name : String(err);
     return {
@@ -365,7 +391,14 @@ async function runChatProbe(
         ? `请求超时 (${Math.round(timeoutMs / 1000)}s)`
         : (err instanceof Error ? err.message : String(err)).slice(0, 200),
     };
+    }
   }
+  return {
+    ok: false,
+    status: lastAuthError?.status ?? "error",
+    latencyMs: Date.now() - started,
+    error: `认证被拒（试了 ${strategies.join(", ")}）${lastAuthError ? `: ${lastAuthError.error}` : ""}`,
+  };
 }
 
 /**

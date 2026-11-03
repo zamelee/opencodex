@@ -459,4 +459,99 @@ describe("provider API key pool", () => {
       globalThis.fetch = realFetch;
     }
   });
+
+  // Regression: the chat test used to take the model ONLY from the request, so the
+  // GUI's "默认" option (which sends no model) always failed with
+  // "no model selected" for providers without defaultModel / testModel.
+  // The documented fallback chain is: request > testModel > defaultModel > models[0].
+  test("keys/chat-test falls back to the provider's own model when the request omits it", async () => {
+    const realFetch = globalThis.fetch;
+    const seen: Array<Record<string, string>> = [];
+    const bodies: string[] = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.endsWith("/v1/chat/completions")) {
+        const headers = (init?.headers ?? {}) as Record<string, string>;
+        seen.push(headers);
+        bodies.push(typeof init?.body === "string" ? init.body : "");
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: "pong" } }],
+          usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 },
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return realFetch(input as Request | string | URL, init);
+    }) as typeof fetch;
+
+    // opencode-go has no defaultModel / testModel — only the models[] list.
+    const cfg = baseConfig();
+    saveConfig({
+      ...cfg,
+      providers: {
+        ...cfg.providers,
+        "opencode-go": { ...cfg.providers!["opencode-go"]!, models: ["fallback-model-x"] },
+      },
+    });
+    const server = startServer(0);
+    try {
+      const add = await fetch(new URL("/api/providers/keys", server.url), {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "opencode-go", key: "chat-fallback-key-ffff" }),
+      });
+      const { id } = await add.json() as { id: string };
+
+      const test = await fetch(new URL("/api/providers/keys/chat-test", server.url), {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "opencode-go", id }),
+      });
+      const body = await test.json() as {
+        ok: boolean; reply?: string; error?: string;
+        usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+      };
+      expect(body.error).toBeUndefined();
+      expect(body.ok).toBe(true);
+      expect(body.reply).toBe("pong");
+      expect(body.usage?.total_tokens).toBe(3);
+      expect(seen.length).toBe(1);
+      expect(bodies[0]).toContain("fallback-model-x");
+    } finally {
+      await server.stop(true);
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  // When there is genuinely no model anywhere, the error must say what to do next
+  // instead of the old opaque "no model selected (...)" string.
+  test("keys/chat-test explains how to fix a provider with no model at all", async () => {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.endsWith("/v1/models")) {
+        return new Response(JSON.stringify({ data: [{ id: "m" }] }), {
+          status: 200, headers: { "content-type": "application/json" },
+        });
+      }
+      return realFetch(input as Request | string | URL, init);
+    }) as typeof fetch;
+
+    const server = startServer(0);
+    try {
+      const add = await fetch(new URL("/api/providers/keys", server.url), {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "minnimax-chat", key: "no-model-key-gggg" }),
+      });
+      const { id } = await add.json() as { id: string };
+
+      const test = await fetch(new URL("/api/providers/keys/chat-test", server.url), {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "minnimax-chat", id }),
+      });
+      const body = await test.json() as { ok: boolean; error?: string };
+      expect(body.ok).toBe(false);
+      expect(body.error).toContain("no model available");
+      expect(body.error).toContain("defaultModel");
+    } finally {
+      await server.stop(true);
+      globalThis.fetch = realFetch;
+    }
+  });
 });
