@@ -15,6 +15,16 @@ interface Props {
   active?: boolean;
   /** True when the quota scheduler ranked this key as the standby (rotates here next). */
   nextUp?: boolean;
+  /**
+   * Whether this key takes part in automatic switching. `undefined` = participates
+   * (the default). False = the user opted it out — it is skipped by the scheduler and
+   * by the 429 failover, but stays visible, probeable and manually selectable.
+   */
+  autoSwitch?: boolean;
+  /** Toggle handler. Omitted when the row is read-only. */
+  onToggleAutoSwitch?: (enabled: boolean) => void;
+  /** Derived "plan expired" flag (upstream said so). */
+  expired?: boolean;
   onSwitch?: () => void;
   onRemove?: (e: React.MouseEvent) => void;
   /**
@@ -82,6 +92,9 @@ export default function KeyPoolPanel({
   only,
   active,
   nextUp,
+  autoSwitch,
+  onToggleAutoSwitch,
+  expired,
   onSwitch,
   onRemove,
   revealedKey,
@@ -100,27 +113,50 @@ export default function KeyPoolPanel({
   const showQuotaProbe = !!onQuotaProbe && !only;
   const showChatTest = !!onChatTest && !only;
   const showActions = !only && (onSwitch || onRemove);
+  const participates = autoSwitch !== false;
+  const isExpired = (expired ?? quota.expired) === true;
 
   return (
     <div
       className={`prov-account-row key-pool-row${active ? " active" : ""}`}
+      data-testid="key-pool-row"
+      data-expired={isExpired ? "true" : undefined}
+      data-auto-switch={participates ? "true" : "false"}
       style={{
         display: "grid",
         gridTemplateColumns: showActions
-          ? "44px minmax(0,1fr) auto auto"
-          : "44px minmax(0,1fr) auto",
+          ? "20px 44px minmax(0,1fr) auto auto"
+          : "20px 44px minmax(0,1fr) auto",
         gridTemplateRows: "auto auto",
         columnGap: 12,
         rowGap: 4,
         alignItems: "center",
         padding: "6px 8px",
         fontSize: 12,
+        // A key that cannot serve (expired) or that the user opted out of automatic
+        // switching is dimmed so the pool reads at a glance — the row stays legible.
+        opacity: isExpired || !participates ? 0.55 : 1,
       }}
     >
+      {/* Row 1: auto-switch checkbox (strategy switch, not an action) */}
+      {onToggleAutoSwitch ? (
+        <input
+          type="checkbox"
+          checked={participates}
+          onChange={e => onToggleAutoSwitch(e.target.checked)}
+          title={participates ? t("prov.keyAutoSwitchOn") : t("prov.keyAutoSwitchOff")}
+          aria-label={t("prov.keyAutoSwitchAria", { key: quota.label ?? quota.masked })}
+          data-testid="key-auto-switch"
+          style={{ gridRow: 1, gridColumn: 1, margin: 0, cursor: "pointer" }}
+        />
+      ) : (
+        <span style={{ gridRow: 1, gridColumn: 1 }} />
+      )}
+
       {/* Row 1: (NN) chip */}
       <code
         className="chip"
-        style={{ fontSize: 11, fontWeight: 600, gridRow: 1, gridColumn: 1 }}
+        style={{ fontSize: 11, fontWeight: 600, gridRow: 1, gridColumn: 2 }}
       >
         {id}
       </code>
@@ -133,7 +169,7 @@ export default function KeyPoolPanel({
           gap: 6,
           minWidth: 0,
           gridRow: 1,
-          gridColumn: 2,
+          gridColumn: 3,
         }}
       >
         {quota.label ? <span className="muted">{quota.label} · </span> : null}
@@ -275,13 +311,21 @@ export default function KeyPoolPanel({
         style={{
           fontFamily: "var(--mono)",
           gridRow: 2,
-          gridColumn: "2 / -1",
+          gridColumn: "3 / -1",
           display: "flex",
           flexWrap: "wrap",
           gap: 16,
           fontSize: 11,
         }}
       >
+        {isExpired ? (
+          <span style={{ color: "var(--red, #e5484d)", fontWeight: 600 }}>
+            {t("prov.keyExpiredBadge")}
+          </span>
+        ) : null}
+        {!participates ? (
+          <span style={{ color: "var(--amber)" }}>{t("prov.keyAutoSwitchOffBadge")}</span>
+        ) : null}
         <span>
           <span className="muted">5h</span>{" "}
           <strong>{fmtCount(quota.fiveHourPercent, quota.fiveHourUsed, quota.fiveHourLimit)}</strong>
@@ -291,7 +335,9 @@ export default function KeyPoolPanel({
           <strong>{fmtCount(quota.weeklyPercent, quota.weeklyUsed, quota.weeklyLimit)}</strong>
         </span>
         {quota.expiresAt !== undefined ? (
-          <span className="muted">exp {formatDate(quota.expiresAt)}</span>
+          <span className={isExpired ? "" : "muted"} style={isExpired ? { color: "var(--red, #e5484d)" } : undefined}>
+            exp {formatDate(quota.expiresAt)}
+          </span>
         ) : null}
         {(() => {
           // Scheduler forecast: translate raw quota numbers into "what happens next" for

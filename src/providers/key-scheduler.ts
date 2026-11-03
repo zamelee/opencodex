@@ -54,7 +54,7 @@ export interface KeyRotationEvent {
   provider: string;
   fromId: string;
   toId: string;
-  reason: "5h-threshold";
+  reason: "5h-threshold" | "active-expired";
   /** Utilization (0-1) of the key rotated away from, including local-call estimates. */
   fromFiveHourEst?: number;
   /** Same estimate for the key rotated to. */
@@ -126,6 +126,21 @@ function isServiceable(key: ProviderQuotaKey, now: number): boolean {
 }
 
 /**
+ * True when the key may be picked by the automatic rotation at all.
+ *
+ * Two independent gates:
+ *   - `autoSwitch === false` — the USER opted this key out (persisted intent).
+ *   - expired — DERIVED from the upstream probe: the plan is over, so the key cannot
+ *     serve anything. Renewing the plan upstream flips the probe back and the key
+ *     re-enters the rotation on its own — nothing has to be "un-retired".
+ */
+function isAutoSwitchEligible(key: ProviderQuotaKey, now: number): boolean {
+  if (key.autoSwitch === false) return false;
+  if (key.expired === true) return false;
+  return isServiceable(key, now);
+}
+
+/**
  * Pure candidate picker (exported for tests). Returns the id of the best standby key, or
  * null when every alternative is gated out. The caller decides WHETHER to rotate; this only
  * answers WHO next.
@@ -141,7 +156,7 @@ export function pickNextKey(
 ): string | null {
   const candidates = keys.filter(key => {
     if (key.id === activeId) return false;
-    if (!isServiceable(key, now)) return false;
+    if (!isAutoSwitchEligible(key, now)) return false;
     if (inCooldown(key.id)) return false;
     const est = estimate(key);
     return est === undefined || est < threshold; // unknown 5h data → allow (benefit of doubt)
@@ -181,7 +196,7 @@ export function pickBestKeyId(
   estimate: (key: ProviderQuotaKey) => number | undefined = k => estFiveHour(k, providerName),
 ): string | null {
   const candidates = keys.filter(key => {
-    if (!isServiceable(key, now)) return false;
+    if (!isAutoSwitchEligible(key, now)) return false;
     if (inCooldown(key.id)) return false;
     return true;
   });
@@ -215,7 +230,7 @@ export function pickBestKeyId(
 async function probeKeysCached(providerName: string, provider: OcxProviderConfig, now: number): Promise<ProviderQuotaKey[] | null> {
   const cached = probeCache.get(providerName);
   if (cached && now - cached.ts < PROBE_TTL_MS) return cached.keys;
-  const keys = await probeImpl(provider);
+  const keys = await probeImpl(provider, providerName);
   if (!keys) return null;
   probeCache.set(providerName, { ts: now, keys });
   // Fresh probe already includes everything dispatched before it; reset local counters.
@@ -226,7 +241,7 @@ async function probeKeysCached(providerName: string, provider: OcxProviderConfig
 }
 
 // Indirection so tests can stub the network probe.
-let probeImpl: (provider: OcxProviderConfig) => Promise<ProviderQuotaKey[] | null> = probeMinimaxKeyQuotas;
+let probeImpl: (provider: OcxProviderConfig, providerName?: string) => Promise<ProviderQuotaKey[] | null> = probeMinimaxKeyQuotas;
 export function _setProbeForTests(impl: typeof probeImpl | null): void {
   probeImpl = impl ?? probeMinimaxKeyQuotas;
 }
@@ -272,7 +287,15 @@ export async function maybeRotateForQuota(config: OcxConfig, providerName: strin
   const activeQuota = keys.find(k => k.id === active.id);
   if (!activeQuota) return false;
   const activeEst = estFiveHour(activeQuota, providerName);
-  if (activeEst === undefined || activeEst < threshold) return false;
+  // Two independent triggers:
+//   1. the 5h window is (locally) exhausted -> rotate to protect latency
+//   2. the ACTIVE key's plan expired -> it cannot serve anything, so rotate away
+//      even when the 5h budget is still wide open. Waiting for the 5h threshold here
+//      would keep a dead key in front of every request.
+  const activeExpired = activeQuota.expired === true
+    || (activeQuota.expiresAt !== undefined && activeQuota.expiresAt <= now);
+  const overThreshold = activeEst !== undefined && activeEst >= threshold;
+  if (!activeExpired && !overThreshold) return false;
 
   // Watchdog (Layer 1) + return-cooldown (Layer 2) + circuit breaker (Layer 3).
   //
@@ -305,7 +328,7 @@ export async function maybeRotateForQuota(config: OcxConfig, providerName: strin
     keyId: toId,
     key: next.key,
     ts: now,
-    reason: "5h-threshold",
+    reason: activeExpired ? "active-expired" : "5h-threshold",
   };
   provider.pendingKeyChange = pending;
   // Layer 2: pin the key we just rotated from out of candidates for `RETURN_COOLDOWN_MS`.
@@ -324,8 +347,8 @@ export async function maybeRotateForQuota(config: OcxConfig, providerName: strin
     provider: providerName,
     fromId: active.id,
     toId,
-    reason: "5h-threshold",
-    fromFiveHourEst: Math.round(activeEst * 1000) / 1000,
+    reason: activeExpired ? "active-expired" : "5h-threshold",
+    ...(activeEst !== undefined ? { fromFiveHourEst: Math.round(activeEst * 1000) / 1000 } : {}),
     ...(toQuota ? { toFiveHourEst: Math.round((estFiveHour(toQuota, providerName) ?? 0) * 1000) / 1000 } : {}),
     ...(activeQuota.fiveHourResetAt !== undefined ? { fiveHourResetAt: activeQuota.fiveHourResetAt } : {}),
   };
@@ -335,7 +358,9 @@ export async function maybeRotateForQuota(config: OcxConfig, providerName: strin
   rotationEvents.set(providerName, list);
 
   console.warn(
-    `[key-scheduler] ${providerName}: active key ${active.id} 5h at ${(activeEst * 100).toFixed(1)}% ≥ ${threshold * 100}%; STAGED rotation to ${toId} (est ${((event.toFiveHourEst ?? 0) * 100).toFixed(1)}%, applies on next request)`,
+    activeExpired
+      ? `[key-scheduler] ${providerName}: active key ${active.id} is EXPIRED; STAGED rotation to ${toId} (applies on next request)`
+      : `[key-scheduler] ${providerName}: active key ${active.id} 5h at ${((activeEst ?? 0) * 100).toFixed(1)}% ≥ ${threshold * 100}%; STAGED rotation to ${toId} (est ${((event.toFiveHourEst ?? 0) * 100).toFixed(1)}%, applies on next request)`,
   );
   return true;
 }

@@ -19,6 +19,8 @@ export interface ProviderApiKeyInfo {
   masked: string;
   active: boolean;
   addedAt?: number;
+  /** False when the user opted this entry out of automatic switching. */
+  autoSwitch?: boolean;
 }
 
 function isEnvReference(value: string): boolean {
@@ -69,8 +71,31 @@ export function listProviderApiKeys(config: OcxConfig, name: string): { activeId
       masked: maskApiKey(entry.key),
       active: entry.id === activeId,
       ...(entry.addedAt !== undefined ? { addedAt: entry.addedAt } : {}),
+      autoSwitch: entry.autoSwitch !== false,
     })),
   };
+}
+
+/**
+ * Opt a pool entry in / out of automatic key switching.
+ *
+ * This is USER INTENT and therefore persisted. It is deliberately independent of the
+ * derived "expired" state: an expired key stays out of the rotation on its own (the
+ * probe says so), and comes back automatically once it is renewed — while a key the
+ * user unchecked stays unchecked until the user checks it again.
+ *
+ * The active key is NOT rotated away here: switching the live key under a running
+ * session is the scheduler's job. The GUI surfaces the combination instead.
+ */
+export function setProviderApiKeyAutoSwitch(config: OcxConfig, name: string, id: string, enabled: boolean): boolean {
+  const provider = config.providers[name];
+  if (!provider || !isKeyAuthProvider(provider)) return false;
+  const entry = ensurePool(provider).find(e => e.id === id);
+  if (!entry) return false;
+  if (enabled) delete entry.autoSwitch;
+  else entry.autoSwitch = false;
+  saveConfig(config);
+  return true;
 }
 
 /** Add (or upsert) a key and make it ACTIVE. Persists config. */

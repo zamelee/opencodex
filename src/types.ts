@@ -478,7 +478,19 @@ export interface OcxProviderConfig {
    * entry so routing stays single-key; managed via /api/providers/keys. A legacy bare
    * `apiKey` seeds a one-entry pool on first management touch.
    */
-  apiKeyPool?: Array<{ id: string; key: string; label?: string; addedAt?: number; active?: boolean }>;
+  apiKeyPool?: Array<{
+    id: string;
+    key: string;
+    label?: string;
+    addedAt?: number;
+    active?: boolean;
+    /**
+     * Whether this entry may be picked by the automatic key scheduler / 429 failover.
+     * `undefined` means "participate" (the default for every pre-existing config).
+     * User intent — persisted, unlike the derived "expired" state.
+     */
+    autoSwitch?: boolean;
+  }>;
   /**
    * `active` flags the currently-active entry on the pool. Mirrors `provider.apiKey` after
    * saveConfig. Stage-only flips (`pendingKeyChange`) set `active` immediately so the GUI
@@ -678,5 +690,5 @@ export interface PendingKeyChange {
   keyId: string;
   key: string;
   ts: number;
-  reason: "5h-threshold" | "429";
+  reason: "5h-threshold" | "active-expired" | "429";
 }

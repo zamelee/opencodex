@@ -9,6 +9,7 @@
  * Modelled after src/codex/routing.ts cooldown logic but scoped to plain API-key pools.
  */
 import { saveConfig } from "../config";
+import { isKeyKnownExpired } from "./quota";
 import type { OcxConfig, OcxProviderConfig } from "../types";
 
 // ---- cooldown state (in-memory, same as codex/routing.ts) ----
@@ -150,10 +151,27 @@ export function rotateKeyOn429(
     }
   }
 
-  // Pick the next key that is NOT in cooldown
+  // Pick the next key that is NOT in cooldown.
+  //
+  // Two more filters apply on top of the cooldown table:
+  //   - a key whose plan EXPIRED cannot serve anything (the upstream rejects it), and
+  //     rotating onto it would persist a dead key as the active one — every later
+  //     request would then start with a doomed call. Its expiry comes from the quota
+  //     probe cache (no extra network round-trip here).
+  //   - a key the user opted OUT of automatic switching (`autoSwitch === false`).
+  //     If EVERY remaining key is opted out we still fall back to one of them below:
+  //     during a 429 storm, serving with a user-disabled key beats serving nothing.
   const currentIndex = currentEntry ? pool.indexOf(currentEntry) : -1;
-  for (let i = 1; i < pool.length; i++) {
-    const candidate = pool[(currentIndex + i) % pool.length]!;
+  const eligible = (candidate: { id: string; autoSwitch?: boolean }): boolean => {
+    if (isKeyInCooldown(providerName, candidate.id, now)) return false;
+    if (isKeyKnownExpired(providerName, candidate.id, now)) return false;
+    return true;
+  };
+  const optedIn = pool.filter(entry => entry.autoSwitch !== false && eligible(entry));
+  const fallbackPool = optedIn.length > 0 ? optedIn : pool.filter(eligible);
+  const startIdx = fallbackPool.findIndex(e => e.id === currentEntry?.id);
+  for (let i = 1; i <= fallbackPool.length; i++) {
+    const candidate = fallbackPool[(startIdx + i) % fallbackPool.length]!;
     if (!isKeyInCooldown(providerName, candidate.id, now)) {
       // Swap active key
       provider.apiKey = candidate.key;

@@ -19,6 +19,7 @@ OCX_SYNC_NATIVE_OPENAI_MODELS / OCX_PRESET）；日常 `python ocx-start.py` 不
   python ocx-start.py --stop              停服务并恢复原生 Codex
   python ocx-start.py --status            看状态
   python ocx-start.py --clean             清 dist / gui/dist
+ python ocx-start.py --upgrade           从 GitHub 拉最新 tag 升级（重建依赖 + GUI）
   python ocx-start.py --port 8080         改端口（默认 10100）
   python ocx-start.py --no-auto-bootstrap bun 缺失时不要自动装 bun，只打 err
   python ocx-start.py --hostname 0.0.0.0    bind 到所有网络接口（默认仅 127.0.0.1）
@@ -1181,6 +1182,158 @@ def run_clean() -> int:
     return 0
 
 
+def _git_run(*args: str) -> tuple[int, str]:
+    """Run a git command in ROOT. Returns (exit code, combined output)."""
+    try:
+        proc = subprocess.run(
+            ["git", *args],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except FileNotFoundError:
+        return 127, "git not found"
+    return proc.returncode, ((proc.stdout or "") + (proc.stderr or ""))
+
+
+def _version_key(tag: str) -> list[int]:
+    """Sort key for `vX.Y.Z` tags: numeric parts, non-numeric parts count as 0."""
+    parts: list[int] = []
+    for chunk in tag.lstrip("v").split("."):
+        digits = "".join(ch for ch in chunk if ch.isdigit())
+        parts.append(int(digits) if digits else 0)
+    return parts
+
+
+def _available_tags() -> list[str]:
+    rc, out = _git_run("tag", "--list", "v*")
+    if rc != 0:
+        return []
+    tags = [t.strip() for t in out.splitlines() if t.strip()]
+    return sorted(tags, key=_version_key)
+
+
+def _build_gui(force: bool = False) -> bool:
+    """Rebuild the GUI bundle. force=True rebuilds even when dist looks current."""
+    if not (ROOT / "gui" / "package.json").exists():
+        return True
+    if force:
+        shutil.rmtree(ROOT / "gui" / "dist", ignore_errors=True)
+    return ensure_gui_built()
+
+
+def run_upgrade(port: int) -> int:
+    """Upgrade this checkout to the newest tag published on the GitHub remote.
+
+    Flow: fetch tags -> pick target -> back up local edits as a patch -> hard checkout
+    the tag -> reinstall deps -> rebuild the GUI -> offer to restart the proxy.
+
+    The Codex config (~/.codex) and the opencodex config (~/.opencodex) are NOT
+    touched: only the source tree under ROOT changes.
+    """
+    if not (ROOT / ".git").exists():
+        print("[err] 当前目录不是 git clone，无法自动升级。", file=sys.stderr)
+        return 1
+
+    rc, out = _git_run("rev-parse", "--abbrev-ref", "HEAD")
+    if rc != 0:
+        print("[err] 不是 git 仓库。", file=sys.stderr)
+        return 1
+    current_branch = out.strip()
+    rc, out = _git_run("rev-parse", "--short", "HEAD")
+    current_sha = out.strip()
+    print(f"[upgrade] 当前版本: {current_branch} @ {current_sha}", file=sys.stderr)
+
+    print("[upgrade] 从远端拉取 tag ...", file=sys.stderr)
+    rc, out = _git_run("fetch", "--tags", "origin")
+    if rc != 0:
+        print(f"[err] git fetch 失败（检查网络 / remote）：{out.strip()[:200]}", file=sys.stderr)
+        return 1
+
+    tags = _available_tags()
+    if not tags:
+        print("[err] 没有可用 tag。", file=sys.stderr)
+        return 1
+    latest = tags[-1]
+    print(f"[upgrade] 可用 tag: {', '.join(tags[-5:])}", file=sys.stderr)
+    print(f"[upgrade] 最新: {latest}", file=sys.stderr)
+
+    target = latest
+    if len(tags) > 1:
+        try:
+            ans = input(f"  升级到哪个 tag？[{latest}] > ").strip()
+        except (EOFError, KeyboardInterrupt):
+            ans = ""
+        if ans:
+            target = ans if ans in tags else latest
+            if ans not in tags:
+                print(f"  [warn] 未知 tag {ans}，改用 {latest}", file=sys.stderr)
+
+    rc, out = _git_run("rev-parse", "--short", target)
+    if rc != 0:
+        print(f"[err] tag {target} 不存在。", file=sys.stderr)
+        return 1
+    target_sha = out.strip()
+    if target_sha == current_sha:
+        print(f"[upgrade] 已经是 {target}（{target_sha}），无需升级。", file=sys.stderr)
+        return 0
+
+    rc, out = _git_run("status", "--porcelain")
+    dirty = [line for line in out.splitlines() if line.strip()]
+    if dirty:
+        print(f"[upgrade] 检测到 {len(dirty)} 处本地改动（会被丢弃）：", file=sys.stderr)
+        for line in dirty[:10]:
+            print("   ", line, file=sys.stderr)
+        if len(dirty) > 10:
+            print(f"    ... 还有 {len(dirty) - 10} 处", file=sys.stderr)
+        try:
+            ans = input("  先备份成 patch 再继续？[y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            ans = "n"
+        if ans == "y":
+            stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+            backup = ROOT.parent / f"opencodex-backup-{stamp}.patch"
+            try:
+                proc = subprocess.run(
+                    ["git", "diff"], cwd=str(ROOT), capture_output=True, text=True,
+                    encoding="utf-8", errors="replace",
+                )
+                backup.write_text(proc.stdout or "", encoding="utf-8")
+                print(f"[upgrade] 已备份到 {backup}", file=sys.stderr)
+            except OSError as exc:
+                print(f"[err] 备份失败：{exc}", file=sys.stderr)
+                return 1
+        else:
+            print("[upgrade] 已取消。", file=sys.stderr)
+            return 1
+
+    print(f"[upgrade] 切换到 {target} ...", file=sys.stderr)
+    rc, out = _git_run("checkout", "-f", target)
+    if rc != 0:
+        print(f"[err] git checkout 失败：{out.strip()[:300]}", file=sys.stderr)
+        return 1
+    print(f"[upgrade] 已切到 {target}（{target_sha}）", file=sys.stderr)
+
+    print("[upgrade] 安装依赖 ...", file=sys.stderr)
+    ensure_deps_installed()
+
+    print("[upgrade] 重建 GUI ...", file=sys.stderr)
+    if not _build_gui(force=True):
+        print("[warn] GUI 构建失败，服务仍可用（GUI 可能是旧版）。", file=sys.stderr)
+
+    print(f"[upgrade] 完成。回滚命令：git -C {ROOT} checkout -f {current_sha}", file=sys.stderr)
+    try:
+        ans = input("  现在重启服务？[y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        ans = "n"
+    if ans == "y":
+        run_stop(port)
+        return run_background(port)
+    print("[upgrade] 请重新运行本脚本（或用 [2] 停止 → [1] 启动）以加载新版本。", file=sys.stderr)
+    return 0
+
 def parse_bool_arg(v: str | None) -> bool | None:
     if v is None:
         return None
@@ -1516,6 +1669,7 @@ def main_menu(port: int, cli_overrides: dict | None = None, no_bootstrap: bool =
             print("    [3] 查看状态  (proxy status)")
             print("    [4] 配置 init  (首次安装 / 重新 init)")
             print("    [5] 清理 dist  (gui/dist + dist)")
+            print("    [6] 升级  (从 GitHub 拉最新 tag 并重建)")
             print("    [0] 退出")
         else:
             print("  动作 (out-of-tree，尚未 init):")
@@ -1550,6 +1704,12 @@ def main_menu(port: int, cli_overrides: dict | None = None, no_bootstrap: bool =
         if c == "5":
             run_clean()
             continue
+        if c == "6":
+            if not in_tree:
+                print("  out-of-tree 环境下没有 git clone，无法升级。")
+                continue
+            run_upgrade(port)
+            continue
         if c in ("1", "s", ""):
             if not in_tree:
                 # Out-of-tree: bootstrap (clone + install + init + background)
@@ -1557,7 +1717,7 @@ def main_menu(port: int, cli_overrides: dict | None = None, no_bootstrap: bool =
                 return rc
             return _menu_action_start(port, cli_overrides or {}, no_bootstrap, in_tree)
         # Unrecognized key: show hint, loop back.
-        print(f"  未识别的选项：{c!r}。按上面列表选 [0-5]。", file=sys.stderr)
+        print(f"  未识别的选项：{c!r}。按上面列表选 [0-6]。", file=sys.stderr)
 
 
 def build_cli_overrides(args: argparse.Namespace) -> dict:
@@ -1595,6 +1755,8 @@ def main() -> int:
     parser.add_argument("--stop", action="store_true", help="停服务")
     parser.add_argument("--status", action="store_true", help="看状态")
     parser.add_argument("--clean", action="store_true", help="清 dist / gui/dist")
+    parser.add_argument("--upgrade", action="store_true",
+                        help="从 GitHub 拉最新 tag 升级本 checkout（重建依赖 + GUI）")
     parser.add_argument("--port", type=int, default=10100, help="端口（默认 10100）")
     parser.add_argument("--no-auto-bootstrap", action="store_true",
                         help="bun 缺失时不要自动安装，只打 err")
@@ -1624,6 +1786,7 @@ def main() -> int:
     if ns.stop:    return run_stop(ns.port)
     if ns.status:  return run_status()
     if ns.clean:   return run_clean()
+    if ns.upgrade: return run_upgrade(ns.port)
     if ns.init:    return run_init()
     if ns.init_and_start:
         if is_initialized():

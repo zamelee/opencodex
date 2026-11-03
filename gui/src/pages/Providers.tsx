@@ -43,7 +43,7 @@ interface Config {
 interface OAuthStatus { loggedIn: boolean; email?: string; error?: string; done?: boolean }
 interface ProviderQuotaReport { provider: string; quota: AccountQuota; source: string; updatedAt: number }
 interface OAuthAccount { id: string; email?: string; active: boolean; needsReauth?: boolean; expiresAt?: number }
-interface ApiKeyEntry { id: string; label?: string; masked: string; active: boolean }
+interface ApiKeyEntry { id: string; label?: string; masked: string; active: boolean; autoSwitch?: boolean }
 interface KeyScheduleEvent { ts: number; fromId: string; toId: string; reason: string; fromFiveHourEst?: number; toFiveHourEst?: number; fiveHourResetAt?: number }
 interface KeyScheduleState { enabled: boolean; threshold: number; activeId: string | null; nextUpId: string | null; events: KeyScheduleEvent[] }
 
@@ -289,6 +289,23 @@ export default function Providers({ apiBase }: { apiBase: string }) {
       fetchKeyPools(Object.keys(keyPools));
       fetchConfig();
       fetchProviderQuotas(true);
+    }
+  };
+
+  /** Toggle whether a pool entry takes part in automatic key switching (user intent). */
+  const toggleAutoSwitch = async (provider: string, entry: ApiKeyEntry, enabled: boolean) => {
+    const res = await fetch(`${apiBase}/api/providers/keys/auto-switch`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: provider, id: entry.id, enabled }),
+    });
+    if (res.ok) {
+      notify(t(enabled ? "prov.keyAutoSwitchEnabled" : "prov.keyAutoSwitchDisabled", { key: entry.label ?? entry.masked }), true);
+      fetchKeyPools(Object.keys(keyPools));
+      fetchProviderQuotas(true);
+    } else {
+      const data = await res.json().catch(() => ({}));
+      notify(data.error || t("prov.keyAutoSwitchFail"), false);
     }
   };
 
@@ -1160,6 +1177,8 @@ export default function Providers({ apiBase }: { apiBase: string }) {
                               index={idx}
                               active={entry.active}
                               nextUp={keySched?.nextUpId === entry.id}
+                              autoSwitch={entry.autoSwitch !== false}
+                              onToggleAutoSwitch={enabled => { void toggleAutoSwitch(name, entry, enabled); }}
                               onSwitch={entry.active ? undefined : onSwitch}
                               onRemove={onRemove}
                               {...(revealedKeys[name]?.[entry.id] !== undefined ? { revealedKey: revealedKeys[name]![entry.id]! } : {})}

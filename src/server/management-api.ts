@@ -1097,6 +1097,25 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
     clearKeyScheduleState(name); // manual key management resets scheduler probe/local state
     return jsonResponse({ ok: true, name, activeId: body.id });
   }
+  if (url.pathname === "/api/providers/keys/auto-switch" && req.method === "PUT") {
+    // Opt a pool entry in / out of the automatic key rotation. Persisted user intent —
+    // independent from the derived "expired" state (a renewed key returns on its own).
+    const body = await req.json().catch(() => ({})) as { name?: string; id?: string; enabled?: boolean };
+    const name = (body.name ?? "").trim();
+    if (!name || !isValidProviderName(name) || !hasOwnProvider(config.providers, name)) return jsonResponse({ error: "unknown provider" }, 404);
+    if (!body.id) return jsonResponse({ error: "missing id" }, 400);
+    if (typeof body.enabled !== "boolean") return jsonResponse({ error: "enabled must be a boolean" }, 400);
+    const { setProviderApiKeyAutoSwitch } = await import("../providers/api-keys");
+    if (!setProviderApiKeyAutoSwitch(config, name, body.id, body.enabled)) return jsonResponse({ error: "key not found" }, 404);
+    const { clearProviderQuotaCache, clearKeyExpiryRegistry } = await import("../providers/quota");
+    clearProviderQuotaCache();
+    clearKeyExpiryRegistry(name);
+    const { clearKeyCooldowns } = await import("../providers/key-failover");
+    clearKeyCooldowns(name);
+    const { clearKeyScheduleState } = await import("../providers/key-scheduler");
+    clearKeyScheduleState(name);
+    return jsonResponse({ ok: true, name, id: body.id, autoSwitch: body.enabled });
+  }
   if (url.pathname === "/api/providers/keys" && req.method === "DELETE") {
     const name = (url.searchParams.get("name") ?? "").trim();
     const id = url.searchParams.get("id") ?? "";
@@ -1106,8 +1125,9 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
     if (!removeProviderApiKey(config, name, id)) return jsonResponse({ error: "key not found" }, 404);
     const { clearModelCache } = await import("../codex/model-cache");
     clearModelCache(name);
-    const { clearProviderQuotaCache } = await import("../providers/quota");
+    const { clearProviderQuotaCache, clearKeyExpiryRegistry } = await import("../providers/quota");
     clearProviderQuotaCache();
+    clearKeyExpiryRegistry(name);
     const { clearKeyCooldowns } = await import("../providers/key-failover");
     clearKeyCooldowns(name); // manual key management resets 429 cooldown state
     const { clearKeyScheduleState } = await import("../providers/key-scheduler");

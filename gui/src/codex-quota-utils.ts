@@ -4,6 +4,10 @@ export interface KeyQuota {
   label?: string;
   masked: string;
   active: boolean;
+  /** Derived from the upstream `expires_at`: the plan is over, the key cannot serve. */
+  expired?: boolean;
+  /** User intent: false when the key was opted out of automatic switching. */
+  autoSwitch?: boolean;
   weeklyPercent?: number;
   weeklyResetAt?: number;
   fiveHourPercent?: number;

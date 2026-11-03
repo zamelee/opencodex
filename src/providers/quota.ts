@@ -25,6 +25,14 @@ export interface ProviderQuotaKey {
   label?: string;
   masked: string;
   active: boolean;
+  /**
+   * DERIVED, never persisted: the upstream says this key's plan/subscription is over
+   * (`expires_at` in the past). Renewing the plan upstream flips this back to false on
+   * the next probe — the key then re-enters the automatic rotation on its own.
+   */
+  expired?: boolean;
+  /** User intent: false when the key was opted out of automatic switching. */
+  autoSwitch?: boolean;
   fiveHourPercent?: number;
   fiveHourResetAt?: number;
   weeklyPercent?: number;
@@ -146,6 +154,36 @@ function isMinimaxChatReverseProxy(name: string, provider: OcxProviderConfig): b
   // entry to point at both so each can be probed/inspected independently. Keep detection
   // broad so both providers pick up the minimax quota polling path.
   return base.includes("minnimax.chat") || base.includes("m.aiio.chat");
+}
+
+/**
+ * Last known expiry per (provider, keyId), kept so the 429 failover path can skip keys
+ * whose plan is over WITHOUT doing a network probe of its own. Populated by
+ * `probeMinimaxKeyQuotas`; entries are removed when a key disappears from the pool.
+ */
+const keyExpiryRegistry = new Map<string, Map<string, number>>();
+
+function registryKey(providerName: string, keyId: string): string {
+  return `${providerName}\u0000${keyId}`;
+}
+
+/**
+ * True when the last probe told us this key's plan is expired. Stale-but-true is the
+ * safe direction: an expired key is dead anyway, so skipping it costs nothing, while
+ * skipping a live key would break the rotation.
+ */
+export function isKeyKnownExpired(providerName: string, keyId: string, now = Date.now()): boolean {
+  const expiresAt = keyExpiryRegistry.get(providerName)?.get(keyId);
+  return expiresAt !== undefined && expiresAt <= now;
+}
+
+/** Drop cached expiry rows for a provider (manual key management / provider removal). */
+export function clearKeyExpiryRegistry(providerName?: string): void {
+  if (!providerName) {
+    keyExpiryRegistry.clear();
+    return;
+  }
+  keyExpiryRegistry.delete(providerName);
 }
 
 export { isMinimaxChatReverseProxy };
@@ -388,7 +426,7 @@ async function maybeFetchProviderQuota(
  * and the whole call returns null only if zero keys returned data.
  */
 async function fetchMinimaxChatQuota(provider: string, prov: OcxProviderConfig): Promise<ProviderQuotaReport | null> {
-  const keys = await probeMinimaxKeyQuotas(prov);
+  const keys = await probeMinimaxKeyQuotas(prov, provider);
   if (!keys) return null;
 
   // Provider-level rollup mirrors the ACTIVE key (or the only key).
@@ -431,7 +469,7 @@ async function fetchMinimaxChatQuota(provider: string, prov: OcxProviderConfig):
  * scheduler (key-scheduler.ts), which caches results itself. Returns null when zero
  * keys returned usable data.
  */
-export async function probeMinimaxKeyQuotas(prov: OcxProviderConfig): Promise<ProviderQuotaKey[] | null> {
+export async function probeMinimaxKeyQuotas(prov: OcxProviderConfig, providerName?: string): Promise<ProviderQuotaKey[] | null> {
   // Strip both trailing slashes and a single trailing `/v1` so the probe
   // works regardless of whether the user typed `https://m.aiio.chat/v1` or
   // `https://m.aiio.chat` — without this, `/v1/usage` would double up to
@@ -440,14 +478,20 @@ export async function probeMinimaxKeyQuotas(prov: OcxProviderConfig): Promise<Pr
   if (!baseUrl) return null;
 
   // Collect all keys: prefer apiKeyPool (multi-key), fall back to legacy single apiKey.
-  const pool: Array<{ key: string; id: string; label?: string; active: boolean }> = [];
+  const pool: Array<{ key: string; id: string; label?: string; active: boolean; autoSwitch?: boolean }> = [];
   if (prov.apiKeyPool && prov.apiKeyPool.length > 0) {
     const activeKey = prov.apiKey ?? prov.apiKeyPool[0]?.key ?? "";
     for (const entry of prov.apiKeyPool) {
-      pool.push({ key: entry.key, id: entry.id, label: entry.label, active: entry.key === activeKey });
+      pool.push({
+        key: entry.key,
+        id: entry.id,
+        label: entry.label,
+        active: entry.key === activeKey,
+        autoSwitch: entry.autoSwitch !== false,
+      });
     }
   } else if (prov.apiKey) {
-    pool.push({ key: prov.apiKey, id: sha8(prov.apiKey), active: true });
+    pool.push({ key: prov.apiKey, id: sha8(prov.apiKey), active: true, autoSwitch: true });
   }
   if (pool.length === 0) return null;
 
@@ -470,11 +514,19 @@ export async function probeMinimaxKeyQuotas(prov: OcxProviderConfig): Promise<Pr
     }
   }));
   const keys = perKey.filter((k): k is ProviderQuotaKey => k !== null);
+  // Publish the expiry table so the 429 failover path can skip dead keys without its own probe.
+  if (providerName) {
+    const table = new Map<string, number>();
+    for (const k of keys) {
+      if (k.expiresAt !== undefined) table.set(k.id, k.expiresAt);
+    }
+    keyExpiryRegistry.set(providerName, table);
+  }
   return keys.length === 0 ? null : keys;
 }
 
 function parseMinimaxUsageForKey(
-  entry: { key: string; id: string; label?: string; active: boolean },
+  entry: { key: string; id: string; label?: string; active: boolean; autoSwitch?: boolean },
   payload: Record<string, unknown>,
 ): ProviderQuotaKey | null {
   const rolling = payload["rolling_5h"];
@@ -501,6 +553,9 @@ function parseMinimaxUsageForKey(
     id: entry.id,
     masked: maskApiKeyForDisplay(entry.key),
     active: entry.active,
+    ...(entry.autoSwitch !== undefined ? { autoSwitch: entry.autoSwitch } : {}),
+    // Derived from the upstream `expires_at`; renewed plans flip it back automatically.
+    ...(expiresAt !== undefined ? { expired: expiresAt <= Date.now() } : {}),
     source: "minimax-chat:/v1/usage",
     updatedAt: Date.now(),
     ...(entry.label !== undefined ? { label: entry.label } : {}),
