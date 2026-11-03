@@ -66,6 +66,17 @@ async function waitUntil(fn: () => Promise<boolean>, deadlineMs: number): Promis
   return false;
 }
 
+/** Poll until `fn` returns a non-empty string (or the deadline passes). */
+async function waitForText(fn: () => string, deadlineMs: number): Promise<string> {
+  const end = Date.now() + deadlineMs;
+  while (Date.now() < end) {
+    const text = fn();
+    if (text) return text;
+    await Bun.sleep(250);
+  }
+  return "";
+}
+
 describe.skipIf(!runnable)("ocx launcher graceful shutdown", () => {
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
     test(
@@ -80,6 +91,22 @@ describe.skipIf(!runnable)("ocx launcher graceful shutdown", () => {
         const codexConfig = join(home, "config.toml");
         writeFileSync(codexConfig, 'model = "gpt-5.1"\n');
 
+        // opencodex is a pure translation relay by default (enableCodexLauncherMode=false), so
+        // `ocx start` would NOT touch the Codex config at all — and there would be nothing to
+        // restore on shutdown. Opt into launcher mode explicitly through the opencodex config
+        // (OPENCODEX_HOME == home here) so the proxy injects config.toml on start and restores it
+        // again on graceful shutdown.
+        writeFileSync(join(home, "config.json"), JSON.stringify({
+          port,
+          defaultProvider: "openai",
+          providers: {
+            openai: { adapter: "openai-chat", baseUrl: "http://127.0.0.1:1/v1", apiKey: "sk-test-shutdown" },
+          },
+          enableCodexLauncherMode: true,
+          syncRoutedModels: false,
+          syncNativeOpenaiModels: false,
+        }), "utf8");
+
         const child = spawn("node", [BIN_OCX, "start", "--port", String(port)], {
           stdio: "ignore",
           env: { ...process.env, OPENCODEX_HOME: home, CODEX_HOME: home },
@@ -93,7 +120,13 @@ describe.skipIf(!runnable)("ocx launcher graceful shutdown", () => {
         const up = await waitUntil(() => healthy(port), 20_000);
         expect(up).toBe(true);
         expect(existsSync(join(home, "ocx.pid"))).toBe(true);
-        const injected = readFileSync(codexConfig, "utf8");
+        // The injection happens as part of the post-start Codex sync, which can land a tick
+        // after the health endpoint answers — wait for the marker instead of racing it.
+        const injected = await waitForText(() => {
+          const text = readFileSync(codexConfig, "utf8");
+          return text.includes("# Auto-injected by opencodex") ? text : "";
+        }, 20_000);
+        expect(injected).not.toBe("");
         expect(injected).toContain("# Auto-injected by opencodex");
         expect(injected).toContain(`openai_base_url = "http://127.0.0.1:${port}/v1"`);
         expect(injected).not.toContain("model_providers.opencodex");

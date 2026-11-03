@@ -22,10 +22,10 @@
  * touch the real ~/.codex or ~/.opencodex on the dev machine.
  */
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, readdirSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, readdirSync, mkdirSync, realpathSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
@@ -415,9 +415,30 @@ describe("Phase 5 launcher-mode flags", () => {
     expect(r.status).toBe(0);
     expect(r.data?.added).toBe(0);
     // Path resolves under CODEX_HOME (absolute), pointing at the user-supplied catalog.json.
-    // Case-insensitive on Windows where tmpdir() returns C:\\Windows\\TEMP but the filesystem
-    // canonicalizes to Temp. Normalize both sides before substring match.
-    const norm = (s: string) => process.platform === "win32" ? s.toLowerCase() : s;
+    // On Windows the two sides can spell the same directory differently: tmpdir() may hand back
+    // the 8.3 short form (C:\\Users\\RUNNER~1\\...) while the filesystem canonicalizes to the long
+    // form (C:\\Users\\runneradmin\\...). realpath() expands the short form, lowercasing keeps
+    // the comparison case-insensitive.
+    const norm = (s: string) => {
+      const lower = process.platform === "win32" ? s.toLowerCase() : s;
+      // The tail of the path may not exist yet (the sandbox home is created lazily), so walk up
+      // to the closest existing ancestor, canonicalize that, and re-attach the missing segments.
+      const tail: string[] = [];
+      let current = lower;
+      while (current.length > 0) {
+        try {
+          const real = realpathSync.native(current);
+          const joined = tail.length ? join(real, ...tail.reverse()) : real;
+          return process.platform === "win32" ? joined.toLowerCase() : joined;
+        } catch {
+          const parent = dirname(current);
+          if (parent === current) break;
+          tail.push(basename(current));
+          current = parent;
+        }
+      }
+      return lower;
+    };
     expect(norm(r.data?.path ?? "")).toContain("catalog.json");
     expect(norm(r.data?.path ?? "")).toContain(norm(sb.codexHome));
   });
