@@ -1,3 +1,5 @@
+import { useState } from "react";
+import { copyToClipboard } from "../clipboard";
 import type { TFn } from "../i18n";
 import type { KeyQuota } from "../codex-quota-utils";
 import { formatDate } from "../codex-quota-utils";
@@ -115,6 +117,14 @@ export default function KeyPoolPanel({
   const showActions = !only && (onSwitch || onRemove);
   const participates = autoSwitch !== false;
   const isExpired = (expired ?? quota.expired) === true;
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+
+  const handleCopyKey = async () => {
+    if (!revealedKey) return;
+    const ok = await copyToClipboard(revealedKey);
+    setCopyState(ok ? "copied" : "failed");
+    window.setTimeout(() => setCopyState("idle"), 1600);
+  };
 
   return (
     <div
@@ -168,6 +178,7 @@ export default function KeyPoolPanel({
           alignItems: "center",
           gap: 6,
           minWidth: 0,
+          overflow: "hidden",
           gridRow: 1,
           gridColumn: 3,
         }}
@@ -177,6 +188,13 @@ export default function KeyPoolPanel({
           <span
             className="prov-key-revealed"
             data-testid="key-revealed"
+            style={{
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+              minWidth: 0,
+              flex: "0 1 auto",
+            }}
           >
             {revealedKey}
           </span>
@@ -188,6 +206,7 @@ export default function KeyPoolPanel({
               textOverflow: "ellipsis",
               whiteSpace: "nowrap",
               minWidth: 0,
+              flex: "0 1 auto",
             }}
           >
             {quota.masked}
@@ -205,9 +224,28 @@ export default function KeyPoolPanel({
                 : t("prov.keyRevealAria", { key: quota.label ?? quota.masked })
             }
             data-testid={isRevealed ? "key-hide" : "key-reveal"}
-            style={{ fontSize: 11 }}
+            style={{ fontSize: 11, flexShrink: 0 }}
           >
             {isRevealed ? t("prov.keyHide") : t("prov.keyReveal")}
+          </button>
+        ) : null}
+        {isRevealed ? (
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            onClick={handleCopyKey}
+            title={
+              copyState === "copied"
+                ? t("prov.keyCopied")
+                : copyState === "failed"
+                  ? t("prov.keyCopyFail")
+                  : t("prov.keyCopyTitle")
+            }
+            aria-label={t("prov.keyCopyAria", { key: quota.label ?? quota.masked })}
+            data-testid="key-copy"
+            style={{ fontSize: 11, flexShrink: 0 }}
+          >
+            {copyState === "copied" ? t("prov.keyCopied") : t("prov.keyCopy")}
           </button>
         ) : null}
       </span>
@@ -218,7 +256,7 @@ export default function KeyPoolPanel({
           display: "inline-flex",
           justifyContent: "flex-start",
           gridRow: 1,
-          gridColumn: 3,
+          gridColumn: 4,
         }}
       >
         {active ? (
@@ -244,8 +282,9 @@ export default function KeyPoolPanel({
             display: "inline-flex",
             gap: 6,
             alignItems: "center",
+            justifyContent: "flex-end",
             gridRow: 1,
-            gridColumn: 4,
+            gridColumn: 5,
           }}
         >
           {showQuotaProbe ? (
