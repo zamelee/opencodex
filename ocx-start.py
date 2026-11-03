@@ -252,6 +252,19 @@ def health_ok(port: int) -> bool:
         return False
 
 
+def _panel_version() -> str:
+    """Version shown in the panel header — read from package.json, never hardcoded
+    (a hardcoded string kept showing v2.7.8 after the remote had moved on)."""
+    try:
+        raw = (ROOT / "package.json").read_text(encoding="utf-8")
+        version = json.loads(raw).get("version")
+        if isinstance(version, str) and version.strip():
+            return version.strip()
+    except (OSError, ValueError):
+        pass
+    return "unknown"
+
+
 def show_state(port: int, effective_port: int | None = None) -> None:
     """Print the status card: config / port / mode / CodexPlusPlus / uptime.
 
@@ -270,7 +283,7 @@ def show_state(port: int, effective_port: int | None = None) -> None:
 
     print()
     print("=" * 60)
-    print("  opencodex 控制面板  v2.7.8")
+    print(f"  opencodex 控制面板  v{_panel_version()}")
     print("=" * 60)
     print(f"  配置       : {CONFIG}  {"已初始化" if init else "未初始化"}")
     if actual_port != port:
