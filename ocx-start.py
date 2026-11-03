@@ -59,6 +59,11 @@ ROOT   = Path(__file__).resolve().parent
 CONFIG = Path.home() / ".opencodex" / "config.json"
 BUN    = "bun"
 
+# Default proxy offered when a direct `git fetch` fails. Git cannot follow the Windows
+# system proxy, so it has to be named - but only for the one command, never globally.
+# Override with the OCX_GIT_PROXY environment variable.
+DEFAULT_GIT_PROXY = "http://127.0.0.1:10808"
+
 # --- AVX detection + node fallback (Patch 1) -------------------------------------
 # Bun v1.3.x on Windows without AVX runs the no_avx compat path, which can crash after
 # sustained socket pool use (~3-4h on Windows 10 19H1 + older CPU). Detect AVX once at
@@ -1285,13 +1290,31 @@ def run_upgrade(port: int) -> int:
         # a machine without the proxy app running must not be left with a dead config.
         print(f"[upgrade] 直连拉取失败：{out.strip()[:200]}", file=sys.stderr)
         print("         （git 不跟随 Windows 系统代理；代理只在本次命令里临时生效，不写全局配置）", file=sys.stderr)
+        default_proxy = os.environ.get("OCX_GIT_PROXY", "").strip() or DEFAULT_GIT_PROXY
         try:
-            proxy = input("  有代理就填地址（如 http://127.0.0.1:10808），回车=重试直连 > ").strip()
+            answer = input(
+                f"  有代理就填地址（回车用默认 {default_proxy}，输入 - 直连）> "
+            ).strip()
         except (EOFError, KeyboardInterrupt):
-            proxy = ""
-        rc, out = _git_run_with_proxy(proxy or None, "fetch", "--tags", "origin")
+            answer = ""
+        if answer == "-":
+            proxy = None
+        elif answer:
+            proxy = answer
+        else:
+            proxy = default_proxy
+        rc, out = _git_run_with_proxy(proxy, "fetch", "--tags", "origin")
+        if rc != 0 and proxy:
+            # The default proxy may simply not be running right now - offer the direct path.
+            print(f"[upgrade] 走代理 {proxy} 仍然失败：{out.strip()[:160]}", file=sys.stderr)
+            try:
+                again = input("  代理可能没开。输入 - 改用直连重试 > ").strip()
+            except (EOFError, KeyboardInterrupt):
+                again = ""
+            if again == "-":
+                rc, out = _git_run("fetch", "--tags", "origin")
         if rc != 0:
-            print(f"[err] git fetch 仍然失败：{out.strip()[:200]}", file=sys.stderr)
+            print(f"[err] git fetch 失败：{out.strip()[:200]}", file=sys.stderr)
             return 1
 
     tags = _available_tags()
