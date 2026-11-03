@@ -62,7 +62,9 @@ BUN    = "bun"
 # Default proxy offered when a direct `git fetch` fails. Git cannot follow the Windows
 # system proxy, so it has to be named - but only for the one command, never globally.
 # Override with the OCX_GIT_PROXY environment variable.
-DEFAULT_GIT_PROXY = "http://127.0.0.1:10808"
+# 10809 is the HTTP/mixed port of the usual client (v2rayN and friends);
+# 10808 is its SOCKS port, which git cannot use for HTTPS anyway.
+DEFAULT_GIT_PROXY = "http://127.0.0.1:10809"
 
 # --- AVX detection + node fallback (Patch 1) -------------------------------------
 # Bun v1.3.x on Windows without AVX runs the no_avx compat path, which can crash after
