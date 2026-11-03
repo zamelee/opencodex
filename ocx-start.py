@@ -1186,12 +1186,43 @@ def _git_run(*args: str) -> tuple[int, str]:
     """Run a git command in ROOT. Returns (exit code, combined output)."""
     try:
         proc = subprocess.run(
-            ["git", *args],
+            ["git", "-c", "http.version=HTTP/1.1", *args],
             cwd=str(ROOT),
             capture_output=True,
             text=True,
             encoding="utf-8",
             errors="replace",
+        )
+    except FileNotFoundError:
+        return 127, "git not found"
+    return proc.returncode, ((proc.stdout or "") + (proc.stderr or ""))
+
+
+def _git_run_with_proxy(proxy: str | None, *args: str) -> tuple[int, str]:
+    """Run git with an optional proxy that lives ONLY in this process.
+
+    Git does NOT follow the Windows system proxy (its HTTPS stack is SChannel, the
+    system proxy is WinHTTP), so a proxy has to be named explicitly. To avoid
+    stranding the user with a dead global `http.proxy` on a machine where the proxy
+    app is not running, the proxy is injected as GIT_CONFIG_* environment variables:
+    highest precedence, this process only, nothing written to disk.
+    """
+    env = dict(os.environ)
+    if proxy:
+        env["GIT_CONFIG_COUNT"] = "2"
+        env["GIT_CONFIG_KEY_0"] = "http.proxy"
+        env["GIT_CONFIG_VALUE_0"] = proxy
+        env["GIT_CONFIG_KEY_1"] = "https.proxy"
+        env["GIT_CONFIG_VALUE_1"] = proxy
+    try:
+        proc = subprocess.run(
+            ["git", "-c", "http.version=HTTP/1.1", *args],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
         )
     except FileNotFoundError:
         return 127, "git not found"
@@ -1249,8 +1280,19 @@ def run_upgrade(port: int) -> int:
     print("[upgrade] 从远端拉取 tag ...", file=sys.stderr)
     rc, out = _git_run("fetch", "--tags", "origin")
     if rc != 0:
-        print(f"[err] git fetch 失败（检查网络 / remote）：{out.strip()[:200]}", file=sys.stderr)
-        return 1
+        # Straight connection failed. Git cannot follow the Windows system proxy, so the
+        # proxy has to be named - but only for THIS attempt, never written to disk:
+        # a machine without the proxy app running must not be left with a dead config.
+        print(f"[upgrade] 直连拉取失败：{out.strip()[:200]}", file=sys.stderr)
+        print("         （git 不跟随 Windows 系统代理；代理只在本次命令里临时生效，不写全局配置）", file=sys.stderr)
+        try:
+            proxy = input("  有代理就填地址（如 http://127.0.0.1:10808），回车=重试直连 > ").strip()
+        except (EOFError, KeyboardInterrupt):
+            proxy = ""
+        rc, out = _git_run_with_proxy(proxy or None, "fetch", "--tags", "origin")
+        if rc != 0:
+            print(f"[err] git fetch 仍然失败：{out.strip()[:200]}", file=sys.stderr)
+            return 1
 
     tags = _available_tags()
     if not tags:
