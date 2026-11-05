@@ -100,6 +100,117 @@ function wrapForLog(response: Response, entries: RequestLogEntry[]): Response {
 }
 
 describe("web-search timeout runtime contracts", () => {
+  /**
+   * Regression coverage for the blind spot that killed thread 01a19af4.
+   *
+   * The sidecar loop is the only place a routed provider's non-2xx body is read. It used to
+   * report a bare `Provider error 400` with `code: null`, because:
+   *   - the anthropic adapter ships no `formatErrorBody` hook, so the upstream body was dropped;
+   *   - `jsonError` never classified the message, so the "prompt is too long" signal never
+   *     reached Codex.
+   * Without `context_length_exceeded`, Codex never enters its auto-compaction path and the turn
+   * dies instead of compacting — the brake never engages.
+   *
+   * These tests pin both halves: the reason survives, and it classifies as an overflow.
+   */
+  test("an upstream context overflow on the sidecar path is reported as context_length_exceeded", async () => {
+    let parserCalls = 0;
+    let sidecarCalls = 0;
+    globalThis.fetch = (async () => {
+      sidecarCalls++;
+      throw new Error("sidecar must not run");
+    }) as typeof fetch;
+
+    // The exact upstream shape seen on the wire (relay wraps the reason as a JSON string).
+    const upstreamBody = JSON.stringify({
+      error: {
+        type: "prompt_too_long",
+        message: JSON.stringify({
+          code: 11115,
+          msg: "prompt is too long: 3393866 tokens > 1048576 maximum",
+        }),
+      },
+    });
+
+    // No `formatErrorBody` hook — this is the anthropic adapter's situation.
+    const adapter: ProviderAdapter = {
+      name: "anthropic-like",
+      buildRequest: () => ({ url: "https://routed.test/v1", method: "POST", headers: {}, body: "{}" }),
+      fetchResponse: async () => new Response(upstreamBody, { status: 400 }),
+      async *parseStream() {
+        parserCalls++;
+        yield { type: "done" };
+      },
+      async parseResponse() {
+        parserCalls++;
+        return [{ type: "done" }];
+      },
+    };
+
+    const response = await runWithWebSearch(deps(adapter));
+    expect(response.status).toBe(400);
+    const body = await response.json() as {
+      error: { message: string; type: string; code: string | null };
+    };
+
+    // The reason survives — the operator can see WHAT the upstream said.
+    expect(body.error.message).toContain("prompt is too long");
+    expect(body.error.message).toContain("1048576");
+    // And it classifies, so Codex auto-compacts instead of dying.
+    expect(body.error.type).toBe("invalid_request_error");
+    expect(body.error.code).toBe("context_length_exceeded");
+
+    expect(parserCalls).toBe(0);
+    expect(sidecarCalls).toBe(0);
+  });
+
+  test("the sidecar path redacts secrets in an upstream error body", async () => {
+    globalThis.fetch = (async () => {
+      throw new Error("sidecar must not run");
+    }) as typeof fetch;
+
+    const upstreamBody = JSON.stringify({
+      error: {
+        type: "invalid_request_error",
+        message: "rejected key sk-abcdef1234567890 for this request",
+      },
+    });
+
+    const adapter: ProviderAdapter = {
+      name: "anthropic-like",
+      buildRequest: () => ({ url: "https://routed.test/v1", method: "POST", headers: {}, body: "{}" }),
+      fetchResponse: async () => new Response(upstreamBody, { status: 400 }),
+      async *parseStream() { yield { type: "done" }; },
+      async parseResponse() { return [{ type: "done" }]; },
+    };
+
+    const response = await runWithWebSearch(deps(adapter));
+    expect(response.status).toBe(400);
+    const raw = JSON.stringify(await response.json());
+    expect(raw).not.toContain("sk-abcdef1234567890");
+    expect(raw).toContain("[REDACTED]");
+  });
+
+  test("the sidecar path keeps a bare status when the body carries no usable detail", async () => {
+    globalThis.fetch = (async () => {
+      throw new Error("sidecar must not run");
+    }) as typeof fetch;
+
+    const adapter: ProviderAdapter = {
+      name: "anthropic-like",
+      buildRequest: () => ({ url: "https://routed.test/v1", method: "POST", headers: {}, body: "{}" }),
+      fetchResponse: async () => new Response("<html><body>502 Bad Gateway</body></html>", { status: 400 }),
+      async *parseStream() { yield { type: "done" }; },
+      async parseResponse() { return [{ type: "done" }]; },
+    };
+
+    const response = await runWithWebSearch(deps(adapter));
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      error: { message: "Provider error 400", type: "invalid_request_error", code: "invalid_request_error" },
+    });
+  });
+
   test("an erroring non-2xx body preserves provider status without leaking its stream failure", async () => {
     let parserCalls = 0;
     let formatterCalls = 0;
@@ -142,7 +253,7 @@ describe("web-search timeout runtime contracts", () => {
     expect(response.status).toBe(418);
     const body = await response.json();
     expect(body).toEqual({
-      error: { message: "Provider error 418", type: "upstream_error", code: null },
+      error: { message: "Provider error 418", type: "upstream_error", code: "upstream_error" },
     });
     expect(JSON.stringify(body)).not.toContain("provider-secret");
     expect(parserCalls).toBe(0);
@@ -172,7 +283,7 @@ describe("web-search timeout runtime contracts", () => {
     expect(response.status).toBe(418);
     const body = await response.json();
     expect(body).toEqual({
-      error: { message: "Provider error 418", type: "upstream_error", code: null },
+      error: { message: "Provider error 418", type: "upstream_error", code: "upstream_error" },
     });
     expect(JSON.stringify(body)).not.toContain("synchronous-provider-secret");
     expect(formatterCalls).toBe(0);
@@ -209,7 +320,7 @@ describe("web-search timeout runtime contracts", () => {
     const logged = wrapForLog(response, entries);
     const message = `Provider response-header timeout after ${connectTimeoutMs}ms during web-search`;
     expect(await logged.json()).toEqual({
-      error: { message, type: "upstream_error", code: null },
+      error: { message, type: "server_error", code: "upstream_server_error" },
     });
     expect(entries).toHaveLength(1);
     expect(entries[0]).toMatchObject({
@@ -391,8 +502,8 @@ describe("web-search timeout runtime contracts", () => {
     expect(await response.json()).toEqual({
       error: {
         message: `Provider response-header timeout after ${connectTimeoutMs}ms during web-search`,
-        type: "upstream_error",
-        code: null,
+        type: "server_error",
+        code: "upstream_server_error",
       },
     });
   }, 1_000);

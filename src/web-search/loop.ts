@@ -6,6 +6,8 @@ import { runWebSearch, type SidecarOutcome, type SidecarOutcomeRecorder, type Si
 import { clearableDeadline } from "../lib/abort";
 import { readBoundedResponseBody } from "../lib/bounded-body";
 import { fetchWithResetRetry } from "../lib/upstream-retry";
+import { classifyError } from "../lib/errors";
+import { providerErrorMessage, safeProviderErrorDetail } from "./error-detail";
 import { formatWebSearchResults } from "./format-result";
 import { parseStreamWithProgress, RoutedModelInactivityError, WebSearchStreamProtocolError } from "./progress-stream";
 import { WEB_SEARCH_TOOL_NAME } from "./synthetic-tool";
@@ -144,7 +146,13 @@ function forcedAnswerNudge(): OcxMessage {
 }
 
 function jsonError(status: number, message: string): Response {
-  return new Response(JSON.stringify({ error: { message, type: "upstream_error", code: null } }), {
+  // Classify before answering: the routed path (src/server/responses.ts) does the same via
+  // formatErrorResponse, and that classification is what turns a context overflow into
+  // `context_length_exceeded` — the signal Codex needs to auto-compact instead of dying.
+  // A sidecar error that skipped this left Codex with an unclassifiable `upstream_error`, so
+  // the turn ended with no recovery even though the upstream reason was a known overflow.
+  const classified = classifyError(status, "upstream_error", message);
+  return new Response(JSON.stringify({ error: { message, type: classified.type, code: classified.code } }), {
     status,
     headers: { "Content-Type": "application/json" },
   });
@@ -306,17 +314,29 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
           throw new LoopError(prepared.response.status, `Provider error ${prepared.response.status}`);
         }
         let formatted = "";
-        if (body.displaySafe && !body.truncated && body.text.trim() && prepared.responseAdapter.formatErrorBody) {
-          try {
-            formatted = prepared.responseAdapter.formatErrorBody(
-              prepared.response.status,
-              prepared.response.headers,
-              body.text,
-            ).trim();
-          } catch { /* formatter hooks are best-effort; unsafe raw text is never the fallback */ }
+        if (body.displaySafe && !body.truncated && body.text.trim()) {
+          if (prepared.responseAdapter.formatErrorBody) {
+            try {
+              formatted = prepared.responseAdapter.formatErrorBody(
+                prepared.response.status,
+                prepared.response.headers,
+                body.text,
+              ).trim();
+            } catch { /* formatter hooks are best-effort; unsafe raw text is never the fallback */ }
+          } else {
+            // No adapter formatter (only the Google family and Kiro ship one). Fall back to the
+            // generic allow-listed extractor so the reason survives instead of a bare status.
+            // Without this the client cannot tell an overflow from any other 400, and Codex
+            // never auto-compacts — the turn just dies.
+            try {
+              formatted = safeProviderErrorDetail(body.text) ?? "";
+            } catch { /* best-effort; a failed extraction yields no detail */ }
+          }
         }
-        const suffix = formatted ? `: ${formatted.slice(0, 400)}` : "";
-        throw new LoopError(prepared.response.status, `Provider error ${prepared.response.status}${suffix}`);
+        throw new LoopError(
+          prepared.response.status,
+          providerErrorMessage(prepared.response.status, formatted ? formatted.slice(0, 400) : undefined),
+        );
       }
       return prepared;
     } catch (error) {
