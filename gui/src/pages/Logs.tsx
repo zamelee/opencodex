@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { useI18n, LOCALES } from "../i18n";
 import { formatTokens } from "../format-tokens";
 import { statusCodeInfo } from "../status-codes";
@@ -38,6 +38,11 @@ interface LogEntry {
   usageStatus?: LogUsageStatus;
   usage?: UsageBreakdown;
   totalTokens?: number;
+  promptComposition?: {
+    totalChars: number;
+    estimatedTokens: number;
+    classes: Array<{ name: string; count: number; chars: number; estimatedTokens: number }>;
+  };
 }
 
 function tokensTitle(log: LogEntry): string | undefined {
@@ -210,6 +215,33 @@ export default function Logs({ apiBase }: { apiBase: string }) {
               {detail.upstreamError && (<><span className="muted">{t("logs.col.upstreamReason")}</span><span className="mono log-detail-break">{detail.upstreamError}</span></>)}
               <span className="muted">{t("logs.col.duration")}</span><span className="mono">{detail.durationMs}ms</span>
             </div>
+            {detail.promptComposition && (
+              <>
+                <div className="muted" style={{ fontSize: 12, margin: "12px 0 6px" }}>
+                  {t("logs.detailPromptComposition")}
+                </div>
+                <div className="log-detail-grid">
+                  <span className="muted">{t("logs.col.estimatedTokens")}</span>
+                  <span className="mono">
+                    ~{detail.promptComposition.estimatedTokens.toLocaleString(localeTag)}
+                    <span className="muted">
+                      {" "}· {detail.promptComposition.totalChars.toLocaleString(localeTag)} chars
+                    </span>
+                  </span>
+                  {detail.promptComposition.classes.map(c => (
+                    <Fragment key={c.name}>
+                      <span className="muted mono">{c.name}</span>
+                      <span className="mono">
+                        ~{c.estimatedTokens.toLocaleString(localeTag)}
+                        <span className="muted">
+                          {" "}· {c.count} · {c.chars.toLocaleString(localeTag)} chars
+                        </span>
+                      </span>
+                    </Fragment>
+                  ))}
+                </div>
+              </>
+            )}
             <div className="muted" style={{ fontSize: 12, margin: "12px 0 6px" }}>{t("logs.detailRaw")}</div>
             <pre className="log-detail-json">{JSON.stringify(detail, null, 2)}</pre>
           </div>

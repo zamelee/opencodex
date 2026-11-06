@@ -2266,7 +2266,11 @@ export function createAnthropicAdapter(provider: OcxProviderConfig, cacheRetenti
                   case "message_stop": {
                     if (heldMessageDelta !== null) flushHeldMessageDelta();
                     yield* emitDone();
-                    break;
+                    // message_stop is the terminal frame. Stop reading: an upstream that keeps
+                    // the SSE socket open (no EOF) would otherwise leave this generator open
+                    // forever, and a consumer that waits for the stream to end after `done`
+                    // (the web-search sidecar's post-terminal drain) would fail the turn.
+                    return;
                   }
                   case "error": {
                     const err = td.error as { message?: string } | undefined;
@@ -2351,7 +2355,9 @@ export function createAnthropicAdapter(provider: OcxProviderConfig, cacheRetenti
               case "message_stop": {
                 if (heldMessageDelta !== null) flushHeldMessageDelta();
                 yield* emitDone();
-                break;
+                // Terminal frame — see the EOF-tail branch above: stop reading so the
+                // generator always ends after `done`, even if the upstream never sends EOF.
+                return;
               }
               case "error": {
                 const err = data.error as { message?: string } | undefined;

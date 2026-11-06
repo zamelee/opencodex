@@ -43,6 +43,21 @@ export interface RequestLogContext {
   upstreamError?: string;
   /** HTTP status derived from a terminal `response.failed` SSE payload (429/401/503/etc.). */
   terminalHttpStatus?: number;
+  /**
+   * Upstream-side token composition of the request body the proxy actually put on the wire.
+   * Codex counts its own prompt in its own tokenizer; the upstream counts this body. The gap
+   * between the two is why a prompt can 400 with "prompt is too long" while Codex believes it
+   * is nowhere near its own auto-compact threshold. Measured per content class so the
+   * dominant class is visible instead of inferred.
+   */
+  promptComposition?: PromptCompositionSummary;
+}
+
+export interface PromptCompositionSummary {
+  totalChars: number;
+  estimatedTokens: number;
+  /** Per-class breakdown, sorted by estimated tokens (descending). */
+  classes: Array<{ name: string; count: number; chars: number; estimatedTokens: number }>;
 }
 
 export interface RequestLogEntry {
@@ -69,6 +84,8 @@ export interface RequestLogEntry {
   usageStatus: UsageStatus;
   usage?: OcxUsage;
   totalTokens?: number;
+  /** Upstream-side token composition of the outgoing request body (see RequestLogContext). */
+  promptComposition?: PromptCompositionSummary;
 }
 
 const requestLog: RequestLogEntry[] = [];
@@ -381,6 +398,7 @@ export function addFinalRequestLog(
     usageStatus,
     ...(loggedUsage ? { usage: loggedUsage } : {}),
     ...(totalTokens !== undefined ? { totalTokens } : {}),
+    ...(logCtx.promptComposition ? { promptComposition: logCtx.promptComposition } : {}),
   });
   if (isUsageDebugEnabled()) {
     appendUsageDebug({

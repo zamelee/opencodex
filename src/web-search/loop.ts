@@ -8,6 +8,7 @@ import { readBoundedResponseBody } from "../lib/bounded-body";
 import { fetchWithResetRetry } from "../lib/upstream-retry";
 import { classifyError } from "../lib/errors";
 import { providerErrorMessage, safeProviderErrorDetail } from "./error-detail";
+import { summarizeRequestBody } from "../lib/token-composition";
 import { formatWebSearchResults } from "./format-result";
 import { parseStreamWithProgress, RoutedModelInactivityError, WebSearchStreamProtocolError } from "./progress-stream";
 import { WEB_SEARCH_TOOL_NAME } from "./synthetic-tool";
@@ -193,6 +194,15 @@ export interface WebSearchLoopDeps {
    * or null when the pool is exhausted (same semantics as the normal routed path).
    */
   on429?: (retryAfterHeader: string | null) => ProviderAdapter | null;
+  /**
+   * Receives the token composition of each outgoing routed-model request body, so the
+   * caller's request log can show what the upstream actually counted. Diagnostic only.
+   */
+  onRequestComposition?: (summary: {
+    totalChars: number;
+    estimatedTokens: number;
+    classes: Array<{ name: string; count: number; chars: number; estimatedTokens: number }>;
+  }) => void;
 }
 
 /**
@@ -266,6 +276,15 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
           headers: selectedForwardHeaders,
           abortSignal: headerDeadline.signal,
         });
+        // Report what the upstream is about to count for this body. The sidecar path
+        // amplifies the prompt (search results are appended between iterations), so the
+        // upstream-side composition is the only number that explains an overflow here.
+        try {
+          const summary = summarizeRequestBody(request.body);
+          if (summary) deps.onRequestComposition?.(summary);
+        } catch {
+          /* diagnostics must never break the turn */
+        }
         const response = requestAdapter.fetchResponse
           ? await requestAdapter.fetchResponse(request, {
               abortSignal: headerDeadline.signal,

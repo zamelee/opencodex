@@ -400,6 +400,8 @@ export const zh: Record<TKey, string> = {
   "logs.details": "查看详情",
   "logs.detailTitle": "请求详情",
   "logs.detailRaw": "原始日志",
+  "logs.detailPromptComposition": "上游提示词构成（按上游计费口径估算）",
+  "logs.col.estimatedTokens": "预估提示词 token",
 
   "debug.title": "调试",
   "debug.subtitle": "可选的 provider transport 与 usage 提取诊断。请求错误和 502 在 Logs 页面。",

@@ -400,6 +400,8 @@ export const en = {
   "logs.details": "Details",
   "logs.detailTitle": "Request details",
   "logs.detailRaw": "Raw log entry",
+  "logs.detailPromptComposition": "Upstream prompt composition (as the provider counts it)",
+  "logs.col.estimatedTokens": "Estimated prompt tokens",
 
   // debug page
   "debug.title": "Debug",

@@ -43,6 +43,7 @@ import { hasKeyPoolFailover, rotateKeyOn429 } from "../providers/key-failover";
 import type { WsData } from "./ws-bridge";
 import { registerTurn, trackStreamLifetime, unregisterTurn } from "./lifecycle";
 import { redactSecretString } from "../lib/redact";
+import { summarizeRequestBody } from "../lib/token-composition";
 import {
   catalogModelSupportsServiceTier,
   inspectResponseLogJson,
@@ -954,6 +955,9 @@ export async function handleResponses(
       connectTimeoutMs: config.connectTimeoutMs ?? 200_000,
       routedModelStallTimeoutMs: wsPlan.routedModelStallTimeoutMs,
       stallTimeoutSec: wsPlan.stallTimeoutSec,
+      onRequestComposition: (summary) => {
+        logCtx.promptComposition = summary;
+      },
       on429: retryAfter => {
         const rotated = rotateKeyOn429(config, route.providerName, retryAfter, Date.now(), route.provider.apiKey);
         if (!rotated) return null;
@@ -990,6 +994,11 @@ export async function handleResponses(
   const connectMs = config.connectTimeoutMs ?? 200_000;
 
   const request = await adapter.buildRequest(parsed, { headers: selectedForwardHeaders });
+  // Measure the body the upstream is about to see. Codex counts the prompt in ITS tokenizer
+  // and applies ITS auto-compact threshold; the upstream counts THIS body. When the two
+  // disagree the client never trips its brake and the upstream 400s with "prompt is too
+  // long" — so the gap must be observable per content class, not guessed at.
+  logCtx.promptComposition = summarizeRequestBody(request.body);
   if (typeof request.usageLog?.inputTokens === "number") {
     logCtx.usageLogInputTokens = request.usageLog.inputTokens;
   }
@@ -1028,6 +1037,8 @@ export async function handleResponses(
         config.cacheRetention,
       );
       const retryRequest = await retryAdapter.buildRequest(parsed, { headers: selectedForwardHeaders });
+      // Same body shape as the first attempt; keep the measurement in step with the log.
+      logCtx.promptComposition = summarizeRequestBody(retryRequest.body);
       try {
         upstreamResponse = retryAdapter.fetchResponse
           ? await retryAdapter.fetchResponse(retryRequest, { abortSignal: upstream.signal, timeoutMs: connectMs })

@@ -388,6 +388,8 @@ export const de = {
   "logs.details": "Details",
   "logs.detailTitle": "Anfragedetails",
   "logs.detailRaw": "Roh-Protokolleintrag",
+  "logs.detailPromptComposition": "Prompt-Zusammensetzung (wie der Anbieter sie zählt)",
+  "logs.col.estimatedTokens": "Geschätzte Prompt-Token",
   "debug.title": "Fehlerdiagnose",
   "debug.subtitle": "Opt-in-Diagnose für Provider-Transport und Nutzungs-Extraktion. Anfragefehler und 502er bleiben unter Protokolle.",
   "debug.debug": "Provider-Diagnose",

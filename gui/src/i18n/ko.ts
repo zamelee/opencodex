@@ -400,6 +400,8 @@ export const ko: Record<TKey, string> = {
   "logs.details": "상세보기",
   "logs.detailTitle": "요청 상세",
   "logs.detailRaw": "원본 로그",
+  "logs.detailPromptComposition": "업스트림 프롬프트 구성(제공자가 계산하는 기준)",
+  "logs.col.estimatedTokens": "예상 프롬프트 토큰",
 
   "debug.title": "디버그",
   "debug.subtitle": "선택적 provider transport 및 usage 추출 진단. 요청 오류와 502는 Logs에 표시됩니다.",
