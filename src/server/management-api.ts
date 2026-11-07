@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import type { CatalogModel } from "../codex/catalog";
-import { invalidateCodexModelsCache, nativeModelRows } from "../codex/catalog";
+import { invalidateCodexModelsCache, nativeModelRows, resolveAutoCompactRatio } from "../codex/catalog";
 import { isLauncherModeEnabled } from "../codex/launcher-mode";
 import {
   DEFAULT_SUBAGENT_MODELS,
@@ -510,6 +510,32 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
         if (candidate.supportsSearchTool) next.supportsSearchTool = true;
         else delete next.supportsSearchTool;
       }
+      // contextWindow: the context window we advertise for this provider's models. Set it
+      // BELOW the upstream's real ceiling so the client's auto-compact brake fires before the
+      // upstream would reject a request (Codex counts the prompt in its own tokenizer, which
+      // under-counts a CJK/JSON/tool-output mix by ~25%).
+      if (candidate.contextWindow !== undefined) {
+        if (candidate.contextWindow === null || candidate.contextWindow === 0) {
+          delete next.contextWindow;
+        } else if (typeof candidate.contextWindow === "number"
+          && Number.isFinite(candidate.contextWindow) && candidate.contextWindow > 0) {
+          next.contextWindow = Math.floor(candidate.contextWindow);
+        } else {
+          return jsonResponse({ error: "provider.contextWindow must be a positive number" }, 400);
+        }
+      }
+      // autoCompactRatio: at which fraction of the window Codex should compact (0.5 - 0.95).
+      if (candidate.autoCompactRatio !== undefined) {
+        if (candidate.autoCompactRatio === null) {
+          delete next.autoCompactRatio;
+        } else if (typeof candidate.autoCompactRatio === "number"
+          && Number.isFinite(candidate.autoCompactRatio)
+          && candidate.autoCompactRatio >= 0.5 && candidate.autoCompactRatio <= 0.95) {
+          next.autoCompactRatio = candidate.autoCompactRatio;
+        } else {
+          return jsonResponse({ error: "provider.autoCompactRatio must be between 0.5 and 0.95" }, 400);
+        }
+      }
       // headers: optional Record<string,string>; an empty object clears them
       if (candidate.headers !== undefined) {
         if (candidate.headers === null) {
@@ -629,6 +655,16 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
         disabled: disabled.has(namespaced),
         ...(contextCap !== undefined ? { contextCap, contextCapped: m.contextCapped === true } : {}),
         ...(override !== undefined ? { modelOverride: override } : {}),
+        // The token count at which Codex should auto-compact: the effective window times the
+        // provider's ratio. Surfaced so whoever writes the catalog can publish the brake point
+        // instead of a hardcoded 90%.
+        ...(typeof m.effectiveContextWindow === "number" && m.effectiveContextWindow > 0
+          ? {
+            autoCompactTokenLimit: Math.floor(
+              m.effectiveContextWindow * resolveAutoCompactRatio(m.autoCompactRatio),
+            ),
+          }
+          : {}),
       };
     })]);
   }
@@ -642,6 +678,23 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
       caps: providerContextCaps(config),
       modelOverrides: modelContextOverrides(config),
     });
+  }
+
+  if (url.pathname === "/api/provider-context-caps/probe" && req.method === "GET") {
+    // "How big is the upstream's window, really?" — the declared value is what the upstream's
+    // metadata claims, the learned value is the ceiling the upstream actually enforced (from
+    // its own "prompt is too long: N > M maximum" error). The suggestion is the number we
+    // should advertise so the client's brake fires before the ceiling.
+    const provider = (url.searchParams.get("provider") ?? "").trim();
+    const model = (url.searchParams.get("model") ?? "").trim();
+    if (!provider || !model) return jsonResponse({ error: "provider and model are required" }, 400);
+    const models = await fetchAllModels(config);
+    const row = models.find((m) => `${m.provider}/${m.id}` === model || m.id === model);
+    const { probeContextWindow } = await import("./context-window-probe");
+    return jsonResponse(probeContextWindow(provider, model, {
+      ...(typeof row?.nativeContextWindow === "number" ? { declared: row.nativeContextWindow } : {}),
+      ...(typeof row?.effectiveContextWindow === "number" ? { current: row.effectiveContextWindow } : {}),
+    }));
   }
 
   if (url.pathname === "/api/provider-context-caps" && req.method === "PUT") {

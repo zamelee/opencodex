@@ -560,6 +560,15 @@ export interface OcxProviderConfig {
   contextWindow?: number;
   /** Model-specific Codex-visible context-window caps. Values cap live metadata, never raise it. */
   modelContextWindows?: Record<string, number>;
+  /**
+   * Fraction of the context window at which Codex should auto-compact.
+   * Default 0.9.
+   *
+   * Codex's own brake counts the prompt in its tokenizer, which under-counts a
+   * CJK/JSON/tool-output mix by ~25%, so the ratio is the knob that decides how early we
+   * compact relative to the upstream's real ceiling.
+   */
+  autoCompactRatio?: number;
   /** Model-specific Codex catalog input modalities, e.g. ["text"] or ["text", "image"]. */
   modelInputModalities?: Record<string, string[]>;
   headers?: Record<string, string>;

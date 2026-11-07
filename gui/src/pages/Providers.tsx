@@ -34,6 +34,8 @@ interface Config {
     liveModels?: boolean;
     /** Advertise the hosted web_search tool for this provider's models. Default OFF. */
     supportsSearchTool?: boolean;
+    /** The context window advertised for this provider's models (provider-wide). */
+    contextWindow?: number;
     /** Auth header strategy locked by the auth matrix, null = auto-detect. */
     modelListAuth?: string | null;
     /** Header VALUES are fetched on demand from /api/providers/headers — they are
@@ -711,6 +713,7 @@ export default function Providers({ apiBase }: { apiBase: string }) {
       defaultModel: prov.defaultModel ?? "",
       liveModels: prov.liveModels !== false,
       supportsSearchTool: prov.supportsSearchTool === true,
+      contextWindow: prov.contextWindow,
       headers: headerValues,
       headersLoaded,
       models: prov.models ?? [],
@@ -726,6 +729,7 @@ export default function Providers({ apiBase }: { apiBase: string }) {
     defaultModel?: string;
     liveModels?: boolean;
     supportsSearchTool?: boolean;
+    contextWindow?: number;
     headers?: Record<string, string>;
   }) => {
     if (!editTarget) return;

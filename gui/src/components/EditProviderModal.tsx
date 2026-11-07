@@ -8,6 +8,8 @@ export interface EditableProvider {
   baseUrl: string;
   defaultModel?: string;
   liveModels?: boolean;
+  /** The context window advertised for this provider's models (provider-wide). */
+  contextWindow?: number;
   /**
    * Advertise the hosted `web_search` tool for this provider's models. DEFAULT OFF.
    */
@@ -30,7 +32,7 @@ interface EditProviderModalProps {
   existingProviderNames?: string[];
   /** True when some provider in the config can act as the web-search sidecar's forward provider. */
   forwardProviderAvailable?: boolean;
-  onSave: (patch: { label?: string; renameTo?: string; adapter?: string; baseUrl?: string; defaultModel?: string; liveModels?: boolean; supportsSearchTool?: boolean; headers?: Record<string, string> }) => Promise<void> | void;
+  onSave: (patch: { label?: string; renameTo?: string; adapter?: string; baseUrl?: string; defaultModel?: string; liveModels?: boolean; supportsSearchTool?: boolean; contextWindow?: number; headers?: Record<string, string> }) => Promise<void> | void;
   onClose: () => void;
 }
 
@@ -65,6 +67,8 @@ export default function EditProviderModal({ open, provider, apiBase, existingPro
   const [liveModels, setLiveModels] = useState(true);
   // The hosted web_search tool is opt-in: OFF unless the provider explicitly enables it.
   const [supportsSearchTool, setSupportsSearchTool] = useState(false);
+  // Empty = "use the model's own metadata" (auto).
+  const [contextWindow, setContextWindow] = useState("");
   const [headers, setHeaders] = useState<Array<{ key: string; value: string }>>([]);
   const [showHeaders, setShowHeaders] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -83,6 +87,9 @@ export default function EditProviderModal({ open, provider, apiBase, existingPro
     setDefaultModel(provider.defaultModel || "");
     setLiveModels(provider.liveModels !== false); // default true
     setSupportsSearchTool(provider.supportsSearchTool === true); // default OFF
+    setContextWindow(typeof provider.contextWindow === "number" && provider.contextWindow > 0
+      ? String(provider.contextWindow)
+      : "");
     const h = provider.headers || {};
     setHeaders(Object.entries(h).map(([key, value]) => ({ key, value })));
     setShowHeaders(Object.keys(h).length > 0);
@@ -184,6 +191,7 @@ export default function EditProviderModal({ open, provider, apiBase, existingPro
       defaultModel: trimmedDefaultModel || undefined,
       liveModels,
       supportsSearchTool,
+      ...(contextWindow.trim() ? { contextWindow: Number(contextWindow.trim()) } : {}),
       ...(headerPatch !== undefined ? { headers: headerPatch } : {}),
     });
     } catch (err) {
@@ -408,6 +416,27 @@ export default function EditProviderModal({ open, provider, apiBase, existingPro
             ) : null}
           </span>
         </label>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <label htmlFor="edit-context-window" style={{ fontSize: 12, fontWeight: 500 }}>
+            {t("prov.editContextWindowLabel")}
+          </label>
+          <input
+            id="edit-context-window"
+            className="input"
+            type="number"
+            min={1}
+            step={1000}
+            value={contextWindow}
+            onChange={(e) => setContextWindow(e.target.value)}
+            placeholder={t("prov.editContextWindowAuto")}
+            style={{ fontFamily: "var(--mono)", fontSize: 13 }}
+            data-testid="edit-context-window"
+          />
+          <span className="muted" style={{ fontSize: 11 }}>
+            {t("prov.editContextWindowHint")}
+          </span>
+        </div>
 
         <div>
           <button

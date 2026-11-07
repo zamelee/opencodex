@@ -19,6 +19,12 @@ interface ModelRow {
    * the provider cap entirely. `undefined` (omitted) = follow provider cap.
    */
   modelOverride?: number | false;
+  /** The window the upstream declares for this model (before our caps). */
+  nativeContextWindow?: number;
+  /** The window we advertise after our caps. */
+  effectiveContextWindow?: number;
+  /** At which token count Codex should auto-compact (window x the provider's ratio). */
+  autoCompactTokenLimit?: number;
 }
 
 interface ProviderContextCapsResponse {
@@ -147,6 +153,7 @@ export default function Models({ apiBase }: { apiBase: string }) {
   });
   const [status, setStatus] = useState("");
   const [ok, setOk] = useState(false);
+  const [probing, setProbing] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
@@ -367,6 +374,51 @@ export default function Models({ apiBase }: { apiBase: string }) {
     } finally {
       setBusy(false);
       busyRef.current = false;
+    }
+  };
+
+  // Probe the REAL context window for a model: what the upstream declares vs. the ceiling it
+  // actually enforced (learned from its own "prompt is too long" error). Applying the
+  // suggestion makes the client compact before the upstream rejects a turn.
+  const probeWindow = async (namespaced: string) => {
+    const [provider, ...rest] = namespaced.split("/");
+    const model = rest.join("/");
+    setProbing(namespaced);
+    setStatus("");
+    try {
+      const r = await fetch(
+        `${apiBase}/api/provider-context-caps/probe?provider=${encodeURIComponent(provider)}&model=${encodeURIComponent(model)}`,
+      );
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok || body.error) {
+        setOk(false);
+        setStatus(t("models.probeFailed", { error: body.error ?? ("HTTP " + r.status) }));
+        return;
+      }
+      const suggestion = typeof body.suggestion === "number" ? body.suggestion : null;
+      if (suggestion === null) {
+        setOk(false);
+        setStatus(t("models.probeUnknown"));
+        return;
+      }
+      setOk(true);
+      setStatus(t("models.probeResult", {
+        declared: typeof body.declared === "number" ? fmtK(body.declared) : "-",
+        learned: typeof body.learned === "number" ? fmtK(body.learned) : "-",
+        suggestion: fmtK(suggestion),
+        source: body.source === "learned" ? t("models.probeSourceLearned") : t("models.probeSourceDeclared"),
+      }));
+      const apply = await fetch(`${apiBase}/api/provider-context-caps`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ modelOverrides: { [namespaced]: suggestion } }),
+      });
+      if (apply.ok) await load();
+    } catch (err) {
+      setOk(false);
+      setStatus(t("models.probeFailed", { error: err instanceof Error ? err.message : String(err) }));
+    } finally {
+      setProbing(null);
     }
   };
 
@@ -624,8 +676,8 @@ export default function Models({ apiBase }: { apiBase: string }) {
                       <Switch on={!off} onClick={() => toggle(m.namespaced)} disabled={busy} label={m.id} />
                       <code className="mono" style={{ fontSize: 13, color: off ? "var(--faint)" : "var(--text)", textDecoration: off ? "line-through" : "none" }}>{modelLabel(m.id)}</code>
                       {m.contextCapped && <span className="muted mono" style={{ fontSize: 11, padding: "1px 6px", border: "1px solid var(--border)", borderRadius: 999 }}>{t("models.contextCappedValue", { value: fmtK(m.contextCap ?? contextCapValue) })}</span>}
-                      {!m.native && (
-                        <PerModelCapSelect
+                     {!m.native && (
+                       <PerModelCapSelect
                           value={m.modelOverride}
                           providerCapValue={contextCapValue}
                           providerCapOn={contextCaps[m.provider] === contextCapValue}
@@ -633,6 +685,23 @@ export default function Models({ apiBase }: { apiBase: string }) {
                           onPick={(v) => { void applyModelOverride(m.namespaced, v); }}
                         />
                       )}
+                     {!m.native && (
+                       <button
+                         className="btn btn-ghost btn-sm"
+                         style={{ fontSize: 11, padding: "2px 8px" }}
+                         disabled={busy || probing === m.namespaced}
+                         onClick={() => { void probeWindow(m.namespaced); }}
+                         title={t("models.probeWindowHint")}
+                         data-testid={`probe-window-${m.namespaced}`}
+                       >
+                         {probing === m.namespaced ? t("models.probing") : t("models.probe")}
+                       </button>
+                     )}
+                     {!m.native && typeof m.autoCompactTokenLimit === "number" && (
+                       <span className="muted mono" style={{ fontSize: 11 }}>
+                         {t("models.compactAt", { value: fmtK(m.autoCompactTokenLimit) })}
+                       </span>
+                     )}
                     </div>
                   );
                 })}

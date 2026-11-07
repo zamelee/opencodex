@@ -310,6 +310,8 @@ export interface CatalogModel {
    * (OcxProviderConfig.supportsSearchTool). DEFAULT OFF.
    */
   supportsSearchTool?: boolean;
+  /** Fraction of the context window at which Codex auto-compacts (default 0.9). */
+  autoCompactRatio?: number;
 }
 type RawEntry = Record<string, unknown>;
 type RawCatalog = { models?: RawEntry[]; [k: string]: unknown };
@@ -416,6 +418,13 @@ function ensureAutoCompactTokenLimit(entry: RawEntry): RawEntry {
     entry.auto_compact_token_limit = Math.floor(entry.context_window * 0.9);
   }
   return entry;
+}
+
+/** The auto-compact fraction of the context window (0.5 - 0.95, default 0.9). */
+export function resolveAutoCompactRatio(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return 0.9;
+  if (value < 0.5 || value > 0.95) return 0.9;
+  return value;
 }
 
 function isNativeOpenAiEntry(entry: RawEntry): boolean {
@@ -737,7 +746,9 @@ function applyCatalogModelMetadata(entry: RawEntry, model?: CatalogModel): void 
   if (typeof model.contextWindow === "number" && model.contextWindow > 0) {
     entry.context_window = model.contextWindow;
     entry.max_context_window = model.contextWindow;
-    entry.auto_compact_token_limit = Math.floor(model.contextWindow * 0.9);
+    entry.auto_compact_token_limit = Math.floor(
+      model.contextWindow * resolveAutoCompactRatio(model.autoCompactRatio),
+    );
   }
   if (Array.isArray(model.inputModalities) && model.inputModalities.length > 0) {
     entry.input_modalities = model.inputModalities;
@@ -1069,6 +1080,8 @@ export function applyProviderConfigHints(name: string, prov: OcxProviderConfig, 
     ...(reasoningEfforts !== undefined ? { reasoningEfforts } : {}),
     // The hosted web_search tool is opt-in per provider (default OFF).
     supportsSearchTool: prov.supportsSearchTool === true,
+    // How early the client should compact, as a fraction of the window.
+    autoCompactRatio: resolveAutoCompactRatio(prov.autoCompactRatio),
     // Default-on for openai-chat providers (explicit false opts out); other adapters
     // advertise only on explicit opt-in.
     ...(prov.parallelToolCalls === true || (prov.adapter === "openai-chat" && prov.parallelToolCalls !== false)
