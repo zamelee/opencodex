@@ -69,6 +69,29 @@ interface ImageRef {
   payloadChars: number;
 }
 
+/**
+ * Is this an Anthropic wire body?
+ *
+ * `detectWireShape` is not enough: an OpenAI chat-completions body also has `messages`. The
+ * discriminators we use are Anthropic's own `max_tokens` field and the absence of the
+ * OpenAI-only content block types.
+ */
+function isAnthropicWireBody(body: unknown): boolean {
+  if (!body || typeof body !== "object") return false;
+  const wire = body as { messages?: unknown; max_tokens?: unknown };
+  if (!Array.isArray(wire.messages)) return false;
+  if (typeof wire.max_tokens !== "number") return false;
+  for (const msg of wire.messages as Array<{ content?: unknown }>) {
+    const content = msg?.content;
+    if (!Array.isArray(content)) continue;
+    for (const block of content as Array<{ type?: unknown }>) {
+      const t = String(block?.type ?? "");
+      if (t === "image_url" || t === "input_text" || t === "input_image") return false;
+    }
+  }
+  return true;
+}
+
 function isHttpUrl(value: unknown): boolean {
   return typeof value === "string" && /^https?:\/\//i.test(value);
 }
@@ -139,6 +162,19 @@ export function enforceUpstreamPromptBudget(
     }
   }
   const before = measureAnthropicWireComposition(parsed);
+  // The brake models the Anthropic wire format (a native image block vs. a payload that the
+  // upstream bills as text). On any other wire shape the estimate would be wrong — it would
+  // read an OpenAI-style `image_url` part as text and drop images for no reason — so the
+  // budget is not applied there.
+  if (!isAnthropicWireBody(parsed)) {
+    return {
+      body,
+      estimatedTokens: before.estimatedTokens,
+      limitTokens: limitTokens ?? null,
+      droppedImages: 0,
+      overBudget: false,
+    };
+  }
   if (limitTokens === undefined || before.estimatedTokens <= limitTokens) {
     return {
       body,

@@ -15,6 +15,11 @@ function userMessage(content: unknown[]): unknown {
   return { role: "user", content };
 }
 
+/** An Anthropic wire body always carries `max_tokens`; the brake keys off that shape. */
+function anthropicBody(messages: unknown[]): { model: string; max_tokens: number; messages: unknown[] } {
+  return { model: "test-model", max_tokens: 1024, messages };
+}
+
 function nativeImage(data: string): unknown {
   return { type: "image", source: { type: "base64", media_type: "image/png", data } };
 }
@@ -43,7 +48,7 @@ describe("upstream prompt budget (the brake Codex does not have)", () => {
   });
 
   test("does nothing when there is no limit", () => {
-    const body = { messages: [userMessage([nativeImage(PNG_B64)])] };
+    const body = anthropicBody([userMessage([nativeImage(PNG_B64)])]);
     const result = enforceUpstreamPromptBudget(body, undefined);
     expect(result.droppedImages).toBe(0);
     expect(result.body).toBe(body);
@@ -52,9 +57,7 @@ describe("upstream prompt budget (the brake Codex does not have)", () => {
   test("drops an image whose payload is not a usable data URL (the 2.2M-token shape)", () => {
     // A `url` source whose url is a 400KB blob is billed as TEXT upstream (~1.4 chars/token).
     const huge = "A".repeat(400_000);
-    const body = {
-      messages: [userMessage([{ type: "image", source: { type: "url", url: huge } }])],
-    };
+    const body = anthropicBody([userMessage([{ type: "image", source: { type: "url", url: huge } }])]);
     const result = enforceUpstreamPromptBudget(body, 100_000);
     expect(result.droppedImages).toBe(1);
     expect(result.estimatedTokens).toBeLessThanOrEqual(100_000);
@@ -65,9 +68,9 @@ describe("upstream prompt budget (the brake Codex does not have)", () => {
   });
 
   test("textifies the OLDEST images first when the estimate is over budget", () => {
-    const body = {
-      messages: [userMessage([nativeImage(PNG_B64), nativeImage(PNG_B64), nativeImage(PNG_B64)])],
-    };
+    const body = anthropicBody([
+      userMessage([nativeImage(PNG_B64), nativeImage(PNG_B64), nativeImage(PNG_B64)]),
+    ]);
     // ~1.6k vision tokens per image: a 2k budget leaves room for roughly one image.
     const result = enforceUpstreamPromptBudget(body, 2_000);
     expect(result.droppedImages).toBeGreaterThan(0);
@@ -78,7 +81,7 @@ describe("upstream prompt budget (the brake Codex does not have)", () => {
   });
 
   test("keeps a request that already fits untouched", () => {
-    const body = { messages: [userMessage([nativeImage(PNG_B64)])] };
+    const body = anthropicBody([userMessage([nativeImage(PNG_B64)])]);
     const result = enforceUpstreamPromptBudget(body, 1_000_000);
     expect(result.droppedImages).toBe(0);
     expect(result.overBudget).toBe(false);
@@ -86,13 +89,27 @@ describe("upstream prompt budget (the brake Codex does not have)", () => {
   });
 
   test("accepts a JSON string body (what the adapters hand to fetch)", () => {
-    const body = JSON.stringify({
-      messages: [userMessage([{ type: "image", source: { type: "url", url: "B".repeat(300_000) } }])],
-    });
+    const body = JSON.stringify(anthropicBody([
+      userMessage([{ type: "image", source: { type: "url", url: "B".repeat(300_000) } }]),
+    ]));
     const result = enforceUpstreamPromptBudget(body, 100_000);
     expect(result.droppedImages).toBe(1);
     const parsed = JSON.parse(result.body as string);
     expect(parsed.messages[0].content[0].type).toBe("text");
+  });
+
+  test("does not touch a non-Anthropic wire body (an OpenAI image_url part is not ours)", () => {
+    const body = {
+      model: "gpt-x",
+      max_tokens: 100,
+      messages: [{
+        role: "user",
+        content: [{ type: "image_url", image_url: { url: "data:image/png;base64," + "C".repeat(300_000) } }],
+      }],
+    };
+    const result = enforceUpstreamPromptBudget(body, 10_000);
+    expect(result.droppedImages).toBe(0);
+    expect(result.body).toBe(body);
   });
 });
 
