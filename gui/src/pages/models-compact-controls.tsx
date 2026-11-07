@@ -8,7 +8,7 @@
      window 700k?" is answerable without leaving the page.
  */
 import { useState } from "react";
-import { useT } from "../i18n";
+import { useT, type TKey } from "../i18n";
 
 export function fmtK(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return String(n);
@@ -121,9 +121,43 @@ export function CompactRatioSlider({
 /**
  * The probe's reasoning chain, shown inline under the model row.
  *
- * Every number the probe used is listed with where it came from, so the answer is readable in
- * place. A missing input says so explicitly instead of silently rendering as "-".
+ * Every number the probe used is listed with where it came from AND what it actually means, so
+ * the answer is readable in place. A missing input says so explicitly instead of silently
+ * rendering as "-".
  */
+
+/** The step id -> our label. The server sends an English label too; the id is the stable key. */
+const PROBE_STEP_LABEL: Record<string, TKey> = {
+  declared: "models.probeStepDeclared",
+  learned: "models.probeStepLearned",
+  current: "models.probeStepCurrent",
+  suggestion: "models.probeStepSuggested",
+};
+
+/** Where a step's number came from -> our label. */
+const PROBE_SOURCE_LABEL: Record<string, TKey> = {
+  "codex-catalog": "models.probeSrcCodexCatalog",
+  "upstream-metadata": "models.probeSrcUpstreamMetadata",
+  unavailable: "models.probeSrcUnavailable",
+  "upstream-error": "models.probeSrcUpstreamError",
+  "not-observed-yet": "models.probeSrcNotObserved",
+  override_value: "models.probeSrcOverrideValue",
+  override_exempt: "models.probeSrcOverrideExempt",
+  provider: "models.probeSrcProvider",
+  none: "models.probeSrcNone",
+  unknown: "models.probeSrcUnknown",
+  learned: "models.probeSrcLearned",
+  declared: "models.probeSrcDeclared",
+};
+
+/** What the step means, in one sentence. This is the column people actually need. */
+const PROBE_STEP_NOTE: Record<string, TKey> = {
+  declared: "models.probeNoteDeclared",
+  learned: "models.probeNoteLearned",
+  current: "models.probeNoteCurrent",
+  suggestion: "models.probeNoteSuggested",
+};
+
 export function ProbeTrace({ result }: { result: ProbeResult }) {
   const t = useT();
   if (result.error) {
@@ -136,23 +170,50 @@ export function ProbeTrace({ result }: { result: ProbeResult }) {
     );
   }
   const steps = result.steps ?? [];
+  const summary = typeof result.learned === "number"
+    ? t("models.probeSummaryLearned", { learned: fmtK(result.learned), suggested: fmtK(result.suggestion ?? 0) })
+    : typeof result.declared === "number"
+      ? t("models.probeSummaryDeclared", { declared: fmtK(result.declared), suggested: fmtK(result.suggestion ?? 0) })
+      : t("models.probeSummaryNone");
   return (
     <div className="probe-trace" role="status">
-      {steps.map(s => (
-        <div key={s.key} className="row" style={{ gap: 6, fontSize: 11, alignItems: "baseline" }}>
-          <span className="muted" style={{ minWidth: 210 }}>{s.label}</span>
-          <span className="mono" style={{ minWidth: 74, color: "var(--text)" }}>
-            {typeof s.value === "number" ? fmtK(s.value) : t("models.probeUnavailable")}
-          </span>
-          <span className="muted mono" style={{ fontSize: 10 }}>{s.source}</span>
-        </div>
-      ))}
-      <div className="row" style={{ gap: 6, fontSize: 11, alignItems: "baseline" }}>
-        <span className="muted" style={{ minWidth: 210 }}>{t("models.probeAppliedLabel")}</span>
-        <span className="mono" style={{ color: "var(--text)" }}>
-          {typeof result.applied === "number" ? fmtK(result.applied) : t("models.probeNotApplied")}
-        </span>
-      </div>
+      <p className="probe-summary">{summary}</p>
+      <table className="probe-table">
+        <thead>
+          <tr>
+            <th>{t("models.probeTableItem")}</th>
+            <th>{t("models.probeTableValue")}</th>
+            <th>{t("models.probeTableSource")}</th>
+            <th>{t("models.probeTableNote")}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {steps.map(s => (
+            <tr key={s.key}>
+              <td className="probe-td-item">
+                {PROBE_STEP_LABEL[s.key] ? t(PROBE_STEP_LABEL[s.key]) : s.label}
+              </td>
+              <td className="probe-td-value mono">
+                {typeof s.value === "number" ? fmtK(s.value) : t("models.probeUnavailable")}
+              </td>
+              <td className="probe-td-source">
+                {PROBE_SOURCE_LABEL[s.source] ? t(PROBE_SOURCE_LABEL[s.source]) : s.source}
+              </td>
+              <td className="probe-td-note">
+                {PROBE_STEP_NOTE[s.key] ? t(PROBE_STEP_NOTE[s.key]) : ""}
+              </td>
+            </tr>
+          ))}
+          <tr className="probe-row-applied">
+            <td className="probe-td-item">{t("models.probeAppliedLabel")}</td>
+            <td className="probe-td-value mono">
+              {typeof result.applied === "number" ? fmtK(result.applied) : t("models.probeNotApplied")}
+            </td>
+            <td className="probe-td-source" />
+            <td className="probe-td-note" />
+          </tr>
+        </tbody>
+      </table>
     </div>
   );
 }

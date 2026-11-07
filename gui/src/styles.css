@@ -1264,8 +1264,48 @@ select.input { appearance: none; }
   margin: 0 0 6px 22px; padding: 6px 10px;
   border-left: 2px solid var(--border);
   background: var(--raised);
-  display: flex; flex-direction: column; gap: 2px;
+  display: flex; flex-direction: column; gap: 6px;
 }
+
+.probe-summary {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.probe-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+  table-layout: fixed;
+}
+
+.probe-table th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--faint);
+  padding: 2px 8px 3px 0;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.probe-table td {
+  padding: 3px 8px 3px 0;
+  border-bottom: 1px solid var(--border-soft);
+  vertical-align: top;
+  line-height: 1.45;
+}
+
+.probe-table th:nth-child(1), .probe-table td:nth-child(1) { width: 116px; }
+.probe-table th:nth-child(2), .probe-table td:nth-child(2) { width: 74px; text-align: right; }
+.probe-table th:nth-child(3), .probe-table td:nth-child(3) { width: 108px; }
+
+.probe-td-value { color: var(--text); }
+.probe-td-source, .probe-td-note { color: var(--muted); }
+
+.probe-row-applied .probe-td-item,
+.probe-row-applied .probe-td-value { font-weight: 600; color: var(--text); }
 
 
 
