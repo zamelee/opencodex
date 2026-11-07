@@ -87,20 +87,14 @@ export function CompactRatioSlider({
         onBlur={commit}
         aria-label={t("models.ratioLabel")}
         title={t("models.ratioHint")}
-        style={{ width: 96, accentColor: "var(--accent)", cursor: disabled ? "not-allowed" : "pointer" }}
+        style={{ width: 80, accentColor: "var(--accent)", cursor: disabled ? "not-allowed" : "pointer" }}
       />
-      <span className="ratio-pct mono">
+      <span
+        className="ratio-pct mono"
+        title={typeof tokenLimit === "number" ? t("models.compactAt", { value: fmtK(tokenLimit) }) : undefined}
+      >
         {shown}%
       </span>
-      {typeof tokenLimit === "number" ? (
-        <span className="muted mono ratio-token">
-          {t("models.compactAt", { value: fmtK(tokenLimit) })}
-        </span>
-      ) : (
-        /* Keep the slot: without it the percentage slides left on rows that have no
-           token, and the column stops reading as a table. */
-        <span className="muted mono ratio-token" aria-hidden="true" />
-      )}
       {pinned ? (
         <button
           type="button"

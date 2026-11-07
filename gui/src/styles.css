@@ -633,7 +633,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 .model-table-head,
 .model-entry {
   display: grid;
-  grid-template-columns: 34px minmax(0, 1fr) 104px 100px 48px 244px;
+  grid-template-columns: 34px minmax(0, 1fr) 104px 96px 48px 168px;
   column-gap: 8px;
   align-items: center;
 }
@@ -647,7 +647,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 .model-table-head > span {
   font-size: 11px;
   color: var(--faint);
-  text-align: right;
+  text-align: center;
   white-space: nowrap;
 }
 
@@ -700,7 +700,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 
 .model-cell {
   display: flex;
-  justify-content: flex-end;
+  justify-content: center;
   align-items: center;
   min-width: 0;
 }
@@ -713,9 +713,8 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 .model-cell-cap .select-trigger,
 .model-cell-downsample .select-trigger {
   width: 100%;
-  /* Label hugs the right edge, so the value sits under its own column header instead of
-     drifting to the far left of a wide pill. */
-  justify-content: flex-end;
+  /* Centred, so the value sits under its own column header. */
+  justify-content: center;
   gap: 4px;
   overflow: hidden;
   padding: 4px 8px;
@@ -732,7 +731,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 .ratio-cell {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: center;
   gap: 6px;
   font-size: 11px;
   min-width: 0;
@@ -741,17 +740,15 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 
 .ratio-cell input[type="range"] { flex: 0 0 auto; }
 
-.ratio-pct { min-width: 34px; text-align: right; font-size: 11px; }
-
-.ratio-token { font-size: 11px; white-space: nowrap; min-width: 58px; text-align: right; }
+.ratio-pct { min-width: 34px; text-align: center; font-size: 11px; }
 
 .ratio-reset { font-size: 11px; padding: 1px 8px; }
 
 .ratio-inherit {
   font-size: 11px;
   white-space: nowrap;
-  min-width: 34px;
-  text-align: right;
+  min-width: 28px;
+  text-align: center;
   opacity: 0.75;
 }
 
