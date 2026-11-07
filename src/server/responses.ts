@@ -45,6 +45,12 @@ import { registerTurn, trackStreamLifetime, unregisterTurn } from "./lifecycle";
 import { redactSecretString } from "../lib/redact";
 import { summarizeRequestBody } from "../lib/token-composition";
 import {
+  enforceUpstreamPromptBudget,
+  learnedUpstreamPromptLimit,
+  noteUpstreamPromptLimit,
+  parseUpstreamPromptLimit,
+} from "../lib/upstream-prompt-budget";
+import {
   catalogModelSupportsServiceTier,
   inspectResponseLogJson,
   readConfiguredCodexServiceTier,
@@ -398,6 +404,29 @@ export function codexForwardTerminalOutcomeRecorder(
  * zstd-compressed screenshot history exceeds the limit), or a genuine JSON syntax error (400). The
  * real decode error was previously swallowed, so log it before returning the generic 400.
  */
+/**
+ * The upstream's real prompt window for this route.
+ *
+ * Two sources, and we take the SMALLER one:
+ *   - what the provider declares (its contextWindow / modelContextWindows entry),
+ *   - what the upstream told us in a previous "prompt is too long: N > M maximum" error.
+ * The learned value is the one that matters: Codex's brake counts in Codex's tokenizer and
+ * never fires, so the proxy has to know the upstream's ceiling to protect the turn.
+ */
+function upstreamPromptLimitFor(route: {
+  provider: OcxProviderConfig;
+  providerName: string;
+  modelId: string;
+}): number | undefined {
+  const declared = route.provider.contextWindow
+    ?? route.provider.modelContextWindows?.[route.modelId];
+  const learned = learnedUpstreamPromptLimit(route.providerName);
+  const candidates = [declared, learned].filter(
+    (n): n is number => typeof n === "number" && Number.isFinite(n) && n > 0,
+  );
+  return candidates.length > 0 ? Math.min(...candidates) : undefined;
+}
+
 export function decodeRequestErrorResponse(err: unknown, label: string): Response {
   if (err instanceof UnsupportedContentEncodingError) {
     return formatErrorResponse(415, "invalid_request_error", err.message);
@@ -949,6 +978,7 @@ export async function handleResponses(
       selectedForwardHeaders: sidecarForwardHeaders,
       settings: wsPlan.settings,
       maxSearches: wsPlan.maxSearches,
+      upstreamPromptLimit: upstreamPromptLimitFor(route),
       forceEmptyResponseId: true,
       abortSignal: options.abortSignal,
       recordSidecarOutcome,
@@ -999,6 +1029,22 @@ export async function handleResponses(
   // disagree the client never trips its brake and the upstream 400s with "prompt is too
   // long" — so the gap must be observable per content class, not guessed at.
   logCtx.promptComposition = summarizeRequestBody(request.body);
+  // The brake Codex does not have: enforce the UPSTREAM's own window on the wire body before
+  // it goes out. The limit is the smallest of what the provider declares and what the upstream
+  // has told us in a previous "prompt is too long" error. Degrading images here is strictly
+  // better than letting the upstream kill the whole turn.
+  const upstreamLimit = upstreamPromptLimitFor(route);
+  if (upstreamLimit !== undefined) {
+    const budget = enforceUpstreamPromptBudget(request.body, upstreamLimit);
+    if (budget.droppedImages > 0) {
+      request.body = budget.body as string;
+      logCtx.promptComposition = summarizeRequestBody(request.body);
+      console.warn(
+        `[${route.providerName}] upstream prompt budget: dropped ${budget.droppedImages} image(s); `
+        + `estimate ${budget.estimatedTokens} tokens vs limit ${upstreamLimit}`,
+      );
+    }
+  }
   if (typeof request.usageLog?.inputTokens === "number") {
     logCtx.usageLogInputTokens = request.usageLog.inputTokens;
   }
@@ -1057,6 +1103,11 @@ export async function handleResponses(
     if (!upstreamResponse.ok) {
       const errorText = await upstreamResponse.text().catch(() => "unknown error");
       cleanupUpstreamAbort();
+      // Learn the upstream's real context window from its own error, so the NEXT request for
+      // this provider can be protected before it goes out. Without this the proxy only learns
+      // the ceiling by killing a turn.
+      const learnedLimit = parseUpstreamPromptLimit(errorText);
+      if (learnedLimit) noteUpstreamPromptLimit(route.providerName, learnedLimit);
       // Upstreams occasionally echo request details in error bodies — scrub token-shaped
       // material before it reaches the client-facing error surface.
       return formatErrorResponse(upstreamResponse.status, "upstream_error", `Provider error ${upstreamResponse.status}: ${redactSecretString(errorText.slice(0, 500))}`);

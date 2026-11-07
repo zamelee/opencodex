@@ -9,6 +9,7 @@ import { fetchWithResetRetry } from "../lib/upstream-retry";
 import { classifyError } from "../lib/errors";
 import { providerErrorMessage, safeProviderErrorDetail } from "./error-detail";
 import { summarizeRequestBody } from "../lib/token-composition";
+import { enforceUpstreamPromptBudget } from "../lib/upstream-prompt-budget";
 import { formatWebSearchResults } from "./format-result";
 import { parseStreamWithProgress, RoutedModelInactivityError, WebSearchStreamProtocolError } from "./progress-stream";
 import { WEB_SEARCH_TOOL_NAME } from "./synthetic-tool";
@@ -203,6 +204,13 @@ export interface WebSearchLoopDeps {
     estimatedTokens: number;
     classes: Array<{ name: string; count: number; chars: number; estimatedTokens: number }>;
   }) => void;
+  /**
+   * The routed model's real prompt window, when we know it. The sidecar path amplifies the
+   * prompt (search results are appended between iterations), so it needs the same brake the
+   * normal path has: images are degraded before the request goes upstream instead of letting
+   * the upstream reject the whole turn with "prompt is too long".
+   */
+  upstreamPromptLimit?: number;
 }
 
 /**
@@ -284,6 +292,18 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
           if (summary) deps.onRequestComposition?.(summary);
         } catch {
           /* diagnostics must never break the turn */
+        }
+        // The upstream's own window, enforced on the wire body (the brake Codex cannot make:
+        // it counts the prompt in its own tokenizer and never sees the upstream's number).
+        if (deps.upstreamPromptLimit !== undefined) {
+          const budget = enforceUpstreamPromptBudget(request.body, deps.upstreamPromptLimit);
+          if (budget.droppedImages > 0) {
+            request.body = budget.body as string;
+            console.warn(
+              `[web-search] upstream prompt budget: dropped ${budget.droppedImages} image(s); `
+              + `estimate ${budget.estimatedTokens} tokens vs limit ${deps.upstreamPromptLimit}`,
+            );
+          }
         }
         const response = requestAdapter.fetchResponse
           ? await requestAdapter.fetchResponse(request, {

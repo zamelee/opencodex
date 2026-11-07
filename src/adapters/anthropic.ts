@@ -52,7 +52,7 @@ import { ANTHROPIC_OAUTH_BETA, CLAUDE_CODE_SYSTEM_INSTRUCTION, applyClaudeToolPr
 import { parseDataUrl } from "./image";
 
 
-import { enforceAnthropicImageLimits } from "./anthropic-image-guard";
+import { enforceAnthropicImageLimits, UNUSABLE_IMAGE_TEXT } from "./anthropic-image-guard";
 
 
 import { neutralizeIdentity } from "./identity";
@@ -79,13 +79,18 @@ function toAnthropicContentPart(p: OcxContentPart): unknown {
     const data = parseDataUrl(p.imageUrl);
 
 
-    return data
-
-
-      ? { type: "image", source: { type: "base64", media_type: data.mediaType, data: data.base64 } }
-
-
-      : { type: "image", source: { type: "url", url: p.imageUrl } };
+    if (data) {
+      return { type: "image", source: { type: "base64", media_type: data.mediaType, data: data.base64 } };
+    }
+    // Only a real http(s) URL is a usable `url` source. Anything else (a stripped payload, a
+    // raw base64 blob, a local path) cannot be fetched by the upstream — and sending it as a
+    // url source puts the whole string into the prompt, where the upstream bills it as TEXT
+    // (~1.4 chars/token). That is the shape behind "prompt is too long: 2225110 tokens >
+    // 1048576 maximum". Drop the image instead: losing a screenshot beats losing the turn.
+    if (/^https?:\/\//i.test(p.imageUrl)) {
+      return { type: "image", source: { type: "url", url: p.imageUrl } };
+    }
+    return { type: "text", text: UNUSABLE_IMAGE_TEXT };
 
 
   }

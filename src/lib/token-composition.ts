@@ -176,9 +176,22 @@ export function measureAnthropicWireComposition(wireBody: unknown): TokenComposi
         }
         case "image": {
           // A native image block in a user turn: billed as VISION upstream.
-          const source = block.source as { data?: unknown } | undefined;
+          const source = block.source as { type?: unknown; data?: unknown; url?: unknown } | undefined;
           const data = typeof source?.data === "string" ? source.data : "";
-          add("image_native", data.length, VISION_TOKENS_PER_IMAGE);
+          if (data) {
+            add("image_native", data.length, VISION_TOKENS_PER_IMAGE);
+            break;
+          }
+          // A `url` source that is NOT an http(s) URL is not a fetchable image: the upstream
+          // cannot render it, so the string ends up in the prompt and is billed as TEXT
+          // (~1.4 chars/token). A 400KB payload then costs ~300k tokens. Count it as text so
+          // the budget brake can see it and drop the image.
+          const url = typeof source?.url === "string" ? source.url : "";
+          if (url && !/^https?:\/\//i.test(url)) {
+            add("image_unusable_as_text", url.length, Math.ceil(url.length / BASE64_TEXT_CHARS_PER_TOKEN));
+          } else {
+            add("image_native", url.length, VISION_TOKENS_PER_IMAGE);
+          }
           break;
         }
         default: {

@@ -36,9 +36,37 @@ export const MAX_IMAGES_PER_REQUEST = 100;
  */
 export const MAX_BASE64_TEXT_CHARS = 2_000_000;
 /** A data URL embedded in a text block, e.g. `data:image/png;base64,AAAA...`. */
-const DATA_URL_IN_TEXT = /data:[a-z0-9.+-]+\/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=]+/gi;
+/**
+ * A data URL embedded in a text block.
+ *
+ * The payload may be MIME-wrapped (a line break every ~76 characters) or URL-safe base64
+ * (`-` and `_`), so the payload is matched as chunks of >= 16 base64 characters separated by
+ * whitespace. Requiring a >= 16-character chunk is what keeps the whitespace-tolerant pattern
+ * from swallowing ordinary prose after the payload. The old pattern only accepted one
+ * unbroken run of `[A-Za-z0-9+/=]`, so a wrapped or URL-safe payload survived in the text block
+ * and was billed as TEXT upstream (~1.4 chars/token) instead of as vision.
+ */
+const DATA_URL_IN_TEXT = /data:[a-z0-9.+-]+\/[a-z0-9.+-]+;base64,(?:[A-Za-z0-9+/_=-]{16,}(?:\s+[A-Za-z0-9+/_=-]{16,})*)/gi;
+
+/**
+ * Raw base64 with no data-URL prefix at all.
+ *
+ * Some payloads arrive unwrapped (a tool that printed the blob, a harness that inlined it).
+ * The data-URL pattern cannot see those, so a 400KB blob stayed in a text block and the
+ * upstream billed it as text. 512 characters is far above any legitimate identifier, hash or
+ * token, so this only fires on real payload blobs.
+ */
+const RAW_BASE64_IN_TEXT = /[A-Za-z0-9+/_=-]{512,}/g;
 
 const STRIPPED_TEXT = "[image omitted: base64 payload stripped from text to stay within the context budget]";
+
+/**
+ * Marker for an image the upstream could never have used (not a data URL, not an http(s) URL).
+ * Such a payload used to be sent as `source.type: "url"`, which puts the whole string into the
+ * prompt — where the upstream bills it as TEXT (~1.4 chars/token). A 400KB payload then cost
+ * ~300k tokens and could push the request past the upstream's window.
+ */
+export const UNUSABLE_IMAGE_TEXT = "[image omitted: unusable image payload]";
 
 const OMITTED_TEXT = "[image omitted: Anthropic request exceeded the 20-image limit for large images; older screenshots were dropped]";
 const OVERSIZED_TEXT = "[image omitted: exceeds Anthropic's 8000px per-side limit]";
@@ -234,19 +262,23 @@ export function enforceAnthropicImageLimits(messages: unknown[]): void {
 export function stripBase64FromText(messages: unknown[]): number {
   let stripped = 0;
 
-  const stripText = (text: string): string =>
-    text.replace(DATA_URL_IN_TEXT, () => { stripped++; return STRIPPED_TEXT; });
+  const stripText = (text: string): string => {
+    const out = text.replace(DATA_URL_IN_TEXT, () => { stripped++; return STRIPPED_TEXT; });
+    return out.replace(RAW_BASE64_IN_TEXT, () => { stripped++; return STRIPPED_TEXT; });
+  };
 
   const walk = (arr: unknown[]): void => {
     for (let i = 0; i < arr.length; i++) {
       const block = arr[i];
       if (typeof block !== "object" || block === null) continue;
       const b = block as { type?: unknown; text?: unknown; content?: unknown };
-      if (b.type === "text" && typeof b.text === "string" && b.text.includes("base64,")) {
+      if (b.type === "text" && typeof b.text === "string"
+        && (b.text.includes("base64,") || RAW_BASE64_IN_TEXT.test(b.text))) {
         arr[i] = { type: "text", text: stripText(b.text) };
       } else if (b.type === "tool_result" && Array.isArray(b.content)) {
         walk(b.content);
-      } else if (b.type === "tool_result" && typeof b.content === "string" && b.content.includes("base64,")) {
+      } else if (b.type === "tool_result" && typeof b.content === "string"
+        && (b.content.includes("base64,") || RAW_BASE64_IN_TEXT.test(b.content))) {
         // A tool_result whose content is a plain string still carries the
         // payload as text — the same billing hazard.
         (b as { content: string }).content = stripText(b.content);
