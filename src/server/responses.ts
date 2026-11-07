@@ -1010,17 +1010,14 @@ export async function handleResponses(
         const rotated = rotateKeyOn429(config, route.providerName, retryAfter, Date.now(), route.provider.apiKey);
         if (!rotated) return null;
         if (!rotated.apiKey) return null; // rotated without an apiKey cannot stage a commit
-        // Same pattern as Location A: stage instead of swapping. rotated.apiKey is the new
-        // key but `route.provider.apiKey` keeps the old value for the in-flight stream.
-        // commitPendingKeyChange runs on stream done (or next-request entry).
-        route.provider.pendingKeyChange = {
-          keyId: (rotated.apiKeyPool ?? []).find(e => e.key === rotated.apiKey)?.id ?? "active",
-          key: rotated.apiKey,
-          ts: Date.now(),
-          reason: "429",
-        };
+        // Rebuild the adapter from the ROTATED provider. `route.provider` is the router's
+        // snapshot of the provider (routedProviderConfig returns a COPY) and still carries
+        // the exhausted apiKey — building from it burns one more upstream request on a key
+        // we already know is rate-limited, which is exactly the stall this path exists to
+        // avoid. rotateKeyOn429 has already swapped + persisted the active key, so the
+        // rotated config is the truth from here on.
         return resolveAdapter(
-          resolveWireProtocolOverride(route.providerName, route.modelId, route.provider),
+          resolveWireProtocolOverride(route.providerName, route.modelId, rotated),
           config.cacheRetention,
         );
       },
