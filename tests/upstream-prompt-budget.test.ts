@@ -11,6 +11,23 @@ import { stripBase64FromText } from "../src/adapters/anthropic-image-guard";
 
 const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 
+/**
+ * A PNG header for the given size. Only the header matters here: the estimator bills an image
+ * by its pixel count (w*h/750), and the sniffer reads w/h straight out of the IHDR chunk.
+ */
+function sizedPngBase64(width: number, height: number): string {
+  const u32 = (n: number): number[] => [(n >>> 24) & 0xff, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff];
+  return Buffer.from(Uint8Array.from([
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+    ...u32(13), 0x49, 0x48, 0x44, 0x52,
+    ...u32(width), ...u32(height),
+    8, 6, 0, 0, 0,
+  ])).toString("base64");
+}
+
+/** A 1000x760 screenshot: ~1013 vision tokens at the upstream's pixel rate. */
+const SCREENSHOT_B64 = sizedPngBase64(1000, 760);
+
 function userMessage(content: unknown[]): unknown {
   return { role: "user", content };
 }
@@ -69,9 +86,9 @@ describe("upstream prompt budget (the brake Codex does not have)", () => {
 
   test("textifies the OLDEST images first when the estimate is over budget", () => {
     const body = anthropicBody([
-      userMessage([nativeImage(PNG_B64), nativeImage(PNG_B64), nativeImage(PNG_B64)]),
+      userMessage([nativeImage(SCREENSHOT_B64), nativeImage(SCREENSHOT_B64), nativeImage(SCREENSHOT_B64)]),
     ]);
-    // ~1.6k vision tokens per image: a 2k budget leaves room for roughly one image.
+    // 3 x ~1013 vision tokens: a 2k budget leaves room for roughly one image.
     const result = enforceUpstreamPromptBudget(body, 2_000);
     expect(result.droppedImages).toBeGreaterThan(0);
     const content = (result.body as { messages: Array<{ content: Array<{ type?: string }> }> })

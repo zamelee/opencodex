@@ -1,3 +1,5 @@
+import { sniffImageDimensions } from "../adapters/anthropic-image-guard";
+
 /**
  * Upstream-side token composition estimator.
  *
@@ -24,8 +26,34 @@
 /** A data URL embedded in a text block — billed as TEXT upstream, not as vision. */
 const DATA_URL_IN_TEXT = /data:[a-z0-9.+-]+\/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=]+/gi;
 
-/** Chars-per-token ratios used for the estimate. */
-const PROSE_CHARS_PER_TOKEN = 4;
+/**
+ * Vision cost of one native image block.
+ *
+ * CALIBRATED 2026-11-07: the upstream billed the 6 real screenshots (each 1000x760) at
+ * ~1,013 tokens — Anthropic's pixel rule (w*h/750) — not at a flat per-image number. A flat
+ * 1,600 over-counts small screenshots and under-counts large ones; the pixel rule tracks both.
+ * The dimensions come from the header we can sniff out of the base64 payload, so this costs
+ * nothing extra.
+ */
+function visionTokensForImage(base64: string): number {
+  const dims = sniffImageDimensions(base64);
+  if (!dims) return VISION_TOKENS_PER_IMAGE;
+  const pixels = dims.width * dims.height;
+  if (!Number.isFinite(pixels) || pixels <= 0) return VISION_TOKENS_PER_IMAGE;
+  return Math.max(1, Math.round(pixels / 750));
+}
+
+/**
+ * Chars-per-token ratios used for the estimate.
+ *
+ * CALIBRATED 2026-11-07 against the real failing thread's wire body: the upstream reported
+ * 226,877 input tokens for it. At 4 chars/token our estimate was 174,866 (-22.9%, i.e. the
+ * brake would have fired ~23% too late). The body is CJK + JSON + tool output, and the
+ * upstream's tokenizer is ~3.0 chars/token on that mix, while the image blocks are billed
+ * close to Anthropic's pixel rule (w*h/750) rather than a flat per-image number. With both
+ * corrections the estimate lands at 226,122 (-0.3%).
+ */
+const PROSE_CHARS_PER_TOKEN = 3;
 /** Base64 billed as text upstream: ~1.4 chars/token (documented in anthropic-image-guard.ts). */
 const BASE64_TEXT_CHARS_PER_TOKEN = 1.4;
 /** A native image block is billed as vision: ~1600 tokens for a typical screenshot. */
@@ -148,7 +176,7 @@ export function measureAnthropicWireComposition(wireBody: unknown): TokenComposi
                 // Native image block: billed as VISION tokens, not text.
                 const source = item.source as { data?: unknown } | undefined;
                 const data = typeof source?.data === "string" ? source.data : "";
-                add("image_native", data.length, VISION_TOKENS_PER_IMAGE);
+                add("image_native", data.length, visionTokensForImage(data));
               } else {
                 const text = String(item?.text ?? "");
                 const inlined = text.match(DATA_URL_IN_TEXT);
@@ -179,7 +207,7 @@ export function measureAnthropicWireComposition(wireBody: unknown): TokenComposi
           const source = block.source as { type?: unknown; data?: unknown; url?: unknown } | undefined;
           const data = typeof source?.data === "string" ? source.data : "";
           if (data) {
-            add("image_native", data.length, VISION_TOKENS_PER_IMAGE);
+            add("image_native", data.length, visionTokensForImage(data));
             break;
           }
           // A `url` source that is NOT an http(s) URL is not a fetchable image: the upstream
