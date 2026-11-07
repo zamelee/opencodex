@@ -11,6 +11,8 @@ const routedProvider: OcxProviderConfig = {
   adapter: "openai-chat",
   baseUrl: "https://example.test/v1",
   apiKey: "routed-key",
+  // The hosted web_search tool is opt-in per provider; these scenarios exercise the sidecar.
+  supportsSearchTool: true,
 };
 
 const forwardProvider: OcxProviderConfig = {

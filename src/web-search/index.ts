@@ -12,6 +12,8 @@ const DEFAULT_SIDECAR_MODEL = "gpt-5.6-luna";
 const DEFAULT_SIDECAR_REASONING = "low";
 const DEFAULT_MAX_SEARCHES = 3;
 const DEFAULT_TIMEOUT_MS = 200_000;
+/** Response-header budget for the routed model's call inside the sidecar loop. */
+const DEFAULT_SIDECAR_CONNECT_TIMEOUT_MS = 90_000;
 const DEFAULT_ROUTED_MODEL_STALL_TIMEOUT_MS = 200_000;
 const MAX_ROUTED_MODEL_STALL_TIMEOUT_MS = 2_147_483_647;
 // Mirrors the bridge's stall default (bridge.ts `options?.stallTimeoutSec ?? 90`).
@@ -79,6 +81,8 @@ export interface SidecarPlan {
   routedModelStallTimeoutMs: number;
   /** Effective bridge stall deadline for the sidecar turn (see webSearchStallTimeoutSec). */
   stallTimeoutSec: number;
+  /** Response-header budget for the routed model's own call inside the sidecar loop (ms). */
+  connectTimeoutMs: number;
 }
 
 /**
@@ -100,12 +104,27 @@ export function planWebSearch(
   const cfg = config.webSearchSidecar ?? {};
   if (cfg.enabled === false) return undefined;
   if (authContext.kind === "main" && !incomingHeaders.get("authorization")) return undefined; // not logged into ChatGPT → sidecar can't run
+  // The hosted `web_search` tool is OPT-IN per provider (OcxProviderConfig.supportsSearchTool,
+  // default OFF). Enforce it here, not only in the catalog we hand to Codex: the catalog file
+  // can be owned by CodexPlusPlus (pass-through mode leaves it alone), so a request may still
+  // arrive carrying the hosted tool. Without the opt-in we simply do not offer it to the model
+  // — the sidecar never runs, the turn costs one upstream call, and the search results are
+  // never appended back into the conversation.
+  if (provider.supportsSearchTool !== true) return undefined;
   const forwardProvider = findForwardProvider(config);
   if (!forwardProvider) return undefined;
   const timeoutMs = cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const routedModelStallTimeoutMs = resolveRoutedModelStallTimeoutMs(cfg.routedModelStallTimeoutMs);
   // Same `?? 200_000` default the server applies when threading connectTimeoutMs into the loop.
   const connectTimeoutMs = config.connectTimeoutMs ?? 200_000;
+  // The routed model's call inside the sidecar gets its OWN, shorter header budget. The global
+  // connect timeout (200s by default) meant a hung upstream ate minutes of the user's turn
+  // ("Provider response-header timeout after 200000ms during web-search"); a normal routed turn
+  // is 5-30s, so 90s is generous.
+  const sidecarConnectTimeoutMs = Math.min(
+    connectTimeoutMs,
+    cfg.connectTimeoutMs ?? DEFAULT_SIDECAR_CONNECT_TIMEOUT_MS,
+  );
   return {
     forwardProvider,
     hostedTool: parsed._webSearch,
@@ -124,5 +143,6 @@ export function planWebSearch(
       routedModelStallTimeoutMs,
       timeoutMs,
     ),
+    connectTimeoutMs: sidecarConnectTimeoutMs,
   };
 }

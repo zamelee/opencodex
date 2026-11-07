@@ -10,6 +10,8 @@ import type { OcxConfig, OcxProviderConfig } from "../src/types";
 const routedProvider: OcxProviderConfig = {
   adapter: "openai-chat",
   baseUrl: "https://routed.test/v1",
+  // The hosted web_search tool is opt-in per provider; these scenarios exercise the sidecar.
+  supportsSearchTool: true,
   apiKey: "routed-key",
 };
 

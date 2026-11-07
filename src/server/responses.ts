@@ -997,7 +997,9 @@ export async function handleResponses(
       forceEmptyResponseId: true,
       abortSignal: options.abortSignal,
       recordSidecarOutcome,
-      connectTimeoutMs: config.connectTimeoutMs ?? 200_000,
+      // The sidecar's routed-model call gets its own (shorter) header budget so a hung upstream
+      // cannot hold the user's turn for the full global connect timeout.
+      connectTimeoutMs: wsPlan.connectTimeoutMs,
       routedModelStallTimeoutMs: wsPlan.routedModelStallTimeoutMs,
       stallTimeoutSec: wsPlan.stallTimeoutSec,
       onRequestComposition: (summary) => {

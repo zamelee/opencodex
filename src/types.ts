@@ -453,6 +453,17 @@ export interface OcxWebSearchSidecarConfig {
   /** Sidecar fetch timeout (ms). */
   timeoutMs?: number;
   /**
+   * Response-header budget (ms) for the ROUTED model's own call inside the sidecar loop.
+   * Default 90000.
+   *
+   * The sidecar used the global `connectTimeoutMs` (200s by default) for that call, so a hung
+   * upstream made Codex wait the full 200 seconds before the turn failed ("Provider
+   * response-header timeout after 200000ms during web-search"). A normal routed turn is
+   * 5-30s, so 90s is generous; this cap is what keeps a stuck upstream from eating minutes
+   * of the user's turn.
+   */
+  connectTimeoutMs?: number;
+  /**
    * Config-file-only deadline (ms) for continuous routed-model response-body raw-byte inactivity
    * during a web-search turn. Default 200000. Must be an integer from 1 through 2147483647.
    */
