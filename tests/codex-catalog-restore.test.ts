@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -38,6 +38,100 @@ describe("Codex catalog restore", () => {
     if (existsSync(opencodexHome)) rmSync(opencodexHome, { recursive: true, force: true });
   });
 
+  test("does not write an empty catalog when every entry is proxy-routed", () => {
+    const catalogPath = join(codexHome, "catalog.json");
+    writeFileSync(join(codexHome, "config.toml"), 'model_catalog_json = "catalog.json"\n', "utf8");
+    const original = JSON.stringify({
+      models: [
+        { slug: "m.aiio.chat/MiniMax-M3.1-Flash-Preview" },
+        { slug: "nengpa.com/MiniMax-M3.1-Flash-Preview" },
+      ],
+    }, null, 2) + "\n";
+    writeFileSync(catalogPath, original, "utf8");
+
+    const r = runScript(codexHome, opencodexHome, `
+      const { restoreCodexCatalog } = require("./src/codex/catalog");
+      const result = restoreCodexCatalog({ enableCodexLauncherMode: true });
+      console.log(JSON.stringify(result));
+    `);
+
+    expect(r.status).toBe(0);
+    expect(JSON.parse(r.stdout)).toMatchObject({ removed: 0, kept: 0 });
+    // Byte-for-byte unchanged: Codex must never see a zero-model catalog.
+    expect(readFileSync(catalogPath, "utf8")).toBe(original);
+  });
+
+  test("does not restore an empty pristine backup over the live catalog", () => {
+    const catalogPath = join(codexHome, "catalog.json");
+    const backupPath = backupPathForTestCatalog(codexHome, opencodexHome, "catalog.json");
+    writeFileSync(join(codexHome, "config.toml"), 'model_catalog_json = "catalog.json"\n', "utf8");
+    writeFileSync(backupPath, JSON.stringify({ models: [] }, null, 2) + "\n", "utf8");
+    const original = JSON.stringify({
+      models: [
+        { slug: "gpt-5.5" },
+        { slug: "m.aiio.chat/MiniMax-M3.1-Flash-Preview" },
+      ],
+    }, null, 2) + "\n";
+    writeFileSync(catalogPath, original, "utf8");
+
+    const r = runScript(codexHome, opencodexHome, `
+      const { restoreCodexCatalog } = require("./src/codex/catalog");
+      const result = restoreCodexCatalog({ enableCodexLauncherMode: true });
+      console.log(JSON.stringify(result));
+    `);
+
+    expect(r.status).toBe(0);
+    expect(JSON.parse(r.stdout)).toMatchObject({ removed: 1, kept: 1 });
+    // The empty backup is ignored, so the in-place filter runs and keeps the native entry.
+    const slugs = JSON.parse(readFileSync(catalogPath, "utf8")).models.map((m: { slug: string }) => m.slug);
+    expect(slugs).toEqual(["gpt-5.5"]);
+  });
+
+  test("pass-through mode never writes to a foreign (relay) catalog", () => {
+    const catalogPath = join(codexHome, "model-catalogs", "relay-test.json");
+    mkdirSync(join(codexHome, "model-catalogs"), { recursive: true });
+    writeFileSync(join(codexHome, "config.toml"), 'model_catalog_json = "model-catalogs/relay-test.json"\n', "utf8");
+    const original = JSON.stringify({
+      models: [
+        { slug: "gpt-5.5" },
+        { slug: "m.aiio.chat/MiniMax-M3.1-Flash-Preview" },
+      ],
+    }, null, 2) + "\n";
+    writeFileSync(catalogPath, original, "utf8");
+
+    const r = runScript(codexHome, opencodexHome, `
+      const { restoreCodexCatalog } = require("./src/codex/catalog");
+      const result = restoreCodexCatalog({ enableCodexLauncherMode: false });
+      console.log(JSON.stringify(result));
+    `);
+
+    expect(r.status).toBe(0);
+    expect(JSON.parse(r.stdout)).toMatchObject({ removed: 0, kept: 0 });
+    expect(readFileSync(catalogPath, "utf8")).toBe(original);
+  });
+
+  test("models cache invalidation keeps a non-empty cache when the catalog is empty", () => {
+    const catalogPath = join(codexHome, "catalog.json");
+    const cachePath = join(codexHome, "models_cache.json");
+    writeFileSync(join(codexHome, "config.toml"), 'model_catalog_json = "catalog.json"\n', "utf8");
+    writeFileSync(catalogPath, JSON.stringify({ models: [] }, null, 2) + "\n", "utf8");
+    const existing = JSON.stringify({
+      fetched_at: "2000-01-01T00:00:00Z",
+      client_version: "0.0.0",
+      models: [{ slug: "gpt-5.5" }],
+    }, null, 2) + "\n";
+    writeFileSync(cachePath, existing, "utf8");
+
+    const r = runScript(codexHome, opencodexHome, `
+      const { invalidateCodexModelsCache } = require("./src/codex/catalog");
+      invalidateCodexModelsCache({ enableCodexLauncherMode: true });
+      console.log("ok");
+    `);
+
+    expect(r.status).toBe(0);
+    expect(readFileSync(cachePath, "utf8")).toBe(existing);
+  });
+
   test("drops routed entries without overwriting user-added native entries", () => {
     const catalogPath = join(codexHome, "catalog.json");
     writeFileSync(join(codexHome, "config.toml"), 'model_catalog_json = "catalog.json"\n', "utf8");
@@ -51,7 +145,7 @@ describe("Codex catalog restore", () => {
 
     const r = runScript(codexHome, opencodexHome, `
       const { restoreCodexCatalog } = require("./src/codex/catalog");
-      const result = restoreCodexCatalog();
+      const result = restoreCodexCatalog({ enableCodexLauncherMode: true });
       console.log(JSON.stringify(result));
     `);
 
@@ -82,7 +176,7 @@ describe("Codex catalog restore", () => {
 
     const r = runScript(codexHome, opencodexHome, `
       const { restoreCodexCatalog } = require("./src/codex/catalog");
-      const result = restoreCodexCatalog();
+      const result = restoreCodexCatalog({ enableCodexLauncherMode: true });
       console.log(JSON.stringify(result));
     `);
 
@@ -112,7 +206,7 @@ describe("Codex catalog restore", () => {
 
     const r = runScript(codexHome, opencodexHome, `
       const { restoreCodexCatalog } = require("./src/codex/catalog");
-      const result = restoreCodexCatalog();
+      const result = restoreCodexCatalog({ enableCodexLauncherMode: true });
       console.log(JSON.stringify(result));
     `);
 
@@ -139,7 +233,6 @@ describe("Codex catalog restore", () => {
           port: 10100,
           providers: {},
           defaultProvider: "openai",
-          enableCodexLauncherMode: true,
           enableCodexLauncherMode: true,
           subagentModels: ["gpt-5.5"],
         });
@@ -185,7 +278,6 @@ describe("Codex catalog restore", () => {
           port: 10100,
           providers: {},
           defaultProvider: "openai",
-          enableCodexLauncherMode: true,
           enableCodexLauncherMode: true,
           subagentModels: ["gpt-5.5", "gpt-5.4", "gpt-5.3-codex-spark", "gpt-5.6-sol"],
         });

@@ -186,7 +186,7 @@ export function startServer(port?: number) {
       if (migrated) saveConfig(config);
     }
   }
-  invalidateCodexModelsCache();
+  invalidateCodexModelsCache(config);
   // Restore the upstream context ceilings we learned from the upstream's own rejections. They
   // are the only numbers that come from the upstream's ENFORCED limit (a declaration is
   // marketing), and learning one costs an over-long turn — a restart must not throw it away.

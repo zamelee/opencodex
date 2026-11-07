@@ -41,6 +41,6 @@ export async function refreshCodexModelCatalog(
   const result = await deps.syncCatalogModels(config);
   const catalogExists = deps.existsSync(result.path);
   if (!catalogExists) return { ...result, catalogExists, cacheSynced: false };
-  deps.invalidateCodexModelsCache();
+  deps.invalidateCodexModelsCache(config);
   return { ...result, catalogExists, cacheSynced: true };
 }

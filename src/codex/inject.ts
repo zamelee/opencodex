@@ -558,7 +558,11 @@ export function restoreNativeCodex(): { success: boolean; message: string } {
   const cfg = journal.configRestored
     ? { success: true, message: "Codex config restored from opencodex journal." }
     : removeCodexConfig({ preserveProfile: journal.profileRestored || journal.profileChanged });
-  const cat = restoreCodexCatalog();
+  let activeCfg: OcxConfig | null = null;
+  try {
+    activeCfg = loadConfig();
+  } catch { /* unreadable config: keep the conservative restore */ }
+  const cat = restoreCodexCatalog(activeCfg ?? undefined);
   // Design B (loopback) steady state: threads are already tagged openai, so prove the
   // no-op with a readonly probe instead of write-opening a DB the Codex app may hold
   // (Windows: WAL writer lock -> seconds of stalling + a false warning on every stop).
@@ -570,7 +574,7 @@ export function restoreNativeCodex(): { success: boolean; message: string } {
   // skipWhenProvablyNoop=true to avoid the write-open SQLite probe on Windows.
   let skipWhenProvablyNoop = false;
   try {
-    const activeCfg = loadConfig();
+    activeCfg = activeCfg ?? loadConfig();
     skipWhenProvablyNoop = !shouldInjectApiAuthHeader(activeCfg) || !isLauncherModeEnabled(activeCfg);
   } catch { /* unreadable config: keep the conservative write-open restore */ }
   const history = syncCodexHistoryProvider("openai", undefined, undefined, { skipWhenProvablyNoop });

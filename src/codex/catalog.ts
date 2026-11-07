@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { delimiter, dirname, join, resolve } from "node:path";
-import { atomicWriteFile, expandUserPath, getConfigDir, websocketsEnabled } from "../config";
+import { atomicWriteFile, expandUserPath, getConfigDir, loadConfig, websocketsEnabled } from "../config";
 import { CODEX_CONFIG_PATH, CODEX_MODELS_CACHE_PATH, DEFAULT_CATALOG_PATH, readRootTomlString, resolveCodexConfigPath } from "./paths";
 import { isLauncherModeEnabled } from "./launcher-mode";
 import { DEFAULT_MODEL_CACHE_TTL_MS, getFreshCached, getStaleCached, isModelsFetchCoolingDown, markModelsFetchFailure, setCached } from "./model-cache";
@@ -1013,6 +1013,39 @@ function catalogHasRoutedEntries(catalog: RawCatalog | null): boolean {
   return (catalog?.models ?? []).some(m => typeof m.slug === "string" && m.slug.includes("/"));
 }
 
+/**
+ * The opencodex config, for the ~/.codex write-ownership gates.
+ *
+ * Returns null when the config cannot be read at all. Callers treat "unknown" as
+ * "not launcher mode" on purpose: when we cannot prove that opencodex owns the
+ * Codex home, the safe move is to leave ~/.codex untouched rather than risk
+ * persisting a catalog Codex cannot load.
+ */
+function resolveCatalogWriteConfig(): OcxConfig | null {
+  try {
+    return loadConfig();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Does opencodex own the catalog file Codex is currently pointed at?
+ *
+ * Two ways to say yes:
+ *  - launcher mode is on: opencodex manages the Codex home, so it writes the catalog
+ *    (see syncCatalogModels, which writes to the SAME active path);
+ *  - the active path IS opencodex's own catalog file (opencodex-catalog.json).
+ *
+ * Anything else (a relay/managed catalog owned by CodexPlusPlus, a hand-picked path)
+ * belongs to someone else. Writing there is how a restore wiped a 6-model relay catalog
+ * down to zero entries and made Codex refuse to load every conversation.
+ */
+function ownsActiveCatalog(config: OcxConfig | null, catalogPath: string): boolean {
+  if (config && isLauncherModeEnabled(config)) return true;
+  return isDefaultCatalogPath(catalogPath);
+}
+
 function writePristineCatalogBackup(backupPath: string, catalogPath: string, catalog: RawCatalog): void {
   if (existsSync(backupPath)) return;
   const onDisk = readCatalog(catalogPath);
@@ -1670,12 +1703,23 @@ export async function syncCatalogModels(config: OcxConfig): Promise<{ added: num
  * "<provider>/<model>" entry (those route through the proxy). Native gpt/codex slugs (no "/")
  * are kept, so plain `codex` works when the proxy is stopped. Idempotent; no-op if nothing injected.
  */
-export function restoreCodexCatalog(): { removed: number; kept: number; path: string } {
+export function restoreCodexCatalog(config?: OcxConfig): { removed: number; kept: number; path: string } {
+  const cfg = config ?? resolveCatalogWriteConfig();
   const catalogPath = readCodexCatalogPath();
+  // Pass-through contract: opencodex does not own ~/.codex in that mode, so it must not write
+  // there at all. The catalog at ~/.codex/model-catalogs/<relay>.json is managed by whoever
+  // owns the Codex home (CodexPlusPlus), and stripping its routed entries from under us can
+  // leave Codex with an EMPTY catalog — which makes every conversation refuse to load
+  // ("model_catalog_json ... must contain at least one model").
+  if (!ownsActiveCatalog(cfg, catalogPath)) {
+    return { removed: 0, kept: 0, path: catalogPath };
+  }
   const catalog = readCatalog(catalogPath);
   if (!catalog || !Array.isArray(catalog.models)) return { removed: 0, kept: 0, path: catalogPath };
   const backup = readCatalogBackup(catalogPath);
-  if (backup && Array.isArray(backup.models)) {
+  // An EMPTY pristine backup is not a restore source: writing it back would persist a
+  // zero-model catalog. Treat it as "no backup" and fall through to the in-place filter.
+  if (backup && Array.isArray(backup.models) && backup.models.length > 0) {
     const removed = (catalog.models ?? []).filter(m => typeof m.slug === "string" && m.slug.includes("/")).length;
     const backupSlugs = new Set(backup.models.flatMap(m => typeof m.slug === "string" ? [m.slug] : []));
     const userNativeAdditions = (catalog.models ?? []).filter(m =>
@@ -1685,6 +1729,11 @@ export function restoreCodexCatalog(): { removed: number; kept: number; path: st
       ...backup,
       models: [...backup.models, ...userNativeAdditions],
     };
+    // Defence in depth: never persist a catalog Codex cannot load.
+    if (restored.models.length === 0) {
+      console.warn("[opencodex] catalog restore skipped: the pristine backup restores 0 models.");
+      return { removed: 0, kept: 0, path: catalogPath };
+    }
     atomicWriteFile(catalogPath, JSON.stringify(restored, null, 2) + "\n");
     return { removed, kept: restored.models.length, path: catalogPath };
   }
@@ -1692,6 +1741,14 @@ export function restoreCodexCatalog(): { removed: number; kept: number; path: st
   const native = catalog.models.filter(m => !(typeof m.slug === "string" && m.slug.includes("/")));
   const removed = before - native.length;
   if (removed > 0) {
+    // Every entry is routed: filtering would leave Codex with zero models, which Codex
+    // rejects outright (all conversations fail to load). Keep the file as-is instead.
+    if (native.length === 0) {
+      console.warn(
+        `[opencodex] catalog restore skipped: all ${before} entries are proxy-routed, so dropping them would leave Codex with 0 models.`,
+      );
+      return { removed: 0, kept: 0, path: catalogPath };
+    }
     catalog.models = native;
     atomicWriteFile(catalogPath, JSON.stringify(catalog, null, 2) + "\n");
   }
@@ -1703,12 +1760,26 @@ export function restoreCodexCatalog(): { removed: number; kept: number; path: st
  * Codex caches the model list for 5 min (DEFAULT_MODEL_CACHE_TTL); copying the injected catalog
  * makes catalog edits (enable/disable, subagent reorder) apply on the next turn instead of waiting.
  */
-export function invalidateCodexModelsCache(): void {
+export function invalidateCodexModelsCache(config?: OcxConfig): void {
   try {
+    const cfg = config ?? resolveCatalogWriteConfig();
     const catalogPath = readCodexCatalogPath();
+    // Same ownership rule as restoreCodexCatalog: in pass-through mode ~/.codex belongs to
+    // someone else, so we must not touch models_cache.json either.
+    if (!ownsActiveCatalog(cfg, catalogPath)) return;
     if (!existsSync(catalogPath)) return;
     const catalog = JSON.parse(readFileSync(catalogPath, "utf8"));
-    const models = catalog.models ?? catalog;
+    const models = Array.isArray(catalog.models)
+      ? catalog.models
+      : Array.isArray(catalog)
+        ? catalog
+        : [];
+    // Never publish an empty model list: it replaces a good cache with one Codex
+    // refuses to load from.
+    if (models.length === 0) {
+      console.warn("[opencodex] models cache invalidation skipped: catalog has 0 models.");
+      return;
+    }
     const wrapper = {
       fetched_at: "2000-01-01T00:00:00Z",
       client_version: "0.0.0",
