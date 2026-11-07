@@ -502,6 +502,14 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
         }
         next.liveModels = candidate.liveModels;
       }
+      // supportsSearchTool: boolean (opt-in; the hosted web_search tool is OFF by default)
+      if (candidate.supportsSearchTool !== undefined) {
+        if (typeof candidate.supportsSearchTool !== "boolean") {
+          return jsonResponse({ error: "provider.supportsSearchTool must be a boolean" }, 400);
+        }
+        if (candidate.supportsSearchTool) next.supportsSearchTool = true;
+        else delete next.supportsSearchTool;
+      }
       // headers: optional Record<string,string>; an empty object clears them
       if (candidate.headers !== undefined) {
         if (candidate.headers === null) {

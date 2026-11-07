@@ -24,6 +24,13 @@ import { measureAnthropicWireComposition } from "./token-composition";
 /** Fraction of the upstream window we aim to stay under. */
 export const UPSTREAM_BUDGET_MARGIN = 0.9;
 
+/**
+ * A compaction request carries the PRE-compaction history, so it is intrinsically heavier than
+ * the last successful turn — it gets its own, stricter budget. (Measured on the failing thread:
+ * the compaction request is the one that died with "prompt is too long".)
+ */
+export const COMPACTION_BUDGET_FACTOR = 0.85;
+
 /** Placeholder that replaces an image we had to drop. */
 export const DROPPED_IMAGE_TEXT = "[image omitted: dropped to fit the upstream context budget]";
 
@@ -133,6 +140,24 @@ export interface PromptBudgetResult {
   droppedImages: number;
   /** True when the estimate still exceeds the limit (text alone is too big). */
   overBudget: boolean;
+}
+
+/**
+ * The budget we actually enforce for one request.
+ *
+ * `limitTokens` is the upstream's real window. Two things come off it:
+ *   - the OUTPUT reserve: the upstream counts the completion against the same window, so the
+ *     prompt must leave room for it (we read `max_tokens` out of the wire body).
+ *   - for a compaction request, a stricter factor, because that body carries the whole
+ *     pre-compaction history.
+ */
+export function effectiveUpstreamPromptLimit(
+  limitTokens: number,
+  opts: { compaction?: boolean; outputReserve?: number } = {},
+): number {
+  const factor = opts.compaction ? COMPACTION_BUDGET_FACTOR : 1;
+  const reserve = Math.max(0, opts.outputReserve ?? 0);
+  return Math.max(1, Math.floor(limitTokens * factor) - reserve);
 }
 
 /**

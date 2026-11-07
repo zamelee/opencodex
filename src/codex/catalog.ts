@@ -305,6 +305,11 @@ export interface CatalogModel {
   inputModalities?: string[];
   /** Provider opted into parallel tool calls (OcxProviderConfig.parallelToolCalls). */
   parallelToolCalls?: boolean;
+  /**
+   * Provider opted into advertising the hosted `web_search` tool for its models
+   * (OcxProviderConfig.supportsSearchTool). DEFAULT OFF.
+   */
+  supportsSearchTool?: boolean;
 }
 type RawEntry = Record<string, unknown>;
 type RawCatalog = { models?: RawEntry[]; [k: string]: unknown };
@@ -490,7 +495,11 @@ function applyMultiAgentMode(entries: RawEntry[], mode: MultiAgentMode): RawEntr
   return entries;
 }
 
-export function normalizeRoutedCatalogEntry(entry: RawEntry, parallelToolCalls = false): RawEntry {
+export function normalizeRoutedCatalogEntry(
+  entry: RawEntry,
+  parallelToolCalls = false,
+  supportsSearchTool = false,
+): RawEntry {
   delete entry.model_messages;
   delete entry.tool_mode;
   delete entry.multi_agent_version;
@@ -505,7 +514,15 @@ export function normalizeRoutedCatalogEntry(entry: RawEntry, parallelToolCalls =
   // runs through native gpt-5.4-mini, so image search is available and verbalized for text-only
   // models. EXCEPT cursor: its runTurn transport bypasses the web-search plan entirely and
   // rejects server search queries — advertising the tool would make models call into a void.
-  if (isCursorEntry) {
+  //
+  // The hosted web_search tool is OPT-IN per provider (OcxProviderConfig.supportsSearchTool,
+  // default OFF). Advertising it makes Codex attach web_search to every request, which sends
+  // the turn through the web-search sidecar: one extra model call, one extra upstream round
+ // trip, and the search results are appended back into the conversation — inflating the very
+  // prompt we are trying to keep inside the upstream's window. A provider without a usable
+  // forward provider cannot run the sidecar at all, so advertising the tool there is a no-op
+  // that only adds the request weight.
+  if (isCursorEntry || !supportsSearchTool) {
     delete entry.web_search_tool_type;
     entry.supports_search_tool = false;
   } else {
@@ -851,7 +868,11 @@ function deriveEntry(template: RawEntry | null, slug: string, desc: string, prio
         );
       }
       applyReasoningLevels(e, model?.reasoningEfforts);
-      normalizeRoutedCatalogEntry(e, model?.parallelToolCalls === true);
+      normalizeRoutedCatalogEntry(
+        e,
+        model?.parallelToolCalls === true,
+        model?.supportsSearchTool === true,
+      );
       applyJawcodeCatalogMetadata(e, slug, model?.contextCap);
       applyCatalogModelMetadata(e, model);
     } else {
@@ -866,8 +887,16 @@ function deriveEntry(template: RawEntry | null, slug: string, desc: string, prio
     slug, display_name: slug, description: desc,
     shell_type: "shell_command", visibility: "list", supported_in_api: true,
     priority, base_instructions: "You are a helpful coding assistant.",
-    ...(slug.includes("/") ? { web_search_tool_type: "text_and_image", supports_search_tool: true } : {}),
   };
+  if (slug.includes("/")) {
+    // Opt-in per provider (default OFF) — same contract as normalizeRoutedCatalogEntry.
+    if (model?.supportsSearchTool === true) {
+      entry.web_search_tool_type = "text_and_image";
+      entry.supports_search_tool = true;
+    } else {
+      entry.supports_search_tool = false;
+    }
+  }
   if (slug.includes("/")) applyReasoningLevels(entry, model?.reasoningEfforts);
   else {
     applyReasoningLevels(entry, isGpt56NativeSlug(slug) ? undefined : ["low", "medium", "high", "xhigh"]);
@@ -1038,6 +1067,8 @@ export function applyProviderConfigHints(name: string, prov: OcxProviderConfig, 
       : {}),
     ...(inputModalities ? { inputModalities } : {}),
     ...(reasoningEfforts !== undefined ? { reasoningEfforts } : {}),
+    // The hosted web_search tool is opt-in per provider (default OFF).
+    supportsSearchTool: prov.supportsSearchTool === true,
     // Default-on for openai-chat providers (explicit false opts out); other adapters
     // advertise only on explicit opt-in.
     ...(prov.parallelToolCalls === true || (prov.adapter === "openai-chat" && prov.parallelToolCalls !== false)

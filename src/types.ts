@@ -600,6 +600,17 @@ export interface OcxProviderConfig {
    * only on explicit `true`. See devlog/_plan/260709_parallel_tool_calls.
    */
   parallelToolCalls?: boolean;
+  /**
+   * Advertise the hosted `web_search` tool for this provider's models. DEFAULT OFF.
+   *
+   * When true, Codex attaches `web_search` to every request for these models, which sends the
+   * turn through the web-search sidecar: one extra model call plus one extra upstream round
+   * trip, and the search results are appended back into the conversation — inflating the very
+   * prompt that has to stay inside the upstream's context window. Only enable it for providers
+   * that actually benefit from server-side search, and note that the sidecar itself needs a
+   * usable forward (ChatGPT) provider to run.
+   */
+  supportsSearchTool?: boolean;
   /** Model ids whose tool_choice only accepts `auto` or `none`; forced/named choices are downgraded. */
   autoToolChoiceOnlyModels?: string[];
   /** Model ids that expect prior assistant `reasoning_content` to be preserved in chat history. */

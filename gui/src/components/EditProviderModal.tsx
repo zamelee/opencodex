@@ -8,6 +8,10 @@ export interface EditableProvider {
   baseUrl: string;
   defaultModel?: string;
   liveModels?: boolean;
+  /**
+   * Advertise the hosted `web_search` tool for this provider's models. DEFAULT OFF.
+   */
+  supportsSearchTool?: boolean;
   headers?: Record<string, string>;
   /**
    * False when the header values could not be loaded (e.g. the fetch failed).
@@ -24,7 +28,9 @@ interface EditProviderModalProps {
   provider: EditableProvider | null;
   apiBase: string;
   existingProviderNames?: string[];
-  onSave: (patch: { label?: string; renameTo?: string; adapter?: string; baseUrl?: string; defaultModel?: string; liveModels?: boolean; headers?: Record<string, string> }) => Promise<void> | void;
+  /** True when some provider in the config can act as the web-search sidecar's forward provider. */
+  forwardProviderAvailable?: boolean;
+  onSave: (patch: { label?: string; renameTo?: string; adapter?: string; baseUrl?: string; defaultModel?: string; liveModels?: boolean; supportsSearchTool?: boolean; headers?: Record<string, string> }) => Promise<void> | void;
   onClose: () => void;
 }
 
@@ -43,7 +49,7 @@ const ADAPTER_CHOICES: Array<{ value: string; label: string }> = [
 
 const SENTINEL_OTHER = "__other__";
 
-export default function EditProviderModal({ open, provider, apiBase, existingProviderNames, onSave, onClose }: EditProviderModalProps) {
+export default function EditProviderModal({ open, provider, apiBase, existingProviderNames, forwardProviderAvailable, onSave, onClose }: EditProviderModalProps) {
   const t = useT();
   // Form draft state. Initialized from `provider` whenever it changes.
   const [adapter, setAdapter] = useState("");
@@ -57,6 +63,8 @@ export default function EditProviderModal({ open, provider, apiBase, existingPro
   const [baseUrl, setBaseUrl] = useState("");
   const [defaultModel, setDefaultModel] = useState("");
   const [liveModels, setLiveModels] = useState(true);
+  // The hosted web_search tool is opt-in: OFF unless the provider explicitly enables it.
+  const [supportsSearchTool, setSupportsSearchTool] = useState(false);
   const [headers, setHeaders] = useState<Array<{ key: string; value: string }>>([]);
   const [showHeaders, setShowHeaders] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -74,6 +82,7 @@ export default function EditProviderModal({ open, provider, apiBase, existingPro
     setBaseUrl(provider.baseUrl || "");
     setDefaultModel(provider.defaultModel || "");
     setLiveModels(provider.liveModels !== false); // default true
+    setSupportsSearchTool(provider.supportsSearchTool === true); // default OFF
     const h = provider.headers || {};
     setHeaders(Object.entries(h).map(([key, value]) => ({ key, value })));
     setShowHeaders(Object.keys(h).length > 0);
@@ -174,6 +183,7 @@ export default function EditProviderModal({ open, provider, apiBase, existingPro
       baseUrl: trimmedBaseUrl,
       defaultModel: trimmedDefaultModel || undefined,
       liveModels,
+      supportsSearchTool,
       ...(headerPatch !== undefined ? { headers: headerPatch } : {}),
     });
     } catch (err) {
@@ -373,6 +383,30 @@ export default function EditProviderModal({ open, provider, apiBase, existingPro
             data-testid="edit-live-models"
           />
           <span>{t("prov.editLiveModelsLabel")}</span>
+        </label>
+
+        <label
+          style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 13, cursor: "pointer" }}
+          title={t("prov.editSearchToolHint")}
+        >
+          <input
+            type="checkbox"
+            checked={supportsSearchTool}
+            onChange={(e) => setSupportsSearchTool(e.target.checked)}
+            data-testid="edit-search-tool"
+            style={{ marginTop: 2 }}
+          />
+          <span>
+            {t("prov.editSearchToolLabel")}
+            <span className="muted" style={{ display: "block", fontSize: 11 }}>
+              {t("prov.editSearchToolHint")}
+            </span>
+            {forwardProviderAvailable === false ? (
+              <span className="muted" style={{ display: "block", fontSize: 11, color: "var(--warn, #d29922)" }}>
+                {t("prov.editSearchToolNoForward")}
+              </span>
+            ) : null}
+          </span>
         </label>
 
         <div>

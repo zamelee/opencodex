@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
+  COMPACTION_BUDGET_FACTOR,
   DROPPED_IMAGE_TEXT,
+  effectiveUpstreamPromptLimit,
   enforceUpstreamPromptBudget,
   learnedUpstreamPromptLimit,
   noteUpstreamPromptLimit,
@@ -47,6 +49,13 @@ function textOf(messages: unknown[], index = 0): string {
 }
 
 describe("upstream prompt budget (the brake Codex does not have)", () => {
+  test("the enforced budget reserves the output and is stricter for compaction", () => {
+    expect(effectiveUpstreamPromptLimit(1_048_576)).toBe(1_048_576);
+    expect(effectiveUpstreamPromptLimit(1_048_576, { outputReserve: 8_000 })).toBe(1_040_576);
+    expect(effectiveUpstreamPromptLimit(1_048_576, { compaction: true, outputReserve: 8_000 }))
+      .toBe(Math.floor(1_048_576 * COMPACTION_BUDGET_FACTOR) - 8_000);
+  });
+
   test("learns the upstream window from its own error text", () => {
     expect(parseUpstreamPromptLimit(
       '{"code":11115,"msg":"prompt is too long: 2225110 tokens > 1048576 maximum"}',

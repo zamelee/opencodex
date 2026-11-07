@@ -45,6 +45,8 @@ import { registerTurn, trackStreamLifetime, unregisterTurn } from "./lifecycle";
 import { redactSecretString } from "../lib/redact";
 import { summarizeRequestBody } from "../lib/token-composition";
 import {
+  COMPACTION_BUDGET_FACTOR,
+  effectiveUpstreamPromptLimit,
   enforceUpstreamPromptBudget,
   learnedUpstreamPromptLimit,
   noteUpstreamPromptLimit,
@@ -407,24 +409,37 @@ export function codexForwardTerminalOutcomeRecorder(
 /**
  * The upstream's real prompt window for this route.
  *
- * Two sources, and we take the SMALLER one:
- *   - what the provider declares (its contextWindow / modelContextWindows entry),
- *   - what the upstream told us in a previous "prompt is too long: N > M maximum" error.
- * The learned value is the one that matters: Codex's brake counts in Codex's tokenizer and
- * never fires, so the proxy has to know the upstream's ceiling to protect the turn.
+ * The upstream's real ceiling is what it told us in a previous "prompt is too long: N > M
+ * maximum" error. Until we have seen one, we fall back to what the provider declares.
  */
 function upstreamPromptLimitFor(route: {
   provider: OcxProviderConfig;
   providerName: string;
   modelId: string;
 }): number | undefined {
+  const learned = learnedUpstreamPromptLimit(route.providerName);
+  // The LEARNED limit is the upstream's real ceiling; the declared one is what we tell the
+  // client on purpose (usually conservative, to make the client's brake fire earlier). Using the
+  // declared value for OUR brake would make us drop images long before the upstream would
+  // reject anything, so the learned value wins when we have it.
+  if (learned !== undefined) return learned;
   const declared = route.provider.contextWindow
     ?? route.provider.modelContextWindows?.[route.modelId];
-  const learned = learnedUpstreamPromptLimit(route.providerName);
-  const candidates = [declared, learned].filter(
-    (n): n is number => typeof n === "number" && Number.isFinite(n) && n > 0,
-  );
-  return candidates.length > 0 ? Math.min(...candidates) : undefined;
+  return typeof declared === "number" && Number.isFinite(declared) && declared > 0
+    ? declared
+    : undefined;
+}
+
+/** The completion budget the upstream reserves on the wire body (`max_tokens`). */
+function readMaxTokens(body: unknown): number {
+  try {
+    const parsed = (typeof body === "string" ? JSON.parse(body) : body) as { max_tokens?: unknown };
+    return typeof parsed?.max_tokens === "number" && parsed.max_tokens > 0
+      ? parsed.max_tokens
+      : 0;
+  } catch {
+    return 0;
+  }
 }
 
 export function decodeRequestErrorResponse(err: unknown, label: string): Response {
@@ -1035,13 +1050,23 @@ export async function handleResponses(
   // better than letting the upstream kill the whole turn.
   const upstreamLimit = upstreamPromptLimitFor(route);
   if (upstreamLimit !== undefined) {
-    const budget = enforceUpstreamPromptBudget(request.body, upstreamLimit);
+    // The upstream counts the completion against the same window, so reserve room for the
+    // output; a compaction request gets its own stricter budget because it carries the whole
+    // pre-compaction history.
+    const outputReserve = readMaxTokens(request.body);
+    const effectiveLimit = effectiveUpstreamPromptLimit(upstreamLimit, {
+      compaction: routedCompaction,
+      outputReserve,
+    });
+    const budget = enforceUpstreamPromptBudget(request.body, effectiveLimit);
     if (budget.droppedImages > 0) {
       request.body = budget.body as string;
       logCtx.promptComposition = summarizeRequestBody(request.body);
       console.warn(
         `[${route.providerName}] upstream prompt budget: dropped ${budget.droppedImages} image(s); `
-        + `estimate ${budget.estimatedTokens} tokens vs limit ${upstreamLimit}`,
+        + `estimate ${budget.estimatedTokens} tokens vs limit ${effectiveLimit}`
+        + ` (upstream window ${upstreamLimit}, output reserve ${outputReserve}`
+        + `${routedCompaction ? `, compaction x${COMPACTION_BUDGET_FACTOR}` : ""})`,
       );
     }
   }

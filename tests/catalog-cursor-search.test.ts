@@ -9,10 +9,20 @@ describe("cursor catalog search advertising", () => {
     expect(entry.supports_parallel_tool_calls).toBe(true);
   });
 
-  test("non-cursor routed entries keep the sidecar-backed search advertisement", () => {
-    const entry = normalizeRoutedCatalogEntry({ slug: "opencode-go/glm-5.2" } as never) as Record<string, unknown>;
+  test("non-cursor routed entries keep the sidecar-backed search advertisement WHEN the provider opts in", () => {
+    const entry = normalizeRoutedCatalogEntry(
+      { slug: "opencode-go/glm-5.2" } as never,
+      false,
+      true,
+    ) as Record<string, unknown>;
     expect(entry.supports_search_tool).toBe(true);
     expect(entry.web_search_tool_type).toBe("text_and_image");
     expect(entry.supports_parallel_tool_calls).toBe(false);
+  });
+
+  test("a provider that did not opt in does not advertise the hosted search tool", () => {
+    const entry = normalizeRoutedCatalogEntry({ slug: "opencode-go/glm-5.2" } as never) as Record<string, unknown>;
+    expect(entry.supports_search_tool).toBe(false);
+    expect(entry.web_search_tool_type).toBeUndefined();
   });
 });

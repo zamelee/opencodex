@@ -60,6 +60,9 @@ describe("Phase 100 Codex-native parity smoke", () => {
       baseUrl: "https://routed.example/v1",
       apiKey: "routed-key",
       noVisionModels: ["deepseek-v4-pro"],
+      // The hosted search tool is opt-in per provider; this scenario exercises the
+      // sidecar path, so the provider enables it explicitly.
+      supportsSearchTool: true,
     };
     const forwardProvider: OcxProviderConfig = {
       adapter: "openai-responses",
@@ -76,7 +79,9 @@ describe("Phase 100 Codex-native parity smoke", () => {
     };
 
     const catalog = buildCatalogEntries(nativeTemplate(), ["gpt-5.5"], [
-      { provider: "opencode-go", id: "deepseek-v4-pro" },
+      // The hosted search tool is opt-in per provider (default OFF); the provider config
+      // hint is what carries the opt-in onto the model entry.
+      { provider: "opencode-go", id: "deepseek-v4-pro", supportsSearchTool: true },
     ], undefined, false);
     const routed = catalog.find(entry => entry.slug === "opencode-go/deepseek-v4-pro");
     expect(routed).toMatchObject({

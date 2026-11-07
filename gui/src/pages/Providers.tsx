@@ -32,6 +32,8 @@ interface Config {
     authMode?: string;
     disabled?: boolean;
     liveModels?: boolean;
+    /** Advertise the hosted web_search tool for this provider's models. Default OFF. */
+    supportsSearchTool?: boolean;
     /** Auth header strategy locked by the auth matrix, null = auto-detect. */
     modelListAuth?: string | null;
     /** Header VALUES are fetched on demand from /api/providers/headers — they are
@@ -708,6 +710,7 @@ export default function Providers({ apiBase }: { apiBase: string }) {
       baseUrl: prov.baseUrl ?? "",
       defaultModel: prov.defaultModel ?? "",
       liveModels: prov.liveModels !== false,
+      supportsSearchTool: prov.supportsSearchTool === true,
       headers: headerValues,
       headersLoaded,
       models: prov.models ?? [],
@@ -722,6 +725,7 @@ export default function Providers({ apiBase }: { apiBase: string }) {
     baseUrl?: string;
     defaultModel?: string;
     liveModels?: boolean;
+    supportsSearchTool?: boolean;
     headers?: Record<string, string>;
   }) => {
     if (!editTarget) return;
@@ -1385,6 +1389,9 @@ export default function Providers({ apiBase }: { apiBase: string }) {
         provider={editTarget}
         apiBase={apiBase}
         existingProviderNames={config ? Object.keys(config.providers) : []}
+        forwardProviderAvailable={config
+          ? Object.values(config.providers).some((p) => p.authMode === "forward" && !p.disabled)
+          : undefined}
         onClose={closeEditModal}
         onSave={saveEditProvider}
       />
