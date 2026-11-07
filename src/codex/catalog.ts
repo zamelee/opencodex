@@ -312,6 +312,13 @@ export interface CatalogModel {
   supportsSearchTool?: boolean;
   /** Fraction of the context window at which Codex auto-compacts (default 0.9). */
   autoCompactRatio?: number;
+  /**
+   * The window the UPSTREAM declares for this model, before any of our caps.
+   * `nativeContextWindow` is already capped (our provider-level `contextWindow` is applied
+   * before the cap resolution), so the probe needs the untouched value to tell "the upstream
+   * says 1,000,000" apart from "we advertise 700,000".
+   */
+  upstreamContextWindow?: number;
 }
 type RawEntry = Record<string, unknown>;
 type RawCatalog = { models?: RawEntry[]; [k: string]: unknown };
@@ -1099,6 +1106,10 @@ export function applyProviderConfigHints(name: string, prov: OcxProviderConfig, 
     },
   );
   const next: CatalogModel = { ...hinted };
+  // Keep the upstream's own declaration before our caps touch it.
+  if (typeof model.contextWindow === "number" && model.contextWindow > 0) {
+    next.upstreamContextWindow = model.contextWindow;
+  }
   if (resolved.native !== undefined) next.nativeContextWindow = resolved.native;
   if (resolved.effective !== undefined) {
     next.effectiveContextWindow = resolved.effective;

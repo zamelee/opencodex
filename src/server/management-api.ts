@@ -690,9 +690,17 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
     if (!provider || !model) return jsonResponse({ error: "provider and model are required" }, 400);
     const models = await fetchAllModels(config);
     const row = models.find((m) => `${m.provider}/${m.id}` === model || m.id === model);
-    const { probeContextWindow } = await import("./context-window-probe");
+    const { probeContextWindow, catalogDeclaredWindow } = await import("./context-window-probe");
+    // The catalog stores namespaced slugs ("provider/model"); the GUI sends the bare model id.
+    const fromCatalog = catalogDeclaredWindow(`${provider}/${model}`) ?? catalogDeclaredWindow(model);
     return jsonResponse(probeContextWindow(provider, model, {
-      ...(typeof row?.nativeContextWindow === "number" ? { declared: row.nativeContextWindow } : {}),
+      // The upstream's own declaration, before our caps (our provider-level contextWindow
+      // would otherwise mask it and make the probe echo back what we already advertise).
+      ...(typeof fromCatalog === "number"
+        ? { declared: fromCatalog }
+        : typeof row?.upstreamContextWindow === "number"
+        ? { declared: row.upstreamContextWindow }
+        : typeof row?.nativeContextWindow === "number" ? { declared: row.nativeContextWindow } : {}),
       ...(typeof row?.effectiveContextWindow === "number" ? { current: row.effectiveContextWindow } : {}),
     }));
   }
