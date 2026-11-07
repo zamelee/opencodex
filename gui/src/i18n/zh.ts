@@ -215,6 +215,7 @@ export const zh: Record<TKey, string> = {
   "prov.thresholdSaveTitle": "应用新的 5h 切换阈值",
   "prov.thresholdSaving": "保存中...",
   "prov.thresholdSaveFail": "更新阈值失败：{error}",
+  "prov.quotaUsableKeys": "可用 key：{usable}/{total} —— 上面的百分比是全池平均值，会把已用尽的 key 稀释掉。",
   "prov.thresholdSaved": "自动切换阈值已设为 {pct}%。",
   "prov.thresholdTitle": "越小切得越早，越大用得越久。范围 50-99%。",
   "prov.thresholdAria": "{name} 的自动切换阈值",

@@ -58,6 +58,18 @@ export default function QuotaBars({ quota, plan, threshold, t, className }: {
           t={t}
         />
       ))}
+      {displayQuota.totalKeys !== undefined && displayQuota.totalKeys > 1
+        && displayQuota.usableKeys !== undefined
+        && displayQuota.usableKeys < displayQuota.totalKeys ? (
+          <div className="quota-row">
+            <span className="muted" style={{ fontSize: 11 }}>
+              {t("prov.quotaUsableKeys", {
+                usable: displayQuota.usableKeys,
+                total: displayQuota.totalKeys,
+              })}
+            </span>
+          </div>
+        ) : null}
     </div>
   );
 }

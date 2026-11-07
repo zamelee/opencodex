@@ -59,6 +59,15 @@ export interface ProviderQuota {
   customWindows?: ProviderQuotaWindow[];
   /** Per-key quota breakdown when the provider has multiple keys (apiKeyPool). */
   keys?: ProviderQuotaKey[];
+  /**
+   * How many keys in the pool still have usable quota, and how many there are in total.
+   *
+   * The pooled percentages DILUTE exhaustion: a pool of three exhausted keys plus one fresh
+   * key reads "73% used" instead of "3 of 4 keys are done", which is how a limit stopped being
+   * reported. This counter says it straight.
+   */
+  usableKeys?: number;
+  totalKeys?: number;
   /** Plan display label (e.g. "旗舰版・69.9 元"). Provider-specific. */
   planLabel?: string;
   /** Plan expiry timestamp. Provider-specific. */
@@ -440,21 +449,44 @@ async function fetchMinimaxChatQuota(provider: string, prov: OcxProviderConfig):
   let totalWeeklyUsed = 0;
   let totalWeeklyLimit = 0;
   let anyWeekly = false;
+  let totalFiveHourUsed = 0;
+  let totalFiveHourLimit = 0;
+  let anyFiveHour = false;
   for (const k of keys) {
     if (k.weeklyUsed !== undefined && k.weeklyLimit !== undefined) {
       totalWeeklyUsed += k.weeklyUsed;
       totalWeeklyLimit += k.weeklyLimit;
       anyWeekly = true;
     }
+    if (k.fiveHourUsed !== undefined && k.fiveHourLimit !== undefined) {
+      totalFiveHourUsed += k.fiveHourUsed;
+      totalFiveHourLimit += k.fiveHourLimit;
+      anyFiveHour = true;
+    }
   }
   const summedWeeklyPct = anyWeekly && totalWeeklyLimit > 0
     ? Math.max(0, Math.min(100, (totalWeeklyUsed / totalWeeklyLimit) * 100))
     : undefined;
+  // The 5h row is displayed with POOLED used/limit numbers, so its percent has to be the pooled
+  // ratio as well — otherwise the bar says "4%" while the numbers say "3,130 / 11,500".
+  const pooledFiveHourPct = anyFiveHour && totalFiveHourLimit > 0
+    ? Math.max(0, Math.min(100, (totalFiveHourUsed / totalFiveHourLimit) * 100))
+    : undefined;
+  // A key is usable when neither window is exhausted (100% used) and it is not expired.
+  const usable = keys.filter((k) => {
+    if (k.expired) return false;
+    if (k.weeklyPercent !== undefined && k.weeklyPercent >= 100) return false;
+    if (k.fiveHourPercent !== undefined && k.fiveHourPercent >= 100) return false;
+    return true;
+  }).length;
   const quota: ProviderQuota = {
     updatedAt: Date.now(),
-    ...(active.fiveHourPercent !== undefined ? { fiveHourPercent: active.fiveHourPercent } : {}),
+    ...(pooledFiveHourPct !== undefined
+      ? { fiveHourPercent: pooledFiveHourPct }
+      : active.fiveHourPercent !== undefined ? { fiveHourPercent: active.fiveHourPercent } : {}),
     ...(active.fiveHourResetAt !== undefined ? { fiveHourResetAt: active.fiveHourResetAt } : {}),
     ...(summedWeeklyPct !== undefined ? { weeklyPercent: summedWeeklyPct } : {}),
+    ...(keys.length > 0 ? { usableKeys: usable, totalKeys: keys.length } : {}),
     ...(active.weeklyResetAt !== undefined ? { weeklyResetAt: active.weeklyResetAt } : {}),
     ...(active.planLabel ? { planLabel: active.planLabel } : {}),
     ...(active.expiresAt !== undefined ? { expiresAt: active.expiresAt } : {}),

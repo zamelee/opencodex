@@ -36,6 +36,9 @@ export interface AccountQuota {
   expiresAt?: number;
   /** Per-key quota breakdown when the provider has multiple keys (apiKeyPool). */
   keys?: KeyQuota[];
+  /** How many pooled keys still have usable quota, and how many the pool holds. */
+  usableKeys?: number;
+  totalKeys?: number;
   updatedAt: number;
 }
 

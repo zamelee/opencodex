@@ -209,6 +209,7 @@ export const de = {
   "prov.thresholdSaveTitle": "Neue 5h-Rotationsschwelle anwenden",
   "prov.thresholdSaving": "Speichern...",
   "prov.thresholdSaveFail": "Schwellenwert-Update fehlgeschlagen: {error}",
+  "prov.quotaUsableKeys": "Nutzbare Keys: {usable} von {total} — der Prozentwert oben ist der Pool-Durchschnitt und verdeckt erschöpfte Keys.",
   "prov.thresholdSaved": "Auto-Rotations-Schwelle auf {pct}% gesetzt.",
   "prov.thresholdTitle": "Niedriger = frueher rotieren. Hoeher = Keys laenger nutzen. Bereich 50-99%.",
   "prov.thresholdAria": "Auto-Rotations-Schwelle fuer {name}",

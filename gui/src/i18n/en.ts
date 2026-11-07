@@ -215,6 +215,7 @@ export const en = {
   "prov.thresholdSaveTitle": "Apply the new 5h rotation threshold",
   "prov.thresholdSaving": "Saving...",
   "prov.thresholdSaveFail": "Failed to update threshold: {error}",
+  "prov.quotaUsableKeys": "Usable keys: {usable} of {total} — the pooled percentage above averages the whole pool and hides exhausted keys.",
   "prov.thresholdSaved": "Auto-rotation threshold set to {pct}%.",
   "prov.thresholdTitle": "Lower = rotate sooner. Higher = use keys longer. Range 50-99%.",
   "prov.thresholdAria": "Auto-rotation threshold for {name}",

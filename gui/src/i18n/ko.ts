@@ -215,6 +215,7 @@ export const ko: Record<TKey, string> = {
   "prov.thresholdSaveTitle": "새 5h 전환 임계값 적용",
   "prov.thresholdSaving": "저장 중...",
   "prov.thresholdSaveFail": "임계값 업데이트 실패: {error}",
+  "prov.quotaUsableKeys": "사용 가능한 키: {usable}/{total} — 위 백분율은 풀 평균이라 소진된 키를 가립니다.",
   "prov.thresholdSaved": "자동 전환 임계값이 {pct}%로 설정됨.",
   "prov.thresholdTitle": "낮을수록 빨리 전환, 높을수록 오래 사용. 범위 50-99%.",
   "prov.thresholdAria": "{name}의 자동 전환 임계값",
