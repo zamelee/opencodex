@@ -434,6 +434,20 @@ export function resolveAutoCompactRatio(value: unknown): number {
   return value;
 }
 
+/**
+ * Non-enumerable marker on a model that already went through `applyProviderConfigHints`.
+ *
+ * The hints are not idempotent by themselves: they apply our context cap, so a model that went
+ * through them once carries OUR number in `contextWindow`. Applying the hints a second time
+ * would read that number as "the upstream's declaration" and quote our own cap as the upstream's
+ * word. The marker makes the second application a no-op for that field.
+ */
+const HINTED_MARKER = "__ocxHintsApplied";
+
+function isHintedModel(model: CatalogModel): boolean {
+  return (model as unknown as Record<string, unknown>)[HINTED_MARKER] === true;
+}
+
 function isNativeOpenAiEntry(entry: RawEntry): boolean {
   return typeof entry.slug === "string" && !entry.slug.includes("/");
 }
@@ -1061,8 +1075,40 @@ function configuredInputModalities(prov: OcxProviderConfig, id: string): string[
   return Array.isArray(modalities) && modalities.length > 0 ? [...modalities] : undefined;
 }
 
+/**
+ * The per-model auto-compact ratio, if the user pinned one for THIS model.
+ *
+ * The table lives on the provider (`modelAutoCompactRatios`) and is keyed by the namespaced
+ * id the GUI shows ("<provider>/<model>"). We also accept the bare model id, because that is
+ * how the sibling `modelContextWindows` table is keyed.
+ *
+ * Out-of-range values are IGNORED (not clamped to the default): a stale hand-written config
+ * must not silently become "0.9" for a model the user pinned to 0.85 - it falls back to the
+ * provider-wide ratio, which is the visible, honest fallback.
+ */
+function configuredAutoCompactRatio(
+  prov: OcxProviderConfig,
+  providerName: string,
+  model: CatalogModel,
+): number | undefined {
+  const table = prov.modelAutoCompactRatios;
+  if (!table || typeof table !== "object") return undefined;
+  const keys = [
+    `${providerName}/${model.id}`,
+    ...(model.provider && model.provider !== providerName ? [`${model.provider}/${model.id}`] : []),
+    model.id,
+  ];
+  for (const key of keys) {
+    if (!Object.prototype.hasOwnProperty.call(table, key)) continue;
+    const value = table[key];
+    if (typeof value === "number" && Number.isFinite(value) && value >= 0.5 && value <= 0.95) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
 export function applyProviderConfigHints(name: string, prov: OcxProviderConfig, model: CatalogModel, providerCap?: number, modelOverrides?: Record<string, number | false>): CatalogModel {
-  void name;
   const configuredCap = configuredContextWindow(prov, model.id);
   let inputModalities = configuredInputModalities(prov, model.id);
   // Vision-sidecar coverage: `noVisionModels` marks models whose images the PROXY describes
@@ -1087,8 +1133,11 @@ export function applyProviderConfigHints(name: string, prov: OcxProviderConfig, 
     ...(reasoningEfforts !== undefined ? { reasoningEfforts } : {}),
     // The hosted web_search tool is opt-in per provider (default OFF).
     supportsSearchTool: prov.supportsSearchTool === true,
-    // How early the client should compact, as a fraction of the window.
-    autoCompactRatio: resolveAutoCompactRatio(prov.autoCompactRatio),
+    // How early the client should compact, as a fraction of the window. A per-model pin wins
+    // over the provider-wide ratio; without one we fall back to the provider (then the default).
+    autoCompactRatio: resolveAutoCompactRatio(
+      configuredAutoCompactRatio(prov, name, model) ?? prov.autoCompactRatio,
+    ),
     // Default-on for openai-chat providers (explicit false opts out); other adapters
     // advertise only on explicit opt-in.
     ...(prov.parallelToolCalls === true || (prov.adapter === "openai-chat" && prov.parallelToolCalls !== false)
@@ -1107,7 +1156,20 @@ export function applyProviderConfigHints(name: string, prov: OcxProviderConfig, 
   );
   const next: CatalogModel = { ...hinted };
   // Keep the upstream's own declaration before our caps touch it.
-  if (typeof model.contextWindow === "number" && model.contextWindow > 0) {
+  // NOTE: hints are applied more than once to the same model (the per-provider model cache stores
+  // the ALREADY-hinted list, and the next poll re-hints it). The first application sees the raw
+  // upstream window; every later one would see our own cap and would overwrite the pristine value
+  // with it — the probe would then quote "700k, our own cap" as if the upstream had declared it.
+  // So: once we have recorded the upstream's declaration, carry it forward untouched.
+  // The marker makes the function idempotent: a model that already went through the hints is
+ // never asked for its "upstream window" again (its contextWindow is our own cap by then).
+  // It is non-enumerable so it never leaks into the API DTO or the on-disk catalog.
+  Object.defineProperty(next, HINTED_MARKER, { value: true, enumerable: false, configurable: true });
+  if (isHintedModel(model)) {
+    if (typeof model.upstreamContextWindow === "number" && model.upstreamContextWindow > 0) {
+      next.upstreamContextWindow = model.upstreamContextWindow;
+    }
+  } else if (typeof model.contextWindow === "number" && model.contextWindow > 0) {
     next.upstreamContextWindow = model.contextWindow;
   }
   if (resolved.native !== undefined) next.nativeContextWindow = resolved.native;
@@ -1211,10 +1273,12 @@ async function fetchProviderModels(name: string, prov: OcxProviderConfig, ttlMs:
     if (cachedCursor) return applyConfigHintsToCachedModels(name, prov, cachedCursor, contextCap, modelOverrides);
     const liveResult = await fetchCursorUsableModels({ apiKey, baseUrl: prov.baseUrl });
     if (liveResult.ok) {
-      const available = filterCursorConfiguredModelsByLiveDiscovery(configured, liveResult.models);
-      const result = available.length > 0 ? available : configured;
+      // Cache the RAW ids (hints are applied on read, never twice).
+      const rawConfigured: CatalogModel[] = (prov.models ?? []).map(id => ({ id, provider: name }));
+      const available = filterCursorConfiguredModelsByLiveDiscovery(rawConfigured, liveResult.models);
+      const result = available.length > 0 ? available : rawConfigured;
       setCached(name, result);
-      return result;
+      return applyConfigHintsToCachedModels(name, prov, result, contextCap, modelOverrides);
     }
     console.warn(
       `[opencodex] Cursor model discovery for "${name}" failed [${liveResult.error}]${liveResult.detail ? `: ${liveResult.detail}` : ""}; using stale/static catalog degradation.`,
@@ -1255,13 +1319,17 @@ async function fetchProviderModels(name: string, prov: OcxProviderConfig, ttlMs:
       return stale ? applyConfigHintsToCachedModels(name, prov, stale, contextCap, modelOverrides) : configured;
     }
     const items = data;
-    const live = items.map(m => applyProviderConfigHints(name, prov, {
+    // The cache stores the RAW models (no config hints applied). Hints are re-applied on every
+    // read, so a cached entry is never hinted twice. Double-hinting is not idempotent: the
+    // second pass would see our OWN capped window as if it were the upstream's declaration and
+    // report it as such (the probe would then quote "700k, our own cap" as the upstream's number).
+    const raw = items.map(m => ({
       id: m.id,
       provider: name,
       owned_by: m.owned_by,
       ...catalogHintsFromModelsApiItem(name, m),
-    }, contextCap, modelOverrides));
-    const liveIds = new Set(live.map(m => m.id));
+    }));
+    const rawIds = new Set(raw.map(m => m.id));
     // Dated-release aliases (Anthropic pattern): older models may appear in the live catalog
     // ONLY under their dated id (claude-haiku-4-5-20251001) while the config names the
     // API-valid alias (claude-haiku-4-5). Such aliases are real, callable models — keep them
@@ -1269,24 +1337,24 @@ async function fetchProviderModels(name: string, prov: OcxProviderConfig, ttlMs:
     // dropping them and warning on every poll.
     const droppedConfiguredIds: string[] = [];
     for (const m of configured) {
-      if (liveIds.has(m.id)) continue;
-      const dated = live.find(l => isDatedVariantId(l.id, m.id));
+      if (rawIds.has(m.id)) continue;
+      const dated = raw.find(l => isDatedVariantId(l.id, m.id));
       if (dated) {
-        // Reapply config hints so alias-keyed overrides (modelContextWindows etc.) win.
-        live.push(applyProviderConfigHints(name, prov, { ...dated, id: m.id }, contextCap, modelOverrides));
+        // Keep the alias id; the config hints (modelContextWindows etc.) are applied below.
+        raw.push({ ...dated, id: m.id });
       } else {
         droppedConfiguredIds.push(m.id);
       }
     }
-    if (live.length === 0) {
+    if (raw.length === 0) {
       console.warn(
         `[opencodex] Provider model discovery for "${name}" returned an authoritative empty catalog; ${droppedConfiguredIds.length > 0 ? `dropping configured model ids: ${droppedConfiguredIds.join(", ")}` : "no models will be exposed"}.`,
       );
     } else if (droppedConfiguredIds.length > 0) {
       warnDroppedConfiguredIdsOnce(name, droppedConfiguredIds);
     }
-    setCached(name, live);
-    return live;
+    setCached(name, raw);
+    return applyConfigHintsToCachedModels(name, prov, raw, contextCap, modelOverrides);
   } catch {
     markModelsFetchFailure(name);
     const stale = getStaleCached(name);

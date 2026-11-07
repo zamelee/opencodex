@@ -20,6 +20,11 @@
  */
 
 import { measureAnthropicWireComposition } from "./token-composition";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { join } from "node:path";
+
+const require = createRequire(import.meta.url);
 
 /** Fraction of the upstream window we aim to stay under. */
 export const UPSTREAM_BUDGET_MARGIN = 0.9;
@@ -36,6 +41,53 @@ export const DROPPED_IMAGE_TEXT = "[image omitted: dropped to fit the upstream c
 
 /** Upstream window learned per provider (from a "prompt is too long" error). */
 const learnedLimits = new Map<string, number>();
+
+/**
+ * The learned ceilings are the single most valuable number we have (the upstream's REAL limit,
+ * learned from its own rejection), and they are expensive to learn: it takes an over-long turn
+ * to find out. Keeping them in memory only meant a restart threw them away — the probe would
+ * answer "nothing learned yet" right after we had learned it. So they live in a small sidecar
+ * file next to config.json.
+ *
+ * Load/save are EXPLICIT (the server calls them): a module that wrote to disk on its own would
+ * write into the operator's real config dir during `bun test`, and the test fixtures would end
+ * up masquerading as learned facts.
+ */
+
+function learnedLimitsPath(): string {
+  // Imported lazily: config.ts pulls in zod and the whole config surface; this module is on the
+  // hot request path and must not pay for it.
+  const { getConfigDir } = require("../config") as { getConfigDir: () => string };
+  return join(getConfigDir(), "upstream-limits.json");
+}
+
+/** Load the persisted ceilings into memory. Called once at server start. */
+export function loadLearnedLimits(): void {
+  try {
+    const path = learnedLimitsPath();
+    if (!existsSync(path)) return;
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
+    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+        learnedLimits.set(key, value);
+      }
+    }
+  } catch {
+    /* no sidecar / unreadable -> we learn again */
+  }
+}
+
+/** Persist the ceilings to the sidecar file. Called after a NEW ceiling is learned. */
+export function saveLearnedLimits(): void {
+  try {
+    const path = learnedLimitsPath();
+    mkdirSync(join(path, ".."), { recursive: true });
+    writeFileSync(path, JSON.stringify(Object.fromEntries(learnedLimits), null, 2), "utf-8");
+  } catch {
+    /* diagnostics must never break the request path */
+  }
+}
 
 /**
  * Extract the upstream's context window from its error text.

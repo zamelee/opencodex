@@ -21,6 +21,7 @@ import {
   listOAuthProviders, reconcileOAuthProviders, startLoginFlow, UnsupportedOAuthProviderError, upsertOAuthProvider,
 } from "../oauth";
 import { invalidateCodexModelsCache } from "../codex/catalog";
+import { loadLearnedLimits } from "../lib/upstream-prompt-budget";
 import {
   CodexAccountCooldownError,
   CodexAuthContextError,
@@ -186,6 +187,10 @@ export function startServer(port?: number) {
     }
   }
   invalidateCodexModelsCache();
+  // Restore the upstream context ceilings we learned from the upstream's own rejections. They
+  // are the only numbers that come from the upstream's ENFORCED limit (a declaration is
+  // marketing), and learning one costs an over-long turn — a restart must not throw it away.
+  loadLearnedLimits();
 
   const listenPort = port ?? config.port ?? 10100;
   setCorsOrigin(listenPort);

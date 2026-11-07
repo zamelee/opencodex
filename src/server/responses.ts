@@ -50,6 +50,7 @@ import {
   enforceUpstreamPromptBudget,
   learnedUpstreamPromptLimit,
   noteUpstreamPromptLimit,
+  saveLearnedLimits,
   parseUpstreamPromptLimit,
 } from "../lib/upstream-prompt-budget";
 import {
@@ -1134,7 +1135,13 @@ export async function handleResponses(
       // this provider can be protected before it goes out. Without this the proxy only learns
       // the ceiling by killing a turn.
       const learnedLimit = parseUpstreamPromptLimit(errorText);
-      if (learnedLimit) noteUpstreamPromptLimit(route.providerName, learnedLimit);
+      if (learnedLimit) {
+        noteUpstreamPromptLimit(route.providerName, learnedLimit);
+        // Persist it: learning a ceiling costs an over-long turn, so losing it to a restart
+        // would mean paying for it twice. The probe reads this back (that is the number the
+        // upstream REALLY enforces, unlike any declaration).
+        saveLearnedLimits();
+      }
       // Upstreams occasionally echo request details in error bodies — scrub token-shaped
       // material before it reaches the client-facing error surface.
       return formatErrorResponse(upstreamResponse.status, "upstream_error", `Provider error ${upstreamResponse.status}: ${redactSecretString(errorText.slice(0, 500))}`);
