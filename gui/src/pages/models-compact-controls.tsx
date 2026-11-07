@@ -73,7 +73,7 @@ export function CompactRatioSlider({
     setDraft(null);
   };
   return (
-    <span className="row" style={{ gap: 6, fontSize: 11 }}>
+    <span className="ratio-cell">
       <input
         type="range"
         min={50}
@@ -89,28 +89,35 @@ export function CompactRatioSlider({
         title={t("models.ratioHint")}
         style={{ width: 96, accentColor: "var(--accent)", cursor: disabled ? "not-allowed" : "pointer" }}
       />
-      <span className="muted mono" style={{ minWidth: 30, fontSize: 11 }}>
+      <span className="ratio-pct mono">
         {shown}%
       </span>
-      {typeof tokenLimit === "number" && (
-        <span className="muted mono" style={{ fontSize: 11 }}>
+      {typeof tokenLimit === "number" ? (
+        <span className="muted mono ratio-token">
           {t("models.compactAt", { value: fmtK(tokenLimit) })}
         </span>
+      ) : (
+        /* Keep the slot: without it the percentage slides left on rows that have no
+           token, and the column stops reading as a table. */
+        <span className="muted mono ratio-token" aria-hidden="true" />
       )}
       {pinned ? (
         <button
           type="button"
-          className="btn btn-ghost btn-sm"
-          style={{ fontSize: 11, padding: "1px 6px" }}
+          className="btn btn-ghost btn-sm ratio-reset"
           disabled={disabled}
           onClick={onReset}
           title={t("models.ratioFollowProvider", { value: followPercent })}
         >
-          {t("models.ratioResetToProvider", { value: followPercent })}
+          {t("models.ratioReset")}
         </button>
       ) : (
-        <span className="muted" style={{ fontSize: 11 }}>
-          {t("models.ratioFollowingProvider", { value: followPercent })}
+        // Not pinned = this model has no ratio of its own; it rides on the provider-wide one.
+        <span
+          className="muted ratio-inherit"
+          title={t("models.ratioInheritTitle", { value: followPercent })}
+        >
+          {t("models.ratioInherit")}
         </span>
       )}
     </span>

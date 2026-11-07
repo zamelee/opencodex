@@ -624,6 +624,160 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 
 .model-card .id { font-family: var(--mono); font-weight: 600; font-size: 13px; letter-spacing: 0; color: var(--text); }
 
+/* ---- models page: the model list reads as a table ----
+
+   Every row uses the SAME fixed template, so the controls line up down the page
+   no matter how long a model name is: the name takes the only flexible column,
+   everything else is right-aligned in a fixed one. */
+
+.model-table-head,
+.model-entry {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) 104px 100px 48px 244px;
+  column-gap: 8px;
+  align-items: center;
+}
+
+.model-table-head {
+  padding: 0 0 5px;
+  border-bottom: 1px solid var(--border-soft);
+  margin-bottom: 2px;
+}
+
+.model-table-head > span {
+  font-size: 11px;
+  color: var(--faint);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.model-table-head > span.model-head-name { text-align: left; }
+
+/* The rule between the model name and the control cluster: without it the name floats
+   in the leftover space and the four right-hand columns read as unrelated widgets. */
+.model-table-head > span.model-head-cap,
+.model-cell-cap {
+  padding-left: 14px;
+  position: relative;
+}
+
+.model-table-head > span.model-head-cap::before,
+.model-cell-cap::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: -5px;
+  bottom: -5px;
+  width: 1px;
+  background: var(--border-soft);
+}
+
+.model-table-head > span.model-head-cap::before { top: -4px; bottom: -6px; }
+
+.model-rows > .model-entry:first-child .model-cell-cap::before { top: -7px; }
+
+/* Native rows have no controls, so they get no rule either. */
+.model-entry.native .model-cell-cap::before { display: none; }
+
+.model-entry { min-width: 0; padding: 5px 0; }
+
+.model-entry:hover { background: color-mix(in oklab, var(--hover) 60%, transparent); }
+
+.model-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  justify-content: flex-start;
+}
+
+.model-name > code {
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-cell {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  min-width: 0;
+}
+
+.model-cell > * { max-width: 100%; }
+
+.model-cell-cap .custom-select,
+.model-cell-downsample .custom-select { width: 100%; }
+
+.model-cell-cap .select-trigger,
+.model-cell-downsample .select-trigger {
+  width: 100%;
+  /* Label hugs the right edge, so the value sits under its own column header instead of
+     drifting to the far left of a wide pill. */
+  justify-content: flex-end;
+  gap: 4px;
+  overflow: hidden;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+.model-cell-cap .select-trigger > span,
+.model-cell-downsample .select-trigger > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ratio-cell {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  font-size: 11px;
+  min-width: 0;
+  width: 100%;
+}
+
+.ratio-cell input[type="range"] { flex: 0 0 auto; }
+
+.ratio-pct { min-width: 34px; text-align: right; font-size: 11px; }
+
+.ratio-token { font-size: 11px; white-space: nowrap; min-width: 58px; text-align: right; }
+
+.ratio-reset { font-size: 11px; padding: 1px 8px; }
+
+.ratio-inherit {
+  font-size: 11px;
+  white-space: nowrap;
+  min-width: 34px;
+  text-align: right;
+  opacity: 0.75;
+}
+
+.model-entry .probe-trace {
+  grid-column: 2 / -1;
+  margin: 2px 0 6px;
+}
+
+@media (max-width: 1000px) {
+  .model-table-head { display: none; }
+  .model-entry {
+    grid-template-columns: 34px minmax(0, 1fr);
+    row-gap: 6px;
+    padding: 8px 0;
+  }
+  .model-entry > .model-cell { grid-column: 2; justify-content: flex-start; }
+  /* Stacked layout: the rule between name and controls has nothing to divide. */
+  .model-cell-cap { padding-left: 0; }
+  .model-cell-cap::before { display: none; }
+  .model-cell-cap .custom-select,
+  .model-cell-downsample .custom-select { width: auto; }
+  .model-cell-cap .select-trigger,
+  .model-cell-downsample .select-trigger { width: auto; }
+  .ratio-cell { width: auto; }
+}
+
 
 
 /* ---- badges / status dot ---- */

@@ -113,7 +113,7 @@ function PerModelCapSelect({
         value={selectValue}
         options={[
           { value: "default", label: providerCapOn
-              ? t("models.perModelCapDefault") + " (" + fmtK(providerCapValue) + ")"
+              ? t("models.inheritValue", { value: fmtK(providerCapValue) })
               : t("models.perModelCapDefault") },
           ...CAP_OPTIONS.map(v => ({ value: String(v), label: fmtK(v) })),
           ...(isCustomNumeric ? [{ value: "custom", label: fmtK(value as number) }] : []),
@@ -123,6 +123,7 @@ function PerModelCapSelect({
         onChange={handleChange}
         disabled={disabled}
         label={t("models.perModelCap")}
+        align="right"
       />
       {customOpen && (
         <>
@@ -160,7 +161,9 @@ function PerModelDownsampleSelect({
 }) {
   const t = useT();
   const selectValue = value === undefined ? "default" : value ? "on" : "off";
-  const followLabel = `${t("models.downsampleFollow")} (${providerOn ? t("models.downsampleOn") : t("models.downsampleOff")})`;
+  const followLabel = t("models.inheritValue", {
+    value: providerOn ? t("models.downsampleOn") : t("models.downsampleOff"),
+  });
   return (
     <Select
       value={selectValue}
@@ -175,6 +178,7 @@ function PerModelDownsampleSelect({
       }}
       disabled={disabled}
       label={t("models.downsampleLabel")}
+      align="right"
     />
   );
 }
@@ -864,66 +868,88 @@ export default function Models({ apiBase }: { apiBase: string }) {
                    onChange={e => setSearch(prev => ({ ...prev, [provider]: e.target.value }))}
                  />
                )}
+                {!isNative && (
+                  <div className="model-table-head" aria-hidden="true">
+                    <span />
+                    <span className="model-head-name">{t("models.colModel")}</span>
+                    <span className="model-head-cap">{t("models.colCap")}</span>
+                    <span>{t("models.colDownsample")}</span>
+                    <span>{t("models.colProbe")}</span>
+                    <span>{t("models.colRatio")}</span>
+                  </div>
+                )}
+                <div className="model-rows">
                 {visible.map(m => {
                   const off = disabled.has(m.namespaced);
                   const probe = probeResults[m.namespaced];
                   const ratioPercent = Math.round((m.autoCompactRatio ?? 0.9) * 100);
                   const followPercent = Math.round((m.providerAutoCompactRatio ?? 0.9) * 100);
                   return (
-                    <div key={m.namespaced}>
-                      <div className="row" style={{ padding: "5px 0" }}>
-                       <Switch on={!off} onClick={() => toggle(m.namespaced)} disabled={busy} label={m.id} />
-                       <code className="mono" style={{ fontSize: 13, color: off ? "var(--faint)" : "var(--text)", textDecoration: off ? "line-through" : "none" }}>{modelLabel(m.id)}</code>
-                       {m.contextCapped && <span className="muted mono" style={{ fontSize: 11, padding: "1px 6px", border: "1px solid var(--border)", borderRadius: 999 }}>{t("models.contextCappedValue", { value: fmtK(m.contextCap ?? contextCapValue) })}</span>}
-                      {!m.native && (
-                        <PerModelCapSelect
-                          value={m.modelOverride}
-                          providerCapValue={contextCapValue}
-                          providerCapOn={contextCaps[m.provider] === contextCapValue}
-                          disabled={busy}
-                          onPick={(v) => { void applyModelOverride(m.namespaced, v); }}
-                        />
-                      )}
-                      {!m.native && (
-                        <PerModelDownsampleSelect
-                          value={downsample.models[m.namespaced]}
-                          providerOn={downsample.providers[m.provider] ?? downsample.defaultEnabled}
-                          disabled={busy}
-                          onPick={(v) => { applyModelDownsample(m.namespaced, v); }}
-                        />
-                      )}
-                     {!m.native && (
-                       <button
-                         className="btn btn-ghost btn-sm"
-                         style={{ fontSize: 11, padding: "2px 8px" }}
-                         disabled={busy || probing === m.namespaced}
-                         onClick={() => { void probeWindow(m.namespaced); }}
-                         title={t("models.probeWindowHint")}
-                         data-testid={`probe-window-${m.namespaced}`}
-                       >
-                          {probing === m.namespaced ? t("models.probing") : t("models.probe")}
-                        </button>
-                      )}
-                      {!m.native && typeof m.autoCompactRatio === "number" && (
-                        <CompactRatioSlider
-                          percent={ratioPercent}
-                          contextWindow={m.effectiveContextWindow}
-                          pinned={m.autoCompactRatioPinned === true}
-                          followPercent={followPercent}
-                          disabled={busy}
-                          onCommit={(pct) => {
-                            void applyModelRatio(m.provider, m.namespaced, pct / 100);
-                          }}
-                          onReset={() => {
-                            void applyModelRatio(m.provider, m.namespaced, null);
-                          }}
-                        />
-                      )}
-                      </div>
+                    <div key={m.namespaced} className={`model-entry${m.native ? " native" : ""}`}>
+                      <span className="model-cell model-cell-switch">
+                        <Switch on={!off} onClick={() => toggle(m.namespaced)} disabled={busy} label={m.id} />
+                      </span>
+                      <span className="model-name">
+                        <code className="mono" style={{ color: off ? "var(--faint)" : "var(--text)", textDecoration: off ? "line-through" : "none" }} title={m.id}>{modelLabel(m.id)}</code>
+                        {m.contextCapped && <span className="muted mono model-cap-badge">{t("models.contextCappedValue", { value: fmtK(m.contextCap ?? contextCapValue) })}</span>}
+                      </span>
+                      <span className="model-cell model-cell-cap">
+                        {!m.native && (
+                          <PerModelCapSelect
+                            value={m.modelOverride}
+                            providerCapValue={contextCapValue}
+                            providerCapOn={contextCaps[m.provider] === contextCapValue}
+                            disabled={busy}
+                            onPick={(v) => { void applyModelOverride(m.namespaced, v); }}
+                          />
+                        )}
+                      </span>
+                      <span className="model-cell model-cell-downsample">
+                        {!m.native && (
+                          <PerModelDownsampleSelect
+                            value={downsample.models[m.namespaced]}
+                            providerOn={downsample.providers[m.provider] ?? downsample.defaultEnabled}
+                            disabled={busy}
+                            onPick={(v) => { applyModelDownsample(m.namespaced, v); }}
+                          />
+                        )}
+                      </span>
+                      <span className="model-cell model-cell-probe">
+                        {!m.native && (
+                          <button
+                            className="btn btn-ghost btn-sm"
+                            style={{ fontSize: 11, padding: "2px 8px" }}
+                            disabled={busy || probing === m.namespaced}
+                            onClick={() => { void probeWindow(m.namespaced); }}
+                            title={t("models.probeWindowHint")}
+                            data-testid={`probe-window-${m.namespaced}`}
+                          >
+                            {probing === m.namespaced ? t("models.probing") : t("models.probe")}
+                          </button>
+                        )}
+                      </span>
+                      <span className="model-cell model-cell-ratio">
+                        {!m.native && typeof m.autoCompactRatio === "number" && (
+                          <CompactRatioSlider
+                            percent={ratioPercent}
+                            contextWindow={m.effectiveContextWindow}
+                            pinned={m.autoCompactRatioPinned === true}
+                            followPercent={followPercent}
+                            disabled={busy}
+                            onCommit={(pct) => {
+                              void applyModelRatio(m.provider, m.namespaced, pct / 100);
+                            }}
+                            onReset={() => {
+                              void applyModelRatio(m.provider, m.namespaced, null);
+                            }}
+                          />
+                        )}
+                      </span>
                       {probe && <ProbeTrace result={probe} />}
                     </div>
                   );
                 })}
+                </div>
                 {remaining > 0 && (
                   <button
                     onClick={() => setLimit(prev => ({ ...prev, [provider]: shown + PAGE }))}
