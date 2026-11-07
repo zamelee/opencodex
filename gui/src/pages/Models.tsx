@@ -143,6 +143,42 @@ function PerModelCapSelect({
   );
 }
 
+/**
+ * Per-model image-downsampling override. Three states, same shape as the context-cap
+ * override: follow the provider / force on / force off. `null` clears the override.
+ */
+function PerModelDownsampleSelect({
+  value,
+  providerOn,
+  disabled,
+  onPick,
+}: {
+  value: boolean | undefined;
+  providerOn: boolean;
+  disabled: boolean;
+  onPick: (v: boolean | null) => void;
+}) {
+  const t = useT();
+  const selectValue = value === undefined ? "default" : value ? "on" : "off";
+  const followLabel = `${t("models.downsampleFollow")} (${providerOn ? t("models.downsampleOn") : t("models.downsampleOff")})`;
+  return (
+    <Select
+      value={selectValue}
+      options={[
+        { value: "default", label: followLabel },
+        { value: "on", label: t("models.downsampleOn") },
+        { value: "off", label: t("models.downsampleOff") },
+      ]}
+      onChange={(raw) => {
+        if (raw === "default") onPick(null);
+        else onPick(raw === "on");
+      }}
+      disabled={disabled}
+      label={t("models.downsampleLabel")}
+    />
+  );
+}
+
 export default function Models({ apiBase }: { apiBase: string }) {
   const t = useT();
   const [models, setModels] = useState<ModelRow[]>([]);
@@ -151,6 +187,12 @@ export default function Models({ apiBase }: { apiBase: string }) {
   const [limit, setLimit] = useState<Record<string, number>>({});
   const [contextCaps, setContextCaps] = useState<Record<string, number>>({});
   const [contextCapValue, setContextCapValue] = useState(350_000);
+  // Image downsampling: a global default, a per-provider override, and a per-model override.
+  const [downsample, setDownsample] = useState<{
+    defaultEnabled: boolean;
+    providers: Record<string, boolean>;
+    models: Record<string, boolean>;
+  }>({ defaultEnabled: false, providers: {}, models: {} });
   const [customCap, setCustomCap] = useState("");
   const [showCustom, setShowCustom] = useState(false);
   const [collapsed, setCollapsed] = useState<Set<string>>(() => {
@@ -198,9 +240,12 @@ export default function Models({ apiBase }: { apiBase: string }) {
 
   const load = async () => {
     try {
-     const [data, capsData] = await Promise.all([
+     const [data, capsData, downsampleData] = await Promise.all([
        fetch(`${apiBase}/api/models`).then(r => r.json()) as Promise<ModelRow[]>,
        fetch(`${apiBase}/api/provider-context-caps`).then(r => r.json()) as Promise<ProviderContextCapsResponse>,
+       fetch(`${apiBase}/api/image-downsample`).then(r => r.ok ? r.json() : null).catch(() => null) as Promise<{
+         defaultEnabled?: boolean; providers?: Record<string, boolean>; models?: Record<string, boolean>;
+       } | null>,
      ]);
      void loadV2(); // best-effort, independent of the models fetch
      setModels(data);
@@ -210,6 +255,13 @@ export default function Models({ apiBase }: { apiBase: string }) {
         : (typeof capsData.cap === "number" && Number.isFinite(capsData.cap) && capsData.cap > 0 ? capsData.cap : undefined);
       if (value !== undefined) setContextCapValue(value);
      setContextCaps(capsData.caps ?? {});
+     if (downsampleData) {
+       setDownsample({
+         defaultEnabled: downsampleData.defaultEnabled === true,
+         providers: downsampleData.providers ?? {},
+         models: downsampleData.models ?? {},
+       });
+     }
    } catch {
       setOk(false); setStatus(t("models.loadFail"));
     } finally {
@@ -385,6 +437,56 @@ export default function Models({ apiBase }: { apiBase: string }) {
       setBusy(false);
       busyRef.current = false;
     }
+  };
+
+  // Image downsampling switch: global default + provider override + model override.
+  // Same three-state shape as the context cap (follow provider / force on / force off).
+  const putDownsample = async (
+    body: { scope: "global" | "provider" | "model"; provider?: string; model?: string; enabled: boolean | null },
+  ) => {
+    setBusy(true);
+    busyRef.current = true;
+    setStatus("");
+    try {
+      const r = await fetch(`${apiBase}/api/image-downsample`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (r.ok) {
+        const data = (await r.json()) as {
+          defaultEnabled?: boolean; providers?: Record<string, boolean>; models?: Record<string, boolean>;
+        };
+        setDownsample({
+          defaultEnabled: data.defaultEnabled === true,
+          providers: data.providers ?? {},
+          models: data.models ?? {},
+        });
+        setOk(true);
+        setStatus(t("models.downsampleApplied"));
+      } else {
+        setOk(false);
+        setStatus(t("models.downsampleSaveFailed"));
+      }
+    } catch {
+      setOk(false); setStatus(t("models.networkError"));
+    } finally {
+      setBusy(false);
+      busyRef.current = false;
+    }
+  };
+
+  const toggleGlobalDownsample = () => {
+    void putDownsample({ scope: "global", enabled: !downsample.defaultEnabled });
+  };
+
+  const toggleProviderDownsample = (provider: string) => {
+    const current = downsample.providers[provider] ?? downsample.defaultEnabled;
+    void putDownsample({ scope: "provider", provider, enabled: !current });
+  };
+
+  const applyModelDownsample = (namespaced: string, value: boolean | null) => {
+    void putDownsample({ scope: "model", model: namespaced, enabled: value });
   };
 
   // Probe the REAL context window for a model: what the upstream declares vs. the ceiling it
@@ -702,6 +804,12 @@ export default function Models({ apiBase }: { apiBase: string }) {
         <span className="muted mono" style={{ fontSize: 12 }}>{t("models.setAll")}</span>
       </div>
 
+      <div className="row" style={{ gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+        <span className="muted" style={{ fontSize: 13 }}>{t("models.downsampleLabel")}</span>
+        <Switch on={downsample.defaultEnabled} onClick={toggleGlobalDownsample} disabled={busy} label={t("models.downsampleGlobal")} />
+        <span className="muted mono" style={{ fontSize: 12 }}>{t("models.downsampleGlobal")}</span>
+      </div>
+
      {groups.map(([provider, rows]) => {
        const isCollapsed = collapsed.has(provider);
        const activeCount = rows.filter(m => !disabled.has(m.namespaced)).length;
@@ -734,6 +842,13 @@ export default function Models({ apiBase }: { apiBase: string }) {
                 {!isNative && <>
                   <Switch on={capOn} onClick={() => toggleProviderCap(provider)} disabled={busy} label={t("models.capValue", { value: fmtK(contextCapValue) })} />
                   <span className="muted mono" style={{ fontSize: 12 }}>{t("models.capValue", { value: fmtK(contextCapValue) })}</span>
+                  <Switch
+                    on={downsample.providers[provider] ?? downsample.defaultEnabled}
+                    onClick={() => toggleProviderDownsample(provider)}
+                    disabled={busy}
+                    label={t("models.downsampleLabel")}
+                  />
+                  <span className="muted mono" style={{ fontSize: 12 }}>{t("models.downsampleLabel")}</span>
                 </>}
               </div>
            </div>
@@ -767,6 +882,14 @@ export default function Models({ apiBase }: { apiBase: string }) {
                           providerCapOn={contextCaps[m.provider] === contextCapValue}
                           disabled={busy}
                           onPick={(v) => { void applyModelOverride(m.namespaced, v); }}
+                        />
+                      )}
+                      {!m.native && (
+                        <PerModelDownsampleSelect
+                          value={downsample.models[m.namespaced]}
+                          providerOn={downsample.providers[m.provider] ?? downsample.defaultEnabled}
+                          disabled={busy}
+                          onPick={(v) => { applyModelDownsample(m.namespaced, v); }}
                         />
                       )}
                      {!m.native && (

@@ -1162,6 +1162,18 @@ select.input { appearance: none; }
 
 .prov-meta > span { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* The base URL is the one field an operator actually wants to READ in full and copy,
+   so it wraps instead of being ellipsised, and it is selectable (the ellipsis span
+   above is not - the text is clipped away and cannot be selected). */
+
+.prov-meta > span.prov-base-url {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
 .provider-quota { padding-left: 58px; }
 
 .provider-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
@@ -1388,6 +1400,10 @@ select.input { appearance: none; }
   .prov-meta { display: grid; grid-template-columns: max-content minmax(0, 1fr); width: 100%; }
 
   .prov-meta .chip ~ span:not(:last-child) { display: none; }
+
+  /* ...except the base URL: it stays visible (and the copy button next to it). */
+
+  .prov-meta .chip ~ span.prov-base-url { display: inline; }
 
   /* account login grid: let name/status truncate with ellipsis instead of wrapping */
 

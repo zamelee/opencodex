@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import AddProviderModal from "../components/AddProviderModal";
 import EditProviderModal, { type EditableProvider } from "../components/EditProviderModal";
 import { Notice } from "../ui";
-import { IconPlus, IconTrash, IconLock, IconExternal, IconPower, IconChevron, IconEdit } from "../icons";
+import { IconPlus, IconTrash, IconLock, IconExternal, IconPower, IconChevron, IconEdit, IconCopy, IconCheck } from "../icons";
+import { copyToClipboard } from "../clipboard";
 import { useT, type TFn } from "../i18n";
 import type { AccountQuota } from "../codex-quota-utils";
 import { formatRelativeTime } from "../codex-quota-utils";
@@ -180,6 +181,17 @@ export default function Providers({ apiBase }: { apiBase: string }) {
   // provider.defaultModel: it only steers the NEXT 测试 / 拉取 call. Initial value
   // comes from provider.defaultModel, which stays the single source of truth.
   const [testModelLocal, setTestModelLocal] = useState<Record<string, string>>({});
+  // Which provider's baseUrl was just copied (the button flips to a checkmark for a moment).
+  const [copiedBaseUrl, setCopiedBaseUrl] = useState<string | null>(null);
+
+  const copyBaseUrl = async (provider: string, url: string) => {
+    const ok = await copyToClipboard(url);
+    if (!ok) return;
+    setCopiedBaseUrl(provider);
+    window.setTimeout(() => {
+      setCopiedBaseUrl(prev => (prev === provider ? null : prev));
+    }, 1200);
+  };
   // Result of the real chat test (POST /api/providers/keys/chat-test), keyed by
   // provider then key id. Kept separate from `keyTests` (余量探测) so the dialog
   // can show both panes.
@@ -963,7 +975,22 @@ export default function Providers({ apiBase }: { apiBase: string }) {
                       </div>
                       <div className="muted prov-meta" style={{ fontSize: 13 }}>
                         <code className="chip">{prov.adapter}</code>
-                        <span>{prov.baseUrl}</span>
+                        <span className="prov-base-url">{prov.baseUrl}</span>
+                        {prov.baseUrl ? (
+                          <button
+                            type="button"
+                            className="btn btn-ghost btn-sm"
+                            style={{ fontSize: 11, padding: "1px 6px" }}
+                            title={t("prov.copyBaseUrl")}
+                            aria-label={t("prov.copyBaseUrl")}
+                            data-testid={`provider-copy-url-${name}`}
+                            onClick={() => { void copyBaseUrl(name, prov.baseUrl ?? ""); }}
+                          >
+                            {copiedBaseUrl === name
+                              ? <><IconCheck width={12} height={12} /> {t("prov.copied")}</>
+                              : <><IconCopy width={12} height={12} /> {t("prov.copy")}</>}
+                          </button>
+                        ) : null}
                         {prov.defaultModel && <span>{prov.defaultModel}</span>}
                         {prov.hasApiKey && <span>{t("prov.hasApiKey")}</span>}
                         {prov.hasHeaders && <span>{t("prov.hasHeaders")}</span>}

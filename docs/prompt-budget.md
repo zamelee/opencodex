@@ -37,7 +37,8 @@ Our estimator is calibrated against the upstream's own number: the same body est
 | `providers.<name>.supportsSearchTool` | provider config / Providers page -> *Enable hosted web search* | **off** | when off, Codex does not attach `web_search` to this provider's requests, so the turn does not go through the web-search sidecar (one extra model call) and the search results are not appended back into the conversation |
 | `providers.<name>.contextWindow` | provider config | model metadata | the window Codex believes; declare it **below** the upstream's real ceiling so the client compacts before the upstream would reject a request |
 | learned upstream ceiling | learned at runtime from the upstream's `prompt is too long: N > M maximum` | - | the proxy's own brake uses this number (the real ceiling), not the conservative declared one |
-| image degradation | automatic | - | when the outgoing body is over the upstream's budget, unusable images are dropped first, then the **oldest** images are textified |
+| image degradation | automatic | - | when the outgoing body is over the upstream's budget, unusable images are dropped first, then images are given up **by value** (duplicates first, then early history, biggest first; the current turn's images survive longest) |
+| image downsampling | `imageDownsample` / `providerImageDownsample` / `modelImageDownsample` | **off** | when the brake fires and downsampling is enabled, oversized images are genuinely **resized** (sharp) instead of dropped - the model still sees the picture, just a smaller one |
 
 ## Side effects to know about
 
@@ -51,15 +52,40 @@ Our estimator is calibrated against the upstream's own number: the same body est
 2. **A lower declared window makes Codex compact earlier** - that is the point, but it also means
    more compactions (shorter conversations, an occasional "summarized too early" feeling) and a
    slower first turn after each compaction.
-3. **The image brake loses screenshots when it fires.** It degrades the OLDEST images first, so
-   the newest screenshot (the one the user just took) survives longest. The drop is logged
-   (`upstream prompt budget: dropped N image(s)`) and visible in the request log.
+3. **The image brake gives something up when it fires.** With downsampling off, images are
+   dropped - by value, not by age: a repeated payload goes first (it carries no new
+   information), then early history, biggest first. The CURRENT turn's images are never
+   dropped unless nothing else is left. With downsampling ON, an oversized image is first
+   scaled down to the provider family's standard edge (Anthropic 1568px, OpenAI 2048px) and
+   only dropped if it still does not fit. Every drop and every resize is logged per image
+   (`upstream prompt budget: dropped image #N ... / downscaled image #N ...`).
 4. **The brake only protects the prompt.** If the conversation *text* alone is over the window,
    dropping images cannot help - only compaction can. The proxy logs the estimate either way.
 5. **The learned ceiling is per provider and lives in memory**, so it resets on restart; until
    the upstream rejects one request, the proxy falls back to the declared window (conservative).
 6. **The compaction request is treated separately**: it carries the pre-compaction history, so it
    gets 85% of the window plus an output reserve. This is the request shape that actually died.
+7. **Downsampling changes what the upstream sees.** It is off by default precisely because a
+   downscaled screenshot is a smaller screenshot: a model that had to read fine print may
+   read it wrong. Turn it on per provider or per model when the provider bills by pixel and
+   the pictures are decorative.
+
+## The downsampling switch
+
+Three levels, same shape as the context-cap settings, resolved in this order:
+model -> provider -> global.
+
+```json
+{
+  "imageDownsample": false,
+  "providerImageDownsample": { "m.aiio.chat": true },
+  "modelImageDownsample": { "m.aiio.chat/MiniMax-M3.1-Flash-Preview": false }
+}
+```
+
+In the GUI (Models page) this is the **图片降采样** switch next to each provider's cap switch,
+plus a per-model dropdown (跟随 Provider / 开 / 关). `imageDownsampleMaxEdge` (256..8192) pins
+the target long edge instead of deriving it from the provider family.
 
 ## What was NOT changed
 
