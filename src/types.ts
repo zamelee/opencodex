@@ -367,6 +367,18 @@ export interface OcxConfig {
   cacheRetention?: "none" | "short" | "long";
   /** Web-search sidecar: route web_search for non-OpenAI models through a gpt-mini via ChatGPT passthrough. */
   webSearchSidecar?: OcxWebSearchSidecarConfig;
+  /**
+   * Shrink oversized images instead of dropping them when a request would exceed the
+   * upstream's context budget. The model keeps seeing the picture, just a smaller one.
+   * Off by default - the operator decides whether a downscaled screenshot is acceptable.
+   */
+  imageDownsample?: boolean;
+  /** Per-provider override of the downsampling switch. Undefined = follow the global default. */
+  providerImageDownsample?: Record<string, boolean>;
+  /** Per-model override, keyed by the routed id ("<provider>/<model>"). */
+  modelImageDownsample?: Record<string, boolean>;
+  /** Target long edge (px) for the downscaled image. Defaults to the provider family's limit. */
+  imageDownsampleMaxEdge?: number;
   /** Vision sidecar: describe images via a gpt vision model so text-only models can "see" them. */
   visionSidecar?: OcxVisionSidecarConfig;
   /** /v1/images relay for codex's built-in image_gen tool. */

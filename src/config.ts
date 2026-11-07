@@ -122,6 +122,12 @@ const configSchema = z.object({
   providerContextCaps: z.record(z.string(), z.union([z.boolean(), z.number().int().positive()])).optional(),
   contextCapValue: z.union([z.number().int().positive(), z.record(z.string(), z.number().int().positive())]).optional(),
   modelContextOverrides: z.record(z.string(), z.union([z.number().int().positive(), z.literal(false)])).optional(),
+  // Image downsampling (phase 2 of the prompt-budget brake). Off by default: an
+  // operator who wants the upstream to see byte-exact payloads must be able to say no.
+  imageDownsample: z.boolean().optional(),
+  providerImageDownsample: z.record(z.string(), z.boolean()).optional(),
+  modelImageDownsample: z.record(z.string(), z.boolean()).optional(),
+  imageDownsampleMaxEdge: z.number().int().min(256).max(8192).optional(),
 }).passthrough().transform((config) => {
   // Path C: legacy number-valued providerContextCaps entries (e.g. { anthropic: 200000 }) are
   // promoted to boolean on/off toggles, with the per-provider number absorbed into

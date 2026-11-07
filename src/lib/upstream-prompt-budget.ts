@@ -20,6 +20,18 @@
  */
 
 import { measureAnthropicWireComposition } from "./token-composition";
+import { collectImageInventory } from "../image/image-inventory";
+import { downsampleImagePayload } from "../image/image-downsample";
+import { estimateImageTokens, targetMaxEdgeForFamily } from "../image/image-estimator";
+import type { ImageInventoryEntry } from "../image/image-inventory";
+import {
+  describeDrop,
+  dropOrder,
+  droppedImagePlaceholder,
+  fallbackOrder,
+  planImages,
+  type ImageDropLog,
+} from "../image/image-policy";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
@@ -119,15 +131,6 @@ export function resetLearnedUpstreamLimits(): void {
   learnedLimits.clear();
 }
 
-interface ImageRef {
-  container: unknown[];
-  index: number;
-  /** True when the payload is a data URL we can still bill as vision. */
-  usable: boolean;
-  /** Payload length — the cost we remove when the block is dropped. */
-  payloadChars: number;
-}
-
 /**
  * Is this an Anthropic wire body?
  *
@@ -151,36 +154,6 @@ function isAnthropicWireBody(body: unknown): boolean {
   return true;
 }
 
-function isHttpUrl(value: unknown): boolean {
-  return typeof value === "string" && /^https?:\/\//i.test(value);
-}
-
-function collectImages(messages: unknown[]): ImageRef[] {
-  const refs: ImageRef[] = [];
-  const scan = (arr: unknown[]): void => {
-    for (let i = 0; i < arr.length; i++) {
-      const block = arr[i] as { type?: unknown; source?: unknown; content?: unknown } | null;
-      if (!block || typeof block !== "object") continue;
-      if (block.type === "image") {
-        const source = (block.source ?? {}) as { type?: unknown; data?: unknown; url?: unknown };
-        const usable = source.type === "base64" && typeof source.data === "string";
-        const url = typeof source.url === "string" ? source.url : "";
-        const payloadChars = usable
-          ? String(source.data ?? "").length
-          : (isHttpUrl(url) ? 0 : url.length);
-        refs.push({ container: arr, index: i, usable, payloadChars });
-      } else if (block.type === "tool_result" && Array.isArray(block.content)) {
-        scan(block.content);
-      }
-    }
-  };
-  for (const msg of messages) {
-    const content = (msg as { content?: unknown })?.content;
-    if (Array.isArray(content)) scan(content);
-  }
-  return refs;
-}
-
 export interface PromptBudgetResult {
   /** The (possibly rewritten) wire body. */
   body: unknown;
@@ -190,8 +163,72 @@ export interface PromptBudgetResult {
   limitTokens: number | null;
   /** How many image blocks were replaced by a text marker. */
   droppedImages: number;
+  /** Per-image audit of what the brake gave up and why. */
+  imageDrops: ImageDropLog[];
+  /** Per-image audit of what the brake SHRANK instead of dropping. */
+  imageDownsamples: ImageDownsampleLog[];
   /** True when the estimate still exceeds the limit (text alone is too big). */
   overBudget: boolean;
+}
+
+/** One line per downsampled image, for the request log. */
+export interface ImageDownsampleLog {
+  ordinal: number;
+  tier: string;
+  reason: string;
+  dimensionsBefore?: string;
+  dimensionsAfter: string;
+  bytesBefore: number;
+  bytesAfter: number;
+  estimatedTokensBefore: number;
+  estimatedTokensAfter: number;
+}
+
+export interface PromptBudgetOptions {
+  /** Provider name, for the billing-family detection behind the per-image estimate. */
+  providerName?: string;
+  /** Model id, for the billing-family detection behind the per-image estimate. */
+  modelId?: string;
+  /** How many recent turns keep their images when the brake has to give some up. */
+  preserveRecentTurns?: number;
+  /**
+   * Shrink an oversized image instead of dropping it (phase 2). Off by default: an
+   * operator who wants the upstream to see byte-exact payloads must be able to say no.
+   */
+  imageDownsample?: boolean;
+  /** Override the target long edge. Defaults to the provider family's standard limit. */
+  downsampleMaxEdge?: number;
+}
+
+/**
+ * Shrink one image block in place and keep the inventory in sync.
+ *
+ * The wire block is the Anthropic shape `{ type: "image", source: { type: "base64",
+ * media_type, data } }`. The media type has to follow the new payload - a PNG payload
+ * announced as JPEG is a 400 from the upstream.
+ */
+async function downsampleImageBlock(
+  entry: ImageInventoryEntry,
+  options: { maxEdge: number },
+): Promise<{ data: string; width: number; height: number; bytesBefore: number; bytesAfter: number } | null> {
+  const block = entry.container[entry.index] as
+    | { type?: unknown; source?: { type?: unknown; media_type?: unknown; data?: unknown } }
+    | undefined;
+  const source = block?.source;
+  if (!source || typeof source.data !== "string") return null;
+  const mediaType = typeof source.media_type === "string" ? source.media_type : "image/png";
+  const result = await downsampleImagePayload(source.data, mediaType, options);
+  if (!result) return null;
+  source.media_type = result.mediaType;
+  source.data = result.data;
+  entry.data = result.data;
+  return {
+    data: result.data,
+    width: result.width,
+    height: result.height,
+    bytesBefore: result.bytesBefore,
+    bytesAfter: result.bytesAfter,
+  };
 }
 
 /**
@@ -219,10 +256,11 @@ export function effectiveUpstreamPromptLimit(
  * request goes out exactly as built. The body may be a JSON string (that is what the adapters
  * hand to fetch) or a parsed object; the same shape comes back.
  */
-export function enforceUpstreamPromptBudget(
+export async function enforceUpstreamPromptBudget(
   body: unknown,
   limitTokens: number | undefined,
-): PromptBudgetResult {
+  options: PromptBudgetOptions = {},
+): Promise<PromptBudgetResult> {
   const isString = typeof body === "string";
   let parsed: unknown = body;
   if (isString) {
@@ -234,6 +272,8 @@ export function enforceUpstreamPromptBudget(
         estimatedTokens: 0,
         limitTokens: limitTokens ?? null,
         droppedImages: 0,
+        imageDrops: [],
+        imageDownsamples: [],
         overBudget: false,
       };
     }
@@ -249,6 +289,8 @@ export function enforceUpstreamPromptBudget(
       estimatedTokens: before.estimatedTokens,
       limitTokens: limitTokens ?? null,
       droppedImages: 0,
+      imageDrops: [],
+      imageDownsamples: [],
       overBudget: false,
     };
   }
@@ -258,33 +300,125 @@ export function enforceUpstreamPromptBudget(
       estimatedTokens: before.estimatedTokens,
       limitTokens: limitTokens ?? null,
       droppedImages: 0,
+      imageDrops: [],
+      imageDownsamples: [],
       overBudget: limitTokens !== undefined && before.estimatedTokens > limitTokens,
     };
   }
 
   const wire = parsed as { messages?: unknown[] };
-  const messages = Array.isArray(wire.messages) ? wire.messages : [];
   const budget = Math.floor(limitTokens * UPSTREAM_BUDGET_MARGIN);
   let dropped = 0;
+  const imageDrops: ImageDropLog[] = [];
+  const imageDownsamples: ImageDownsampleLog[] = [];
 
   // Step 1: an image we cannot bill as vision is billed as TEXT upstream. Drop those first —
   // they are the expensive ones (a 400KB "url" payload costs ~300k tokens as text).
-  for (const ref of collectImages(messages)) {
-    if (ref.usable || ref.payloadChars === 0) continue;
+  const inventory = collectImageInventory(wire);
+  for (const ref of inventory.entries) {
+    if (ref.kind === "native") continue;
+    if (ref.payloadChars === 0) continue;
     ref.container[ref.index] = { type: "text", text: DROPPED_IMAGE_TEXT };
     dropped++;
   }
 
-  // Step 2: still over budget — give up the OLDEST images first (the newest screenshot is the
-  // one the model needs). Each native image costs ~1.6k vision tokens.
+  // Step 2: still over budget — give up images by VALUE, not by age.
+  //
+  // The old rule was "oldest first". That is wrong in both directions: an old screenshot
+  // may be the only record of the bug the user is chasing, and the newest one may be a
+  // duplicate of it. The policy drops, in order: early-history duplicates, then early
+  // history (biggest first), then recent turns. The CURRENT turn's images are never
+  // dropped - those are what the user just attached.
+  const plan = planImages(inventory, {
+    providerName: options.providerName ?? "",
+    ...(options.modelId !== undefined ? { modelId: options.modelId } : {}),
+    ...(options.preserveRecentTurns !== undefined ? { preserveRecentTurns: options.preserveRecentTurns } : {}),
+  });
+  // Phase 2 (optional): shrink an oversized image rather than give it up.
+  const downsampleEnabled = options.imageDownsample === true;
+  const targetMaxEdge = options.downsampleMaxEdge ?? targetMaxEdgeForFamily(plan.family);
   let guard = 0;
   while (guard++ < 200) {
     const current = measureAnthropicWireComposition(wire);
     if (current.estimatedTokens <= budget) break;
-    const images = collectImages(messages).filter((r) => r.usable);
-    if (images.length === 0) break;
-    const oldest = images[0];
-    oldest.container[oldest.index] = { type: "text", text: DROPPED_IMAGE_TEXT };
+    const stillImages = (item: typeof plan.items[number]): boolean =>
+      (item.entry.container[item.entry.index] as { type?: unknown } | undefined)?.type === "image";
+
+    // 2a. A repeated payload is the cheapest thing we can give up: the same bytes are
+    //     still in the request, so nothing is lost. It goes first.
+    const duplicate = dropOrder(plan).find(
+      (item) => item.tier === "P2-duplicate" && stillImages(item),
+    );
+    if (duplicate) {
+      const reason = "dropped to fit the upstream context budget (duplicate of an earlier image)";
+      duplicate.entry.container[duplicate.entry.index] = {
+        type: "text",
+        text: droppedImagePlaceholder(duplicate.entry, reason),
+      };
+      imageDrops.push(describeDrop(duplicate, reason));
+      dropped++;
+      continue;
+    }
+
+    // 2b. Still over budget: SHRINK the most expensive image instead of dropping it.
+    //     The model keeps seeing the picture - just a smaller one.
+    if (downsampleEnabled) {
+      const candidate = plan.items
+        .filter((item) => stillImages(item))
+        .filter((item) => {
+          const w = item.entry.width ?? 0;
+          const h = item.entry.height ?? 0;
+          return w > 0 && h > 0 && Math.max(w, h) > targetMaxEdge;
+        })
+        .sort((a, b) => b.estimate.tokens - a.estimate.tokens)[0];
+      if (candidate) {
+        const dimsBefore = candidate.entry.width && candidate.entry.height
+          ? `${candidate.entry.width}x${candidate.entry.height}`
+          : undefined;
+        const tokensBefore = candidate.estimate.tokens;
+        const outcome = await downsampleImageBlock(candidate.entry, { maxEdge: targetMaxEdge });
+        if (outcome) {
+          candidate.entry.width = outcome.width;
+          candidate.entry.height = outcome.height;
+          candidate.entry.payloadChars = outcome.data.length;
+          candidate.estimate = estimateImageTokens(outcome.width, outcome.height, plan.family);
+          imageDownsamples.push({
+            ordinal: candidate.entry.ordinal,
+            tier: candidate.tier,
+            reason: "downscaled to fit the upstream context budget",
+            ...(dimsBefore ? { dimensionsBefore: dimsBefore } : {}),
+            dimensionsAfter: `${outcome.width}x${outcome.height}`,
+            bytesBefore: outcome.bytesBefore,
+            bytesAfter: outcome.bytesAfter,
+            estimatedTokensBefore: tokensBefore,
+            estimatedTokensAfter: candidate.estimate.tokens,
+          });
+          continue;
+        }
+      }
+    }
+
+    // 2c. Nothing left to shrink: give up images by policy value, not by position.
+    let remaining = dropOrder(plan).filter(stillImages);
+    if (remaining.length === 0) {
+      // Everything except the current turn is gone and it still does not fit.
+      // Now the current turn has to go too - a request that the upstream rejects
+      // outright kills the whole turn, which is worse than losing the image.
+      remaining = fallbackOrder(plan).filter(stillImages);
+      if (remaining.length === 0) break;
+    }
+    const next = remaining[0];
+    if (!next) break;
+    const reason = next.tier === "P2-duplicate"
+      ? "dropped to fit the upstream context budget (duplicate of an earlier image)"
+      : next.tier === "P3-early-unique"
+        ? "dropped to fit the upstream context budget (early history)"
+        : "dropped to fit the upstream context budget (recent turn)";
+    next.entry.container[next.entry.index] = {
+      type: "text",
+      text: droppedImagePlaceholder(next.entry, reason),
+    };
+    imageDrops.push(describeDrop(next, reason));
     dropped++;
   }
 
@@ -294,6 +428,8 @@ export function enforceUpstreamPromptBudget(
     estimatedTokens: after.estimatedTokens,
     limitTokens,
     droppedImages: dropped,
+    imageDrops,
+    imageDownsamples,
     overBudget: after.estimatedTokens > limitTokens,
   };
 }

@@ -921,6 +921,48 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
     return jsonResponse({ ok: true, disabled });
   }
 
+  // Image downsampling switch: a global default plus a per-provider and per-model override.
+  // Same three-state shape as the context caps (follow the provider / force on / force off).
+  if (url.pathname === "/api/image-downsample" && req.method === "GET") {
+    const { imageDownsampleSettings } = await import("../providers/image-downsample");
+    return jsonResponse(imageDownsampleSettings(config));
+  }
+
+  if (url.pathname === "/api/image-downsample" && req.method === "PUT") {
+    let body: { scope?: unknown; provider?: unknown; model?: unknown; enabled?: unknown };
+    try { body = await req.json(); } catch { return jsonResponse({ error: "invalid JSON body" }, 400); }
+    const { setGlobalImageDownsample, setModelImageDownsample, setProviderImageDownsample } =
+      await import("../providers/image-downsample");
+    const enabled = body.enabled === null ? null : body.enabled === true ? true : body.enabled === false ? false : undefined;
+    if (enabled === undefined) {
+      return jsonResponse({ error: "enabled must be a boolean or null" }, 400);
+    }
+    const scope = typeof body.scope === "string" ? body.scope : "";
+    if (scope === "global") {
+      setGlobalImageDownsample(config, enabled);
+    } else if (scope === "provider") {
+      if (typeof body.provider !== "string" || !body.provider.trim()) {
+        return jsonResponse({ error: "provider string is required for scope=provider" }, 400);
+      }
+      const provider = body.provider.trim();
+      if (!isValidProviderName(provider)) {
+        return jsonResponse({ error: "provider name must use letters, numbers, dot, underscore, or hyphen and cannot be a reserved object key" }, 400);
+      }
+      setProviderImageDownsample(config, provider, enabled);
+    } else if (scope === "model") {
+      if (typeof body.model !== "string" || !body.model.trim()) {
+        return jsonResponse({ error: "model string is required for scope=model" }, 400);
+      }
+      setModelImageDownsample(config, body.model.trim(), enabled);
+    } else {
+      return jsonResponse({ error: "scope must be global, provider, or model" }, 400);
+    }
+    const { saveConfig: save } = await import("../config");
+    save(config);
+    const { imageDownsampleSettings } = await import("../providers/image-downsample");
+    return jsonResponse({ ok: true, ...imageDownsampleSettings(config) });
+  }
+
   // multi_agent_v2 surface toggle. GET reports the flag + the agents.max_threads
   // boot conflict; PUT flips it via the official `codex features` CLI and RESYNCS
   // the catalog so multi-agent surface metadata stays fresh. The catalog build

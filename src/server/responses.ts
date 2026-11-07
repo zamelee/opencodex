@@ -40,6 +40,7 @@ import { isUsageDebugEnabled } from "../usage/debug";
 import { readJsonRequestBody, DecompressedBodyTooLargeError, UnsupportedContentEncodingError } from "./request-decompress";
 import { resolveAdapter, resolveWireProtocolOverride } from "./adapter-resolve";
 import { hasKeyPoolFailover, rotateKeyOn429 } from "../providers/key-failover";
+import { resolveImageDownsampleEnabled } from "../providers/image-downsample";
 import type { WsData } from "./ws-bridge";
 import { registerTurn, trackStreamLifetime, unregisterTurn } from "./lifecycle";
 import { redactSecretString } from "../lib/redact";
@@ -995,6 +996,14 @@ export async function handleResponses(
       settings: wsPlan.settings,
       maxSearches: wsPlan.maxSearches,
       upstreamPromptLimit: upstreamPromptLimitFor(route),
+      providerName: route.providerName,
+      modelId: route.modelId,
+      ...(resolveImageDownsampleEnabled(config, route.providerName, route.modelId)
+        ? { imageDownsample: true }
+        : {}),
+      ...(config.imageDownsampleMaxEdge !== undefined
+        ? { imageDownsampleMaxEdge: config.imageDownsampleMaxEdge }
+        : {}),
       forceEmptyResponseId: true,
       abortSignal: options.abortSignal,
       recordSidecarOutcome,
@@ -1058,16 +1067,46 @@ export async function handleResponses(
       compaction: routedCompaction,
       outputReserve,
     });
-    const budget = enforceUpstreamPromptBudget(request.body, effectiveLimit);
-    if (budget.droppedImages > 0) {
+    const budget = await enforceUpstreamPromptBudget(request.body, effectiveLimit, {
+      providerName: route.providerName,
+      modelId: route.modelId,
+      ...(resolveImageDownsampleEnabled(config, route.providerName, route.modelId)
+        ? { imageDownsample: true }
+        : {}),
+      ...(config.imageDownsampleMaxEdge !== undefined
+        ? { downsampleMaxEdge: config.imageDownsampleMaxEdge }
+        : {}),
+    });
+    if (budget.droppedImages > 0 || budget.imageDownsamples.length > 0) {
       request.body = budget.body as string;
       logCtx.promptComposition = summarizeRequestBody(request.body);
       console.warn(
-        `[${route.providerName}] upstream prompt budget: dropped ${budget.droppedImages} image(s); `
+        `[${route.providerName}] upstream prompt budget: dropped ${budget.droppedImages} image(s), `
+        + `downscaled ${budget.imageDownsamples.length} image(s); `
         + `estimate ${budget.estimatedTokens} tokens vs limit ${effectiveLimit}`
         + ` (upstream window ${upstreamLimit}, output reserve ${outputReserve}`
         + `${routedCompaction ? `, compaction x${COMPACTION_BUDGET_FACTOR}` : ""})`,
       );
+      // Per-image audit of the SHRINKS: what was resized, to what, and what it bought.
+      // Downsampling changes what the model sees, so it has to be visible in the log.
+      for (const down of budget.imageDownsamples) {
+        console.warn(
+          `[${route.providerName}] upstream prompt budget: downscaled image #${down.ordinal} `
+          + `(${down.tier}, ${down.dimensionsBefore ?? "unknown size"} -> ${down.dimensionsAfter}, `
+          + `${down.bytesBefore} -> ${down.bytesAfter} bytes, `
+          + `~${down.estimatedTokensBefore} -> ~${down.estimatedTokensAfter} tokens) - ${down.reason}`,
+        );
+      }
+      // Per-image audit: WHICH image went, why, and what we thought it cost. Without this
+      // the brake is a black box - the operator sees "dropped 3 images" and cannot tell
+      // whether the policy kept the one the user cared about.
+      for (const drop of budget.imageDrops) {
+        console.warn(
+          `[${route.providerName}] upstream prompt budget: dropped image #${drop.ordinal} `
+          + `(${drop.tier}, ${drop.dimensions ?? "unknown size"}, duplicate=${drop.duplicate}, `
+          + `~${drop.estimatedTokens} tokens via ${drop.estimateMethod}/${drop.estimateConfidence}) - ${drop.reason}`,
+        );
+      }
     }
   }
   if (typeof request.usageLog?.inputTokens === "number") {

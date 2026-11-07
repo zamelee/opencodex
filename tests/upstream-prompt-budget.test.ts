@@ -73,18 +73,18 @@ describe("upstream prompt budget (the brake Codex does not have)", () => {
     resetLearnedUpstreamLimits();
   });
 
-  test("does nothing when there is no limit", () => {
+  test("does nothing when there is no limit", async () => {
     const body = anthropicBody([userMessage([nativeImage(PNG_B64)])]);
-    const result = enforceUpstreamPromptBudget(body, undefined);
+    const result = await enforceUpstreamPromptBudget(body, undefined);
     expect(result.droppedImages).toBe(0);
     expect(result.body).toBe(body);
   });
 
-  test("drops an image whose payload is not a usable data URL (the 2.2M-token shape)", () => {
+  test("drops an image whose payload is not a usable data URL (the 2.2M-token shape)", async () => {
     // A `url` source whose url is a 400KB blob is billed as TEXT upstream (~1.4 chars/token).
     const huge = "A".repeat(400_000);
     const body = anthropicBody([userMessage([{ type: "image", source: { type: "url", url: huge } }])]);
-    const result = enforceUpstreamPromptBudget(body, 100_000);
+    const result = await enforceUpstreamPromptBudget(body, 100_000);
     expect(result.droppedImages).toBe(1);
     expect(result.estimatedTokens).toBeLessThanOrEqual(100_000);
     const content = (result.body as { messages: Array<{ content: Array<{ type?: string; text?: string }> }> })
@@ -93,38 +93,43 @@ describe("upstream prompt budget (the brake Codex does not have)", () => {
     expect(content[0].text).toBe(DROPPED_IMAGE_TEXT);
   });
 
-  test("textifies the OLDEST images first when the estimate is over budget", () => {
+  test("drops duplicate copies before distinct images when the estimate is over budget", async () => {
     const body = anthropicBody([
       userMessage([nativeImage(SCREENSHOT_B64), nativeImage(SCREENSHOT_B64), nativeImage(SCREENSHOT_B64)]),
     ]);
     // 3 x ~1013 vision tokens: a 2k budget leaves room for roughly one image.
-    const result = enforceUpstreamPromptBudget(body, 2_000);
+    const result = await enforceUpstreamPromptBudget(body, 2_000);
     expect(result.droppedImages).toBeGreaterThan(0);
     const content = (result.body as { messages: Array<{ content: Array<{ type?: string }> }> })
       .messages[0].content;
-    // The oldest image is the first one that got replaced.
-    expect(content[0].type).toBe("text");
+    // All three carry the SAME payload, so two of them are pure redundancy. The policy
+    // keeps the first copy (the visual content survives) and gives up the duplicates -
+    // which is strictly better than the old "oldest first" rule that would have
+    // dropped a distinct image while keeping two copies of the same screenshot.
+    expect(content[0].type).toBe("image");
+    expect(content[1].type).toBe("text");
+    expect(content[2].type).toBe("text");
   });
 
-  test("keeps a request that already fits untouched", () => {
+  test("keeps a request that already fits untouched", async () => {
     const body = anthropicBody([userMessage([nativeImage(PNG_B64)])]);
-    const result = enforceUpstreamPromptBudget(body, 1_000_000);
+    const result = await enforceUpstreamPromptBudget(body, 1_000_000);
     expect(result.droppedImages).toBe(0);
     expect(result.overBudget).toBe(false);
     expect(result.body).toBe(body);
   });
 
-  test("accepts a JSON string body (what the adapters hand to fetch)", () => {
+  test("accepts a JSON string body (what the adapters hand to fetch)", async () => {
     const body = JSON.stringify(anthropicBody([
       userMessage([{ type: "image", source: { type: "url", url: "B".repeat(300_000) } }]),
     ]));
-    const result = enforceUpstreamPromptBudget(body, 100_000);
+    const result = await enforceUpstreamPromptBudget(body, 100_000);
     expect(result.droppedImages).toBe(1);
     const parsed = JSON.parse(result.body as string);
     expect(parsed.messages[0].content[0].type).toBe("text");
   });
 
-  test("does not touch a non-Anthropic wire body (an OpenAI image_url part is not ours)", () => {
+  test("does not touch a non-Anthropic wire body (an OpenAI image_url part is not ours)", async () => {
     const body = {
       model: "gpt-x",
       max_tokens: 100,
@@ -133,7 +138,7 @@ describe("upstream prompt budget (the brake Codex does not have)", () => {
         content: [{ type: "image_url", image_url: { url: "data:image/png;base64," + "C".repeat(300_000) } }],
       }],
     };
-    const result = enforceUpstreamPromptBudget(body, 10_000);
+    const result = await enforceUpstreamPromptBudget(body, 10_000);
     expect(result.droppedImages).toBe(0);
     expect(result.body).toBe(body);
   });

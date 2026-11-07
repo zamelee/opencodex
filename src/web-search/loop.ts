@@ -211,6 +211,14 @@ export interface WebSearchLoopDeps {
    * the upstream reject the whole turn with "prompt is too long".
    */
   upstreamPromptLimit?: number;
+  /** Provider name, for the per-image cost estimate behind the brake. */
+  providerName?: string;
+  /** Model id, for the per-image cost estimate behind the brake. */
+  modelId?: string;
+  /** Shrink oversized images instead of dropping them (operator switch). */
+  imageDownsample?: boolean;
+  /** Target long edge (px) for the downscaled image. */
+  imageDownsampleMaxEdge?: number;
 }
 
 /**
@@ -296,13 +304,36 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
         // The upstream's own window, enforced on the wire body (the brake Codex cannot make:
         // it counts the prompt in its own tokenizer and never sees the upstream's number).
         if (deps.upstreamPromptLimit !== undefined) {
-          const budget = enforceUpstreamPromptBudget(request.body, deps.upstreamPromptLimit);
-          if (budget.droppedImages > 0) {
+          const budget = await enforceUpstreamPromptBudget(request.body, deps.upstreamPromptLimit, {
+            ...(deps.providerName !== undefined ? { providerName: deps.providerName } : {}),
+            ...(deps.modelId !== undefined ? { modelId: deps.modelId } : {}),
+            ...(deps.imageDownsample ? { imageDownsample: true } : {}),
+            ...(deps.imageDownsampleMaxEdge !== undefined
+              ? { downsampleMaxEdge: deps.imageDownsampleMaxEdge }
+              : {}),
+          });
+          if (budget.droppedImages > 0 || budget.imageDownsamples.length > 0) {
             request.body = budget.body as string;
             console.warn(
-              `[web-search] upstream prompt budget: dropped ${budget.droppedImages} image(s); `
+              `[web-search] upstream prompt budget: dropped ${budget.droppedImages} image(s), `
+              + `downscaled ${budget.imageDownsamples.length} image(s); `
               + `estimate ${budget.estimatedTokens} tokens vs limit ${deps.upstreamPromptLimit}`,
             );
+            for (const down of budget.imageDownsamples) {
+              console.warn(
+                `[web-search] upstream prompt budget: downscaled image #${down.ordinal} `
+                + `(${down.tier}, ${down.dimensionsBefore ?? "unknown size"} -> ${down.dimensionsAfter}, `
+                + `${down.bytesBefore} -> ${down.bytesAfter} bytes, `
+                + `~${down.estimatedTokensBefore} -> ~${down.estimatedTokensAfter} tokens) - ${down.reason}`,
+              );
+            }
+            for (const drop of budget.imageDrops) {
+              console.warn(
+                `[web-search] upstream prompt budget: dropped image #${drop.ordinal} `
+                + `(${drop.tier}, ${drop.dimensions ?? "unknown size"}, duplicate=${drop.duplicate}, `
+                + `~${drop.estimatedTokens} tokens via ${drop.estimateMethod}/${drop.estimateConfidence}) - ${drop.reason}`,
+              );
+            }
           }
         }
         const response = requestAdapter.fetchResponse
