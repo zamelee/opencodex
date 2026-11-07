@@ -240,6 +240,34 @@ describe("maybeRotateForQuota", () => {
     expect(config.providers.p!.apiKey).toBe("key-alpha-000111222333");
   });
 
+  test("rotates away when the active key's weekly budget is spent (5h still wide open)", async () => {
+    // The real-world case: 5h window at 0% used, calendar week already at 21255/21250.
+    // Nothing about the 5h gate fires, so without the weekly trigger the proxy keeps
+    // routing to a key the upstream will 429 on every single request.
+    const config = makeConfig({ apiKey: POOL[0]!.key, apiKeyPool: POOL });
+    stubProbe([
+      quotaKey("k1", { fiveHourUsed: 0, fiveHourLimit: 2500, weeklyUsed: 21255, weeklyLimit: 21250 }),
+      quotaKey("k2", { fiveHourUsed: 300, fiveHourLimit: 2500, weeklyUsed: 100, weeklyLimit: 21250 }),
+      quotaKey("k3", { fiveHourUsed: 900, fiveHourLimit: 2500, weeklyUsed: 200, weeklyLimit: 21250 }),
+    ]);
+    expect(await maybeRotateForQuota(config, "p", NOW)).toBe(true);
+    expect(config.providers.p!.apiKey).toBe("key-alpha-000111222333");
+    expect(config.providers.p!.pendingKeyChange?.keyId).toBe("k2");
+    expect(config.providers.p!.pendingKeyChange?.reason).toBe("weekly-exhausted");
+    const state = getKeyScheduleState(config, "p");
+    expect(state?.events[0]).toMatchObject({ fromId: "k1", toId: "k2", reason: "weekly-exhausted" });
+  });
+
+  test("weekly exhaustion via percent-only data also triggers a rotation", async () => {
+    const config = makeConfig({ apiKey: POOL[0]!.key, apiKeyPool: POOL });
+    stubProbe([
+      quotaKey("k1", { fiveHourUsed: 0, fiveHourLimit: 2500, weeklyPercent: 100 }),
+      quotaKey("k2", { fiveHourUsed: 300, fiveHourLimit: 2500, weeklyPercent: 4 }),
+    ]);
+    expect(await maybeRotateForQuota(config, "p", NOW)).toBe(true);
+    expect(config.providers.p!.pendingKeyChange?.reason).toBe("weekly-exhausted");
+  });
+
   test("locally recorded calls push the estimate over the threshold", async () => {
     const config = makeConfig({ apiKey: POOL[0]!.key, apiKeyPool: POOL });
     stubProbe([

@@ -726,5 +726,5 @@ export interface PendingKeyChange {
   keyId: string;
   key: string;
   ts: number;
-  reason: "5h-threshold" | "active-expired" | "429";
+  reason: "5h-threshold" | "active-expired" | "weekly-exhausted" | "429";
 }

@@ -54,7 +54,7 @@ export interface KeyRotationEvent {
   provider: string;
   fromId: string;
   toId: string;
-  reason: "5h-threshold" | "active-expired";
+  reason: "5h-threshold" | "active-expired" | "weekly-exhausted";
   /** Utilization (0-1) of the key rotated away from, including local-call estimates. */
   fromFiveHourEst?: number;
   /** Same estimate for the key rotated to. */
@@ -119,10 +119,33 @@ function expiryUrgency(key: ProviderQuotaKey, now: number): number {
 
 /** True when the key can serve at all tomorrow-or-later: not weekly-exhausted, not expired. */
 function isServiceable(key: ProviderQuotaKey, now: number): boolean {
-  if (key.weeklyUsed !== undefined && key.weeklyLimit !== undefined && key.weeklyLimit > 0 && key.weeklyUsed >= key.weeklyLimit) return false;
+  if (isWeeklyExhausted(key)) return false;
   const dExp = daysUntil(key.expiresAt, now);
   if (dExp !== undefined && dExp <= 0) return false;
   return true;
+}
+
+/**
+ * True when this key's calendar-week budget is already spent.
+ *
+ * The weekly window is independent of the rolling 5h window: a key can sit at 0% five-hour
+ * usage while the week is at 100%. `isServiceable` already excludes such keys from the
+ * candidate set; this predicate additionally lets them TRIGGER a rotation away from the
+ * active key, instead of waiting for the upstream 429 to teach us the same thing.
+ */
+function isWeeklyExhausted(key: ProviderQuotaKey): boolean {
+  if (key.weeklyUsed !== undefined && key.weeklyLimit !== undefined && key.weeklyLimit > 0) {
+    return key.weeklyUsed >= key.weeklyLimit;
+  }
+  if (key.weeklyPercent !== undefined) return key.weeklyPercent >= 100;
+  return false;
+}
+
+/** Why the scheduler rotated away from the active key (most specific reason wins). */
+function rotationReason(activeExpired: boolean, activeWeeklyDead: boolean): "active-expired" | "weekly-exhausted" | "5h-threshold" {
+  if (activeExpired) return "active-expired";
+  if (activeWeeklyDead) return "weekly-exhausted";
+  return "5h-threshold";
 }
 
 /**
@@ -295,7 +318,12 @@ export async function maybeRotateForQuota(config: OcxConfig, providerName: strin
   const activeExpired = activeQuota.expired === true
     || (activeQuota.expiresAt !== undefined && activeQuota.expiresAt <= now);
   const overThreshold = activeEst !== undefined && activeEst >= threshold;
-  if (!activeExpired && !overThreshold) return false;
+  //   3. the ACTIVE key's CALENDAR-WEEK budget is spent. The 5h window can look wide open
+  //      (e.g. 0% used) while the week is already at 21255/21250 — every request then
+  //      fails upstream with 429 and the user waits for the proxy to burn a round-trip
+  //      discovering it. Rotate proactively instead.
+  const activeWeeklyDead = isWeeklyExhausted(activeQuota);
+  if (!activeExpired && !overThreshold && !activeWeeklyDead) return false;
 
   // Watchdog (Layer 1) + return-cooldown (Layer 2) + circuit breaker (Layer 3).
   //
@@ -328,7 +356,7 @@ export async function maybeRotateForQuota(config: OcxConfig, providerName: strin
     keyId: toId,
     key: next.key,
     ts: now,
-    reason: activeExpired ? "active-expired" : "5h-threshold",
+    reason: rotationReason(activeExpired, activeWeeklyDead),
   };
   provider.pendingKeyChange = pending;
   // Layer 2: pin the key we just rotated from out of candidates for `RETURN_COOLDOWN_MS`.
@@ -347,7 +375,7 @@ export async function maybeRotateForQuota(config: OcxConfig, providerName: strin
     provider: providerName,
     fromId: active.id,
     toId,
-    reason: activeExpired ? "active-expired" : "5h-threshold",
+    reason: rotationReason(activeExpired, activeWeeklyDead),
     ...(activeEst !== undefined ? { fromFiveHourEst: Math.round(activeEst * 1000) / 1000 } : {}),
     ...(toQuota ? { toFiveHourEst: Math.round((estFiveHour(toQuota, providerName) ?? 0) * 1000) / 1000 } : {}),
     ...(activeQuota.fiveHourResetAt !== undefined ? { fiveHourResetAt: activeQuota.fiveHourResetAt } : {}),

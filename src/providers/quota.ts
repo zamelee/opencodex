@@ -177,6 +177,17 @@ function registryKey(providerName: string, keyId: string): string {
 }
 
 /**
+ * Last known WEEKLY window usage per (provider, keyId).
+ *
+ * The expiry registry above only knows "is this key's plan over". The weekly budget is
+ * a different failure mode: the plan is alive and paid for, but this calendar week
+ * is already spent (e.g. 21255/21250 calls). The upstream answers 429 for those, and
+ * a 429 costs the user a round-trip plus a Codex-side stall, so both the proactive
+ * scheduler and the reactive failover want to know about it WITHOUT their own probe.
+ */
+const keyWeeklyRegistry = new Map<string, Map<string, { used?: number; limit?: number; percent?: number }>>();
+
+/**
  * True when the last probe told us this key's plan is expired. Stale-but-true is the
  * safe direction: an expired key is dead anyway, so skipping it costs nothing, while
  * skipping a live key would break the rotation.
@@ -186,13 +197,32 @@ export function isKeyKnownExpired(providerName: string, keyId: string, now = Dat
   return expiresAt !== undefined && expiresAt <= now;
 }
 
+/**
+ * True when the last probe showed this key's calendar-week budget is already spent.
+ *
+ * Stale-but-true is the safe direction (a week that ran out stays out until it
+ * resets), but a stale FALSE is harmless too: the key simply stays a candidate and
+ * the upstream 429 is the backstop.
+ */
+export function isKeyWeeklyExhausted(providerName: string, keyId: string): boolean {
+  const row = keyWeeklyRegistry.get(providerName)?.get(keyId);
+  if (!row) return false;
+  if (row.limit !== undefined && row.limit > 0 && row.used !== undefined) {
+    return row.used >= row.limit;
+  }
+  if (row.percent !== undefined) return row.percent >= 100;
+  return false;
+}
+
 /** Drop cached expiry rows for a provider (manual key management / provider removal). */
 export function clearKeyExpiryRegistry(providerName?: string): void {
   if (!providerName) {
     keyExpiryRegistry.clear();
+    keyWeeklyRegistry.clear();
     return;
   }
   keyExpiryRegistry.delete(providerName);
+  keyWeeklyRegistry.delete(providerName);
 }
 
 export { isMinimaxChatReverseProxy };
@@ -549,10 +579,17 @@ export async function probeMinimaxKeyQuotas(prov: OcxProviderConfig, providerNam
   // Publish the expiry table so the 429 failover path can skip dead keys without its own probe.
   if (providerName) {
     const table = new Map<string, number>();
+    const weeklyTable = new Map<string, { used?: number; limit?: number; percent?: number }>();
     for (const k of keys) {
       if (k.expiresAt !== undefined) table.set(k.id, k.expiresAt);
+      weeklyTable.set(k.id, {
+        ...(k.weeklyUsed !== undefined ? { used: k.weeklyUsed } : {}),
+        ...(k.weeklyLimit !== undefined ? { limit: k.weeklyLimit } : {}),
+        ...(k.weeklyPercent !== undefined ? { percent: k.weeklyPercent } : {}),
+      });
     }
     keyExpiryRegistry.set(providerName, table);
+    keyWeeklyRegistry.set(providerName, weeklyTable);
   }
   return keys.length === 0 ? null : keys;
 }

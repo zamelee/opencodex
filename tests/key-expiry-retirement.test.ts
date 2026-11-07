@@ -179,6 +179,36 @@ describe("429 failover skips expired keys", () => {
   });
 });
 
+describe("429 failover skips weekly-exhausted keys", () => {
+  test("does not rotate onto a key whose calendar-week budget is spent", async () => {
+    // k2 is weekly-dead (21250/21250) but its PLAN is alive: rotating onto it would
+    // answer the 429 with another 429, stalling the client for nothing.
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown, init?: { headers?: Record<string, string> }) => {
+      const headers = (init?.headers ?? {}) as Record<string, string>;
+      const apiKey = headers["x-api-key"] ?? "";
+      const weekly = apiKey === POOL[1]!.key
+        ? { used: 21250, limit: 21250 }
+        : { used: 10, limit: 21250 };
+      return new Response(
+        JSON.stringify({ rolling_5h: { limit: 2500, used: 1 }, weekly }),
+        { headers: { "content-type": "application/json" } },
+      );
+    }) as typeof fetch;
+    try {
+      const provider = makeConfig({ apiKey: POOL[0]!.key, apiKeyPool: POOL }).providers.p!;
+      await probeMinimaxKeyQuotas(provider, "p");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    const config = makeConfig({ apiKey: POOL[0]!.key, apiKeyPool: POOL });
+    const rotated = rotateKeyOn429(config, "p", null, NOW, POOL[0]!.key);
+    // k2 is skipped (weekly spent); k3 is the only healthy candidate.
+    expect(rotated?.apiKey).toBe(POOL[2]!.key);
+  });
+});
+
 describe("autoSwitch persistence", () => {
   test("opting out is stored on the pool entry and shows up in the API listing", () => {
     const config = makeConfig({ apiKey: POOL[0]!.key, apiKeyPool: POOL.map(e => ({ ...e })) });
