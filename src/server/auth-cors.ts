@@ -256,6 +256,8 @@ export function safeConfigDTO(config: OcxConfig): unknown {
       "escapeBuiltinToolNames",
       "keySchedule",
       "supportsSearchTool",
+      "autoCompactRatio",
+      "modelAutoCompactRatios",
     ] as const) {
       copyIfDefined(dto, provider, key);
     }

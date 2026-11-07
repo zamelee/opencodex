@@ -3,6 +3,13 @@ import { Switch, Notice, EmptyState, Select } from "../ui";
 import { IconChevron, IconBoxes, IconInfo } from "../icons";
 import { useT } from "../i18n";
 import { modelLabel } from "../model-display";
+import {
+  CompactRatioSlider,
+  ProbeTrace,
+  fmtK,
+  type ProbeResult,
+  type ProbeStep,
+} from "./models-compact-controls";
 
 interface ModelRow {
   provider: string;
@@ -25,6 +32,12 @@ interface ModelRow {
   effectiveContextWindow?: number;
   /** At which token count Codex should auto-compact (window x the provider's ratio). */
   autoCompactTokenLimit?: number;
+  /** The EFFECTIVE compact fraction for this row (per-model pin > provider ratio > 0.9). */
+  autoCompactRatio?: number;
+  /** True when this row has its own pinned ratio instead of following the provider-wide one. */
+  autoCompactRatioPinned?: boolean;
+  /** The provider-wide ratio this row falls back to when it has no pin. */
+  providerAutoCompactRatio?: number;
 }
 
 interface ProviderContextCapsResponse {
@@ -44,11 +57,6 @@ const CAP_OPTIONS = Array.from({ length: 18 }, (_, i) => 100_000 + i * 50_000); 
 const CUSTOM_OPTION = "custom";
 const THREAD_OPTIONS = [4, 8, 16, 32, 64, 128, 256, 500, 1000];
 const PAGE = 60; // rows rendered per provider before a "show more" (keeps 1000s-of-models providers usable)
-
-function fmtK(n: number): string {
-  if (!Number.isFinite(n) || n <= 0) return String(n);
-  return n % 1000 === 0 ? `${n / 1000}k` : n.toLocaleString();
-}
 
 /**
  * Compact per-model override Select. Options:
@@ -154,6 +162,8 @@ export default function Models({ apiBase }: { apiBase: string }) {
   const [status, setStatus] = useState("");
   const [ok, setOk] = useState(false);
   const [probing, setProbing] = useState<string | null>(null);
+  // Per-row probe results, rendered INLINE next to the model (not only in the toast).
+  const [probeResults, setProbeResults] = useState<Record<string, ProbeResult>>({});
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
@@ -393,12 +403,25 @@ export default function Models({ apiBase }: { apiBase: string }) {
       if (!r.ok || body.error) {
         setOk(false);
         setStatus(t("models.probeFailed", { error: body.error ?? ("HTTP " + r.status) }));
+        setProbeResults(prev => ({ ...prev, [namespaced]: { error: String(body.error ?? ("HTTP " + r.status)) } }));
         return;
       }
       const suggestion = typeof body.suggestion === "number" ? body.suggestion : null;
       if (suggestion === null) {
         setOk(false);
         setStatus(t("models.probeUnknown"));
+        setProbeResults(prev => ({
+          ...prev,
+          [namespaced]: {
+            declared: typeof body.declared === "number" ? body.declared : undefined,
+            learned: typeof body.learned === "number" ? body.learned : undefined,
+            current: typeof body.current === "number" ? body.current : undefined,
+            source: body.source,
+            safetyMargin: typeof body.safetyMargin === "number" ? body.safetyMargin : undefined,
+            steps: Array.isArray(body.steps) ? body.steps as ProbeStep[] : undefined,
+            applied: null,
+          },
+        }));
         return;
       }
       setOk(true);
@@ -408,17 +431,74 @@ export default function Models({ apiBase }: { apiBase: string }) {
         suggestion: fmtK(suggestion),
         source: body.source === "learned" ? t("models.probeSourceLearned") : t("models.probeSourceDeclared"),
       }));
+      // Keep the full reasoning chain on the row, so the answer is readable in place.
+      setProbeResults(prev => ({
+        ...prev,
+        [namespaced]: {
+          declared: typeof body.declared === "number" ? body.declared : undefined,
+          learned: typeof body.learned === "number" ? body.learned : undefined,
+          current: typeof body.current === "number" ? body.current : undefined,
+          suggestion,
+          source: body.source,
+          safetyMargin: typeof body.safetyMargin === "number" ? body.safetyMargin : undefined,
+          steps: Array.isArray(body.steps) ? body.steps as ProbeStep[] : undefined,
+          applied: null,
+        },
+      }));
       const apply = await fetch(`${apiBase}/api/provider-context-caps`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ modelOverrides: { [namespaced]: suggestion } }),
       });
-      if (apply.ok) await load();
+      if (apply.ok) {
+        // Say out loud what we wrote, instead of letting the write happen silently.
+        setProbeResults(prev => ({ ...prev, [namespaced]: { ...prev[namespaced], applied: suggestion } }));
+        await load();
+      }
     } catch (err) {
       setOk(false);
       setStatus(t("models.probeFailed", { error: err instanceof Error ? err.message : String(err) }));
+      setProbeResults(prev => ({
+        ...prev,
+        [namespaced]: { error: err instanceof Error ? err.message : String(err) },
+      }));
     } finally {
       setProbing(null);
+    }
+  };
+
+  /**
+   * Commit a per-model compact ratio (the slider). `null` clears the pin so the model follows
+ * the provider-wide ratio again. The write goes to the provider config, which is where the
+ * per-model table lives; the catalog re-derives `auto_compact_token_limit` from it.
+   */
+  const applyModelRatio = async (provider: string, namespaced: string, ratio: number | null) => {
+    setBusy(true);
+    busyRef.current = true;
+    setStatus("");
+    try {
+      const r = await fetch(`${apiBase}/api/providers?name=${encodeURIComponent(provider)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          provider: { modelAutoCompactRatios: { [namespaced]: ratio } },
+        }),
+      });
+      if (r.ok) {
+        setOk(true);
+        setStatus(t("models.ratioApplied", { ratio: Math.round(ratio === null ? 0 : ratio * 100) }));
+        await load();
+      } else {
+        const body = await r.json().catch(() => ({}));
+        setOk(false);
+        setStatus(t("models.capSaveFailed"));
+        void body;
+      }
+    } catch {
+      setOk(false); setStatus(t("models.networkError"));
+    } finally {
+      setBusy(false);
+      busyRef.current = false;
     }
   };
 
@@ -671,13 +751,17 @@ export default function Models({ apiBase }: { apiBase: string }) {
                )}
                 {visible.map(m => {
                   const off = disabled.has(m.namespaced);
+                  const probe = probeResults[m.namespaced];
+                  const ratioPercent = Math.round((m.autoCompactRatio ?? 0.9) * 100);
+                  const followPercent = Math.round((m.providerAutoCompactRatio ?? 0.9) * 100);
                   return (
-                    <div key={m.namespaced} className="row" style={{ padding: "5px 0" }}>
-                      <Switch on={!off} onClick={() => toggle(m.namespaced)} disabled={busy} label={m.id} />
-                      <code className="mono" style={{ fontSize: 13, color: off ? "var(--faint)" : "var(--text)", textDecoration: off ? "line-through" : "none" }}>{modelLabel(m.id)}</code>
-                      {m.contextCapped && <span className="muted mono" style={{ fontSize: 11, padding: "1px 6px", border: "1px solid var(--border)", borderRadius: 999 }}>{t("models.contextCappedValue", { value: fmtK(m.contextCap ?? contextCapValue) })}</span>}
-                     {!m.native && (
-                       <PerModelCapSelect
+                    <div key={m.namespaced}>
+                      <div className="row" style={{ padding: "5px 0" }}>
+                       <Switch on={!off} onClick={() => toggle(m.namespaced)} disabled={busy} label={m.id} />
+                       <code className="mono" style={{ fontSize: 13, color: off ? "var(--faint)" : "var(--text)", textDecoration: off ? "line-through" : "none" }}>{modelLabel(m.id)}</code>
+                       {m.contextCapped && <span className="muted mono" style={{ fontSize: 11, padding: "1px 6px", border: "1px solid var(--border)", borderRadius: 999 }}>{t("models.contextCappedValue", { value: fmtK(m.contextCap ?? contextCapValue) })}</span>}
+                      {!m.native && (
+                        <PerModelCapSelect
                           value={m.modelOverride}
                           providerCapValue={contextCapValue}
                           providerCapOn={contextCaps[m.provider] === contextCapValue}
@@ -694,14 +778,26 @@ export default function Models({ apiBase }: { apiBase: string }) {
                          title={t("models.probeWindowHint")}
                          data-testid={`probe-window-${m.namespaced}`}
                        >
-                         {probing === m.namespaced ? t("models.probing") : t("models.probe")}
-                       </button>
-                     )}
-                     {!m.native && typeof m.autoCompactTokenLimit === "number" && (
-                       <span className="muted mono" style={{ fontSize: 11 }}>
-                         {t("models.compactAt", { value: fmtK(m.autoCompactTokenLimit) })}
-                       </span>
-                     )}
+                          {probing === m.namespaced ? t("models.probing") : t("models.probe")}
+                        </button>
+                      )}
+                      {!m.native && typeof m.autoCompactRatio === "number" && (
+                        <CompactRatioSlider
+                          percent={ratioPercent}
+                          contextWindow={m.effectiveContextWindow}
+                          pinned={m.autoCompactRatioPinned === true}
+                          followPercent={followPercent}
+                          disabled={busy}
+                          onCommit={(pct) => {
+                            void applyModelRatio(m.provider, m.namespaced, pct / 100);
+                          }}
+                          onReset={() => {
+                            void applyModelRatio(m.provider, m.namespaced, null);
+                          }}
+                        />
+                      )}
+                      </div>
+                      {probe && <ProbeTrace result={probe} />}
                     </div>
                   );
                 })}

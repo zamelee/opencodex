@@ -536,6 +536,38 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
           return jsonResponse({ error: "provider.autoCompactRatio must be between 0.5 and 0.95" }, 400);
         }
       }
+      // modelAutoCompactRatios: per-model compact fractions, keyed by "<provider>/<model>".
+      // They win over the provider-wide autoCompactRatio. A null value clears the pin so the
+      // model falls back to the provider-wide ratio again.
+      if (candidate.modelAutoCompactRatios !== undefined) {
+        const raw = candidate.modelAutoCompactRatios;
+        if (raw === null) {
+          delete next.modelAutoCompactRatios;
+        } else if (typeof raw === "object" && !Array.isArray(raw)) {
+          const table: Record<string, number> = { ...(next.modelAutoCompactRatios ?? {}) };
+          for (const [rawKey, rawValue] of Object.entries(raw as Record<string, unknown>)) {
+            const key = rawKey.trim();
+            if (!key) return jsonResponse({ error: "modelAutoCompactRatios key must not be empty" }, 400);
+            if (rawValue === null) {
+              delete table[key];
+              continue;
+            }
+            if (typeof rawValue === "number"
+              && Number.isFinite(rawValue)
+              && rawValue >= 0.5 && rawValue <= 0.95) {
+              table[key] = rawValue;
+              continue;
+            }
+            return jsonResponse({
+              error: `modelAutoCompactRatios["${key}"] must be between 0.5 and 0.95, or null to clear it`,
+            }, 400);
+          }
+          if (Object.keys(table).length === 0) delete next.modelAutoCompactRatios;
+          else next.modelAutoCompactRatios = table;
+        } else {
+          return jsonResponse({ error: "provider.modelAutoCompactRatios must be an object" }, 400);
+        }
+      }
       // headers: optional Record<string,string>; an empty object clears them
       if (candidate.headers !== undefined) {
         if (candidate.headers === null) {
@@ -649,15 +681,27 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
       const namespaced = `${m.provider}/${m.id}`;
       const contextCap = providerContextCap(config, m.provider);
       const override = overrides[namespaced];
+      // Whether this row has its OWN compact ratio, or follows the provider-wide one.
+      // The GUI needs the distinction to show "跟随 Provider" vs a pinned value.
+      const prov = config.providers[m.provider];
+      const ratioTable = prov?.modelAutoCompactRatios;
+      const ratioPinned = !!ratioTable && typeof ratioTable === "object"
+        && (Object.prototype.hasOwnProperty.call(ratioTable, namespaced)
+          || Object.prototype.hasOwnProperty.call(ratioTable, m.id));
       return {
         ...m,
         namespaced,
         disabled: disabled.has(namespaced),
         ...(contextCap !== undefined ? { contextCap, contextCapped: m.contextCapped === true } : {}),
         ...(override !== undefined ? { modelOverride: override } : {}),
+        autoCompactRatioPinned: ratioPinned,
+        providerAutoCompactRatio: resolveAutoCompactRatio(prov?.autoCompactRatio),
         // The token count at which Codex should auto-compact: the effective window times the
         // provider's ratio. Surfaced so whoever writes the catalog can publish the brake point
         // instead of a hardcoded 90%.
+        // The EFFECTIVE fraction (per-model pin > provider ratio > 0.9), so the GUI slider shows
+        // the ratio that is actually in force for this row.
+        autoCompactRatio: resolveAutoCompactRatio(m.autoCompactRatio),
         ...(typeof m.effectiveContextWindow === "number" && m.effectiveContextWindow > 0
           ? {
             autoCompactTokenLimit: Math.floor(
@@ -689,20 +733,65 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
     const model = (url.searchParams.get("model") ?? "").trim();
     if (!provider || !model) return jsonResponse({ error: "provider and model are required" }, 400);
     const models = await fetchAllModels(config);
-    const row = models.find((m) => `${m.provider}/${m.id}` === model || m.id === model);
-    const { probeContextWindow, catalogDeclaredWindow } = await import("./context-window-probe");
+    // Scope the lookup to THIS provider: the same bare model id can exist under several
+    // providers, and a foreign row would report another provider's window (or none at all).
+    const row = models.find((m) => m.provider === provider && m.id === model)
+      ?? models.find((m) => `${m.provider}/${m.id}` === model)
+      ?? models.find((m) => m.id === model);
+    const { probeContextWindow, catalogDeclaredWindow, PROBE_SAFETY_MARGIN } = await import("./context-window-probe");
     // The catalog stores namespaced slugs ("provider/model"); the GUI sends the bare model id.
     const fromCatalog = catalogDeclaredWindow(`${provider}/${model}`) ?? catalogDeclaredWindow(model);
-    return jsonResponse(probeContextWindow(provider, model, {
+    const rowDeclared = typeof row?.upstreamContextWindow === "number" ? row.upstreamContextWindow : undefined;
+    // The declaration chain is deliberately narrow: the upstream's own metadata, or the number
+    // the Codex catalog currently publishes for this model. `nativeContextWindow` is NOT a
+    // declaration - it is our capped window - and quoting it here would let the probe answer
+    // "the upstream says 700k" with a number WE chose.
+    const declared = fromCatalog ?? rowDeclared;
+    const declaredSource = fromCatalog !== undefined ? "codex-catalog"
+      : rowDeclared !== undefined ? "upstream-metadata"
+        : undefined;
+    const probe = probeContextWindow(provider, model, {
       // The upstream's own declaration, before our caps (our provider-level contextWindow
       // would otherwise mask it and make the probe echo back what we already advertise).
-      ...(typeof fromCatalog === "number"
-        ? { declared: fromCatalog }
-        : typeof row?.upstreamContextWindow === "number"
-        ? { declared: row.upstreamContextWindow }
-        : typeof row?.nativeContextWindow === "number" ? { declared: row.nativeContextWindow } : {}),
+      ...(typeof declared === "number" ? { declared } : {}),
       ...(typeof row?.effectiveContextWindow === "number" ? { current: row.effectiveContextWindow } : {}),
-    }));
+    });
+    // The trace: every input the answer came from, in the order it was consulted, so the GUI can
+    // render the reasoning instead of a bare number. `null` means "this input was unavailable".
+    const steps = [
+      {
+        key: "declared",
+        label: "upstream declaration",
+        value: typeof probe.declared === "number" ? probe.declared : null,
+        source: declaredSource ?? "unavailable",
+      },
+      {
+        key: "learned",
+        label: "enforced ceiling (learned from the upstream's own rejection)",
+        value: typeof probe.learned === "number" ? probe.learned : null,
+        source: typeof probe.learned === "number" ? "upstream-error" : "not-observed-yet",
+      },
+      {
+        key: "current",
+        label: "advertised today (after our caps)",
+        value: typeof probe.current === "number" ? probe.current : null,
+        source: row?.capSource ?? "unknown",
+      },
+      {
+        key: "suggestion",
+        label: "suggested window (safety margin applied)",
+        value: typeof probe.suggestion === "number" ? probe.suggestion : null,
+        source: probe.source,
+      },
+    ];
+    // Server-side trace: the proxy's stdout (ocx.out.log / ocx.err.log) is the durable record,
+    // so the probe is never a black box even if the browser tab is closed.
+    console.log(
+      `[ocx:probe] ${provider}/${model} declared=${probe.declared ?? "-"}`
+      + ` learned=${probe.learned ?? "-"} current=${probe.current ?? "-"}`
+      + ` suggestion=${probe.suggestion ?? "-"} source=${probe.source}`,
+    );
+    return jsonResponse({ ...probe, safetyMargin: PROBE_SAFETY_MARGIN, steps });
   }
 
   if (url.pathname === "/api/provider-context-caps" && req.method === "PUT") {

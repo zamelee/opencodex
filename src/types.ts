@@ -569,6 +569,11 @@ export interface OcxProviderConfig {
    * compact relative to the upstream's real ceiling.
    */
   autoCompactRatio?: number;
+  /**
+   * Per-model auto-compact ratios, keyed by "<provider>/<model>". They win over the
+   * provider-wide `autoCompactRatio`, so a cheap model can compact earlier than a big one.
+   */
+  modelAutoCompactRatios?: Record<string, number>;
   /** Model-specific Codex catalog input modalities, e.g. ["text"] or ["text", "image"]. */
   modelInputModalities?: Record<string, string[]>;
   headers?: Record<string, string>;

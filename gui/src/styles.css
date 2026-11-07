@@ -1108,6 +1108,14 @@ select.input { appearance: none; }
 
 }
 
+/* The probe's reasoning chain, rendered inline under a model row. */
+.probe-trace {
+  margin: 0 0 6px 22px; padding: 6px 10px;
+  border-left: 2px solid var(--border);
+  background: var(--raised);
+  display: flex; flex-direction: column; gap: 2px;
+}
+
 
 
 .setup-guide { font-size: 13px; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 12px; margin-bottom: 4px; }
