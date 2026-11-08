@@ -5,8 +5,10 @@ import { join } from "node:path";
 import { clearResolvedConfigDirCache } from "../src/config";
 import {
   learnedUpstreamPromptLimit,
+  learnedGate,
   loadLearnedLimits,
   noteUpstreamPromptLimit,
+  parseUpstreamPromptGate,
   resetLearnedUpstreamLimits,
   saveLearnedLimits,
 } from "../src/lib/upstream-prompt-budget";
@@ -38,13 +40,51 @@ describe("the learned upstream ceilings survive a restart", () => {
   test("a learned ceiling is written to the sidecar and read back", () => {
     noteUpstreamPromptLimit("m.aiio.chat", 1_048_576);
     saveLearnedLimits();
-    expect(JSON.parse(readFileSync(file, "utf-8"))["m.aiio.chat"]).toBe(1_048_576);
+    expect(JSON.parse(readFileSync(file, "utf-8")).gates["m.aiio.chat"].limit).toBe(1_048_576);
 
     // A restart: the in-memory map is gone, the sidecar is not.
     resetLearnedUpstreamLimits();
     expect(learnedUpstreamPromptLimit("m.aiio.chat")).toBeUndefined();
     loadLearnedLimits();
     expect(learnedUpstreamPromptLimit("m.aiio.chat")).toBe(1_048_576);
+  });
+
+  test("a gate is scoped to the model, so one model's 400 does not poison its siblings", () => {
+    noteUpstreamPromptLimit("m.aiio.chat", 1_048_576, { modelId: "MiniMax-M3.1-Flash" });
+    noteUpstreamPromptLimit("m.aiio.chat", 262_144, { modelId: "MiniMax-M2.7" });
+    saveLearnedLimits();
+
+    resetLearnedUpstreamLimits();
+    loadLearnedLimits();
+    expect(learnedUpstreamPromptLimit("m.aiio.chat", "MiniMax-M3.1-Flash")).toBe(1_048_576);
+    expect(learnedUpstreamPromptLimit("m.aiio.chat", "MiniMax-M2.7")).toBe(262_144);
+    // A model we never saw a failure for has no gate of its own.
+    expect(learnedUpstreamPromptLimit("m.aiio.chat", "MiniMax-M3")).toBeUndefined();
+  });
+
+  test("a provider-level gate is the fallback for a model we have no model-scoped gate for", () => {
+    noteUpstreamPromptLimit("m.aiio.chat", 700_000);
+    saveLearnedLimits();
+    resetLearnedUpstreamLimits();
+    loadLearnedLimits();
+    expect(learnedUpstreamPromptLimit("m.aiio.chat", "MiniMax-M3")).toBe(700_000);
+  });
+
+  test("the smallest gate ever seen wins, but the sighting keeps updating", () => {
+    noteUpstreamPromptLimit("m.aiio.chat", 1_048_576, { modelId: "M" });
+    noteUpstreamPromptLimit("m.aiio.chat", 2_097_152, { modelId: "M" });
+    expect(learnedUpstreamPromptLimit("m.aiio.chat", "M")).toBe(1_048_576);
+    const gate = learnedGate("m.aiio.chat", "M");
+    expect(gate?.observedAt).not.toBe("");
+    expect(gate?.lastSeenAt).not.toBe("");
+  });
+
+  test("a v1 sidecar (provider-level numbers) is still readable", () => {
+    writeFileSync(file, JSON.stringify({ "m.aiio.chat": 1_048_576 }), "utf-8");
+    resetLearnedUpstreamLimits();
+    loadLearnedLimits();
+    expect(learnedUpstreamPromptLimit("m.aiio.chat")).toBe(1_048_576);
+    expect(learnedUpstreamPromptLimit("m.aiio.chat", "any-model")).toBe(1_048_576);
   });
 
   test("a garbage sidecar does not break the proxy", () => {
@@ -61,5 +101,26 @@ describe("the learned upstream ceilings survive a restart", () => {
     expect(learnedUpstreamPromptLimit("good")).toBe(1000);
     expect(learnedUpstreamPromptLimit("bad")).toBeUndefined();
     expect(learnedUpstreamPromptLimit("worse")).toBeUndefined();
+  });
+});
+
+describe("the upstream gate is read out of the error text", () => {
+  test("the MiniMax / new-api shape carries both the request size and the gate", () => {
+    const parsed = parseUpstreamPromptGate(
+      '{"code":11115,"msg":"prompt is too long: 1580773 tokens > 1048576 maximum"}',
+    );
+    expect(parsed?.limit).toBe(1_048_576);
+    expect(parsed?.observedInputTokens).toBe(1_580_773);
+  });
+
+  test("other upstreams word it differently", () => {
+    expect(parseUpstreamPromptGate("maximum context length is 262144 tokens")?.limit).toBe(262_144);
+    expect(parseUpstreamPromptGate("context_length_exceeded: 131072")?.limit).toBe(131_072);
+    expect(parseUpstreamPromptGate("input length and max_tokens exceed context limit: 8192")?.limit).toBe(8_192);
+  });
+
+  test("an unrelated error yields no gate", () => {
+    expect(parseUpstreamPromptGate("Provider error 502: upstream unreachable")).toBeUndefined();
+    expect(parseUpstreamPromptGate("")).toBeUndefined();
   });
 });

@@ -13,6 +13,7 @@ import { CODEX_REASONING_LEVELS, configuredReasoningEfforts, modelRecordValue, s
 import { getJawcodeModelMetadata, getJawcodeModelMetadataCaseInsensitive, listJawcodeModelMetadata, resolveJawcodeProvider } from "../generated/jawcode-model-metadata";
 import { enrichProviderFromRegistry, shouldCaseFoldMetadataModelId } from "../providers/derive";
 import { applyProviderContextCap, providerContextCap, resolveEffectiveContextCap } from "../providers/context-cap";
+import { learnedGate, learnedUpstreamPromptLimit } from "../lib/upstream-prompt-budget";
 import { CODEX_GPT5_IDENTITY_LINE } from "../adapters/identity";
 import { filterCursorConfiguredModelsByLiveDiscovery } from "../adapters/cursor/discovery";
 import { fetchCursorUsableModels } from "../adapters/cursor/live-models";
@@ -319,6 +320,19 @@ export interface CatalogModel {
    * says 1,000,000" apart from "we advertise 700,000".
    */
   upstreamContextWindow?: number;
+  /**
+   * The gate the UPSTREAM actually enforced, learned from its own "prompt is too long"
+   * rejection. It is the strongest evidence of the real window we have: not a declaration,
+   * not our cap — the ceiling that actually bit. It is per model, because one provider
+   * fronts models with different windows.
+   */
+  learnedContextWindow?: number;
+  /** When that gate was first observed (ISO). */
+  learnedGateObservedAt?: string;
+  /** When the upstream last mentioned this gate (ISO). */
+  learnedGateLastSeenAt?: string;
+  /** The request size the upstream quoted alongside the gate. */
+  learnedGateObservedInputTokens?: number;
 }
 type RawEntry = Record<string, unknown>;
 type RawCatalog = { models?: RawEntry[]; [k: string]: unknown };
@@ -1143,6 +1157,14 @@ function configuredAutoCompactRatio(
 
 export function applyProviderConfigHints(name: string, prov: OcxProviderConfig, model: CatalogModel, providerCap?: number, modelOverrides?: Record<string, number | false>): CatalogModel {
   const configuredCap = configuredContextWindow(prov, model.id);
+  // The gate the upstream ACTUALLY enforced beats the value it merely declares: it is what
+  // we learned from its own rejection, for THIS model under THIS provider. A declaration is
+  // marketing; a gate is a fact. When we have one, it is the window we work against.
+  const learned = learnedUpstreamPromptLimit(name, model.id);
+  const declaredWindow = typeof model.contextWindow === "number" && model.contextWindow > 0
+    ? model.contextWindow
+    : undefined;
+  const upstreamWindow = learned ?? declaredWindow;
   let inputModalities = configuredInputModalities(prov, model.id);
   // Vision-sidecar coverage: `noVisionModels` marks models whose images the PROXY describes
   // (src/vision/index.ts). The catalog must still advertise image input for them — the Codex app
@@ -1155,10 +1177,10 @@ export function applyProviderConfigHints(name: string, prov: OcxProviderConfig, 
   const reasoningEfforts = configuredReasoningEfforts(prov, model.id);
   const hinted = {
     ...model,
-    ...(configuredCap !== undefined
+    ...((configuredCap !== undefined || upstreamWindow !== undefined)
       ? {
-        contextWindow: typeof model.contextWindow === "number" && model.contextWindow > 0
-          ? Math.min(model.contextWindow, configuredCap)
+        contextWindow: upstreamWindow !== undefined
+          ? (configuredCap !== undefined ? Math.min(upstreamWindow, configuredCap) : upstreamWindow)
           : configuredCap,
       }
       : {}),
@@ -1217,6 +1239,15 @@ export function applyProviderConfigHints(name: string, prov: OcxProviderConfig, 
   if (resolved.cap !== undefined) next.contextCap = resolved.cap;
   next.contextCapped = resolved.capped;
   next.capSource = resolved.source;
+  if (learned !== undefined) {
+    next.learnedContextWindow = learned;
+    const gate = learnedGate(name, model.id);
+    if (gate?.observedAt) next.learnedGateObservedAt = gate.observedAt;
+    if (gate?.lastSeenAt) next.learnedGateLastSeenAt = gate.lastSeenAt;
+    if (gate?.observedInputTokens !== undefined) {
+      next.learnedGateObservedInputTokens = gate.observedInputTokens;
+    }
+  }
   return next;
 }
 
@@ -1634,68 +1665,20 @@ export function mergeCatalogEntriesForSync(
  * No-op if the catalog file does not exist.
  */
 export async function syncCatalogModels(config: OcxConfig): Promise<{ added: number; path: string }> {
-  // Phase 5 launcher-mode flags: opt-out of routed-model injection and/or native-baseline
-  // preservation independently. Default true so this stays backward-compatible.
-  // - syncRoutedModels=false   -> orderedGoModels forced to [] (no namespaced entries)
-  // - syncNativeOpenaiModels=false -> readNativeBaseline returns empty Map (no native priority merge)
+  // opencodex does NOT own Codex's home directory, so it does not write the Codex catalog.
   //
-  // Pass-through contract (v10.20, 2026-09-24): when enableCodexLauncherMode=false, this
-  // function is a NO-OP. Codex CLI reads the on-disk catalog via config.toml's
-  // `model_catalog_json` pointer (which CodexPlusPlus owns in pass-through mode); any
-  // opencodex-side write leaks opencodex's `base_instructions` into Codex's own system
-  // prompt and injects `<provider>/<model>` slugs that Codex cannot resolve natively.
-  // The earlier "CodexPlusPlus reads it via custom_catalog_path" rationale no longer
-  // holds — Codex CLI's direct read of the same file means opencodex must leave it alone.
-  // Log message downstream in sync.ts:53 sees `added === 0` and skips the "+ N models
-  // appended" line entirely.
-  if (!isLauncherModeEnabled(config)) {
-    const catalogPath = readCodexCatalogPath();
-    // catalogExists is computed by refreshCodexModelCatalog after this returns, so sync.ts
-    // correctly distinguishes "pass-through skip" (silent) from "no catalog source found"
-    // (warning) — no extra field needed here.
-    return { added: 0, path: catalogPath };
-  }
-  const syncRouted = config.syncRoutedModels !== false;
-  const syncNative = config.syncNativeOpenaiModels !== false;
-
-  const catalogPath = readCodexCatalogPath();
-  const catalog = loadCatalogForSync(catalogPath);
-  if (!catalog) return { added: 0, path: catalogPath };
-
-  const template = findNativeTemplate(catalog);
-
-  const goModels = syncRouted ? await gatherRoutedModels(config) : [];
-  try {
-    // Once-only: preserve the PRISTINE pre-opencodex catalog as the native-priority baseline
-    // (later syncs would otherwise overwrite it with featured-modified priorities).
-    ensureCatalogBackup(catalogPath, catalog);
-  } catch { /* backup best-effort */ }
-
-  // Hide disabled models from Codex, then feature the chosen subagent models (native OR routed)
-  // by giving them the lowest priority — see buildCatalogEntries for why priority, not array order.
-  const enabledGo = filterCatalogVisibleModels(goModels, config);
-  const featured = config.subagentModels ?? [];
-  const orderedGoModels = orderForSubagents(enabledGo, featured); // stable tie-break among equal priorities
-  const multiAgentMode: MultiAgentMode = config.multiAgentMode === "v1" || config.multiAgentMode === "v2" ? config.multiAgentMode : "default";
-  const goEntries = buildCatalogEntries(template ? JSON.parse(JSON.stringify(template)) : null, [], orderedGoModels, featured, websocketsEnabled(config), multiAgentMode);
-  // Keep genuine native entries (gpt-*, codex-*) with their real per-model fields and append
-  // routed providers as namespaced slugs. Cursor and other adopted providers can expose model ids
-  // like `gpt-5.5`; those must not delete the native OpenAI/Codex base row.
-  const baseline = syncNative ? readNativeBaseline(catalogPath) : new Map<string, number>();
-  const goIds = new Set(enabledGo.map(m => m.id));
-  const gatheredProviderNames = new Set(
-    Object.entries(config.providers ?? {})
-      .filter(([, prov]) => prov.disabled !== true)
-      .map(([name]) => name),
-  );
-  // Central WS capability override on the FINAL on-disk catalog (the file Codex reads). Applies to
-  // native AND routed so the advertised flag matches the implemented endpoint (phase 120.4) and a
-  // native template can never leak supports_websockets while the flag is off.
-  const wsEnabled = websocketsEnabled(config);
-  catalog.models = mergeCatalogEntriesForSync(catalog.models ?? [], goEntries, baseline, featured, wsEnabled, goIds, template, disabledNativeSlugs(config), gatheredProviderNames, multiAgentMode);
-
-  atomicWriteFile(catalogPath, JSON.stringify(catalog, null, 2) + "\n");
-  return { added: goEntries.length, path: catalogPath };
+  // The catalog at ~/.codex/model-catalogs/<relay>.json belongs to whoever owns the Codex
+  // home (CodexPlusPlus in a pass-through setup). Writing it from here caused two real
+  // incidents: an empty catalog ("model_catalog_json ... must contain at least one model")
+  // that made every conversation refuse to load, and a catalog whose entries carried
+  // opencodex's base_instructions into Codex's own system prompt.
+  //
+  // This used to be gated on launcher mode. It is now unconditional: opencodex is a relay,
+  // not a manager of someone else's Codex installation. Everything opencodex learns about
+  // a model's context window lives in ~/.opencodex/ (see src/lib/upstream-prompt-budget.ts)
+  // and is applied on OUR side of the wire.
+  void config;
+  return { added: 0, path: readCodexCatalogPath() };
 }
 
 /**
@@ -1704,55 +1687,11 @@ export async function syncCatalogModels(config: OcxConfig): Promise<{ added: num
  * are kept, so plain `codex` works when the proxy is stopped. Idempotent; no-op if nothing injected.
  */
 export function restoreCodexCatalog(config?: OcxConfig): { removed: number; kept: number; path: string } {
-  const cfg = config ?? resolveCatalogWriteConfig();
-  const catalogPath = readCodexCatalogPath();
-  // Pass-through contract: opencodex does not own ~/.codex in that mode, so it must not write
-  // there at all. The catalog at ~/.codex/model-catalogs/<relay>.json is managed by whoever
-  // owns the Codex home (CodexPlusPlus), and stripping its routed entries from under us can
-  // leave Codex with an EMPTY catalog — which makes every conversation refuse to load
-  // ("model_catalog_json ... must contain at least one model").
-  if (!ownsActiveCatalog(cfg, catalogPath)) {
-    return { removed: 0, kept: 0, path: catalogPath };
-  }
-  const catalog = readCatalog(catalogPath);
-  if (!catalog || !Array.isArray(catalog.models)) return { removed: 0, kept: 0, path: catalogPath };
-  const backup = readCatalogBackup(catalogPath);
-  // An EMPTY pristine backup is not a restore source: writing it back would persist a
-  // zero-model catalog. Treat it as "no backup" and fall through to the in-place filter.
-  if (backup && Array.isArray(backup.models) && backup.models.length > 0) {
-    const removed = (catalog.models ?? []).filter(m => typeof m.slug === "string" && m.slug.includes("/")).length;
-    const backupSlugs = new Set(backup.models.flatMap(m => typeof m.slug === "string" ? [m.slug] : []));
-    const userNativeAdditions = (catalog.models ?? []).filter(m =>
-      typeof m.slug === "string" && !m.slug.includes("/") && !backupSlugs.has(m.slug)
-    );
-    const restored = {
-      ...backup,
-      models: [...backup.models, ...userNativeAdditions],
-    };
-    // Defence in depth: never persist a catalog Codex cannot load.
-    if (restored.models.length === 0) {
-      console.warn("[opencodex] catalog restore skipped: the pristine backup restores 0 models.");
-      return { removed: 0, kept: 0, path: catalogPath };
-    }
-    atomicWriteFile(catalogPath, JSON.stringify(restored, null, 2) + "\n");
-    return { removed, kept: restored.models.length, path: catalogPath };
-  }
-  const before = catalog.models.length;
-  const native = catalog.models.filter(m => !(typeof m.slug === "string" && m.slug.includes("/")));
-  const removed = before - native.length;
-  if (removed > 0) {
-    // Every entry is routed: filtering would leave Codex with zero models, which Codex
-    // rejects outright (all conversations fail to load). Keep the file as-is instead.
-    if (native.length === 0) {
-      console.warn(
-        `[opencodex] catalog restore skipped: all ${before} entries are proxy-routed, so dropping them would leave Codex with 0 models.`,
-      );
-      return { removed: 0, kept: 0, path: catalogPath };
-    }
-    catalog.models = native;
-    atomicWriteFile(catalogPath, JSON.stringify(catalog, null, 2) + "\n");
-  }
-  return { removed, kept: native.length, path: catalogPath };
+  // Same contract as syncCatalogModels: opencodex never writes the Codex catalog, so it
+  // never has to "restore" it either. Stripping routed entries from under whoever owns the
+  // Codex home is exactly how the catalog ended up empty once already.
+  void config;
+  return { removed: 0, kept: 0, path: readCodexCatalogPath() };
 }
 
 /**
@@ -1761,30 +1700,7 @@ export function restoreCodexCatalog(config?: OcxConfig): { removed: number; kept
  * makes catalog edits (enable/disable, subagent reorder) apply on the next turn instead of waiting.
  */
 export function invalidateCodexModelsCache(config?: OcxConfig): void {
-  try {
-    const cfg = config ?? resolveCatalogWriteConfig();
-    const catalogPath = readCodexCatalogPath();
-    // Same ownership rule as restoreCodexCatalog: in pass-through mode ~/.codex belongs to
-    // someone else, so we must not touch models_cache.json either.
-    if (!ownsActiveCatalog(cfg, catalogPath)) return;
-    if (!existsSync(catalogPath)) return;
-    const catalog = JSON.parse(readFileSync(catalogPath, "utf8"));
-    const models = Array.isArray(catalog.models)
-      ? catalog.models
-      : Array.isArray(catalog)
-        ? catalog
-        : [];
-    // Never publish an empty model list: it replaces a good cache with one Codex
-    // refuses to load from.
-    if (models.length === 0) {
-      console.warn("[opencodex] models cache invalidation skipped: catalog has 0 models.");
-      return;
-    }
-    const wrapper = {
-      fetched_at: "2000-01-01T00:00:00Z",
-      client_version: "0.0.0",
-      models,
-    };
-    atomicWriteFile(activeCodexModelsCachePath(), JSON.stringify(wrapper, null, 2) + "\n");
-  } catch { /* best-effort */ }
+  // ~/.codex/models_cache.json is part of the same Codex home we do not own. The catalog is
+  // no longer ours to edit, so invalidating its cache is not ours to do either.
+  void config;
 }

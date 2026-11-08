@@ -65,7 +65,7 @@ export function serveGuiFile(pathname: string): Response | null {
       const indexPath = join(guiDist, "index.html");
       if (isFile(indexPath)) {
         return new Response(Bun.file(indexPath), {
-          headers: { "Content-Type": "text/html" },
+          headers: { "Content-Type": "text/html", "Cache-Control": "no-cache" },
         });
       }
     }
@@ -75,7 +75,17 @@ export function serveGuiFile(pathname: string): Response | null {
   const ext = extname(filePath);
   const contentType = MIME_TYPES[ext] || "application/octet-stream";
   return new Response(Bun.file(filePath), {
-    headers: { "Content-Type": contentType },
+    headers: {
+      "Content-Type": contentType,
+      // index.html points at the current bundle by content hash, so it must never be
+      // served stale: a cached copy keeps pointing at the PREVIOUS build's assets and
+      // the operator sees an old dashboard after an upgrade.
+      "Cache-Control": ext === ".html"
+        ? "no-cache"
+        : pathname.includes("/assets/")
+          ? "public, max-age=31536000, immutable"
+          : "no-cache",
+    },
   });
 }
 

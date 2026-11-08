@@ -52,7 +52,7 @@ import {
   learnedUpstreamPromptLimit,
   noteUpstreamPromptLimit,
   saveLearnedLimits,
-  parseUpstreamPromptLimit,
+  parseUpstreamPromptGate,
 } from "../lib/upstream-prompt-budget";
 import {
   catalogModelSupportsServiceTier,
@@ -419,7 +419,7 @@ function upstreamPromptLimitFor(route: {
   providerName: string;
   modelId: string;
 }): number | undefined {
-  const learned = learnedUpstreamPromptLimit(route.providerName);
+  const learned = learnedUpstreamPromptLimit(route.providerName, route.modelId);
   // The LEARNED limit is the upstream's real ceiling; the declared one is what we tell the
   // client on purpose (usually conservative, to make the client's brake fire earlier). Using the
   // declared value for OUR brake would make us drop images long before the upstream would
@@ -1170,9 +1170,14 @@ export async function handleResponses(
       // Learn the upstream's real context window from its own error, so the NEXT request for
       // this provider can be protected before it goes out. Without this the proxy only learns
       // the ceiling by killing a turn.
-      const learnedLimit = parseUpstreamPromptLimit(errorText);
-      if (learnedLimit) {
-        noteUpstreamPromptLimit(route.providerName, learnedLimit);
+      const learnedGate = parseUpstreamPromptGate(errorText);
+      if (learnedGate) {
+        noteUpstreamPromptLimit(route.providerName, learnedGate.limit, {
+          modelId: route.modelId,
+          ...(learnedGate.observedInputTokens !== undefined
+            ? { observedInputTokens: learnedGate.observedInputTokens }
+            : {}),
+        });
         // Persist it: learning a ceiling costs an over-long turn, so losing it to a restart
         // would mean paying for it twice. The probe reads this back (that is the number the
         // upstream REALLY enforces, unlike any declaration).

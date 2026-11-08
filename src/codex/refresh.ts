@@ -40,7 +40,7 @@ export async function refreshCodexModelCatalog(
 ): Promise<CodexCatalogRefreshResult> {
   const result = await deps.syncCatalogModels(config);
   const catalogExists = deps.existsSync(result.path);
-  if (!catalogExists) return { ...result, catalogExists, cacheSynced: false };
-  deps.invalidateCodexModelsCache(config);
-  return { ...result, catalogExists, cacheSynced: true };
+  // The catalog is not ours to edit and its cache is not ours to invalidate, so there is
+  // nothing to sync: the Codex home belongs to whoever owns it (CodexPlusPlus).
+  return { ...result, catalogExists, cacheSynced: false };
 }

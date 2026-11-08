@@ -19,7 +19,7 @@
  * neither the provider config nor the model catalog has to be right for the brake to work.
  */
 
-import { measureAnthropicWireComposition } from "./token-composition";
+import { detectWireShape, measureWireComposition } from "./token-composition";
 import { collectImageInventory } from "../image/image-inventory";
 import { downsampleImagePayload } from "../image/image-downsample";
 import { estimateImageTokens, targetMaxEdgeForFamily } from "../image/image-estimator";
@@ -51,8 +51,53 @@ export const COMPACTION_BUDGET_FACTOR = 0.85;
 /** Placeholder that replaces an image we had to drop. */
 export const DROPPED_IMAGE_TEXT = "[image omitted: dropped to fit the upstream context budget]";
 
-/** Upstream window learned per provider (from a "prompt is too long" error). */
-const learnedLimits = new Map<string, number>();
+/**
+ * One observation of an upstream's hard gate.
+ *
+ * The upstream tells us its ceiling in its own error text ("prompt is too long: N tokens >
+ * M maximum"). M is the gate it actually enforced for THAT request - it is not a marketing
+ * number and it is not necessarily the model's real window, but it is the only limit that has
+ * ever been observed to bite, so we obey it.
+ */
+export interface LearnedGate {
+  /** The ceiling the upstream reported (tokens). */
+  limit: number;
+  /** ISO timestamp of the observation that produced THIS limit. */
+  observedAt: string;
+  /** ISO timestamp of the most recent sighting, whatever limit it quoted. */
+  lastSeenAt: string;
+  /** The request size the upstream quoted alongside the limit, when it said one. */
+  observedInputTokens?: number;
+  /** Where this observation came from. */
+  source: "upstream-error" | "legacy";
+}
+
+/**
+ * Upstream gates, keyed by `<provider>/<model>` when we know the model and by `<provider>`
+ * when we only know the provider.
+ *
+ * The MODEL dimension matters: one provider routinely fronts models with different windows
+ * (m.aiio.chat serves MiniMax-M3.1 and M2.7 under different ceilings), so a single
+ * provider-level number would let one model's 400 poison every other model's brake.
+ */
+const learnedGates = new Map<string, LearnedGate>();
+
+/** The key a gate is stored under. */
+function gateKey(providerKey: string, modelId?: string): string {
+  return modelId ? `${providerKey}/${modelId}` : providerKey;
+}
+
+/**
+ * Split a stored key back into its provider and model parts.
+ *
+ * The model id may itself contain a slash (namespaced slugs like "vendor/model"), so the
+ * provider prefix is split off first and the remainder is the model.
+ */
+function splitGateKey(key: string): { provider: string; model?: string } {
+  const idx = key.indexOf("/");
+  if (idx < 0) return { provider: key };
+  return { provider: key.slice(0, idx), model: key.slice(idx + 1) };
+}
 
 /**
  * The learned ceilings are the single most valuable number we have (the upstream's REAL limit,
@@ -73,16 +118,53 @@ function learnedLimitsPath(): string {
   return join(getConfigDir(), "upstream-limits.json");
 }
 
-/** Load the persisted ceilings into memory. Called once at server start. */
+/** Normalise one persisted gate record, rejecting anything malformed. */
+function normalizeGate(value: unknown): LearnedGate | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const raw = value as Record<string, unknown>;
+  const limit = raw.limit;
+  if (typeof limit !== "number" || !Number.isFinite(limit) || limit <= 0) return undefined;
+  const observedAt = typeof raw.observedAt === "string" ? raw.observedAt : "";
+  const lastSeenAt = typeof raw.lastSeenAt === "string" ? raw.lastSeenAt : observedAt;
+  const observedInputTokens =
+    typeof raw.observedInputTokens === "number" && Number.isFinite(raw.observedInputTokens)
+      ? raw.observedInputTokens
+      : undefined;
+  const source: LearnedGate["source"] = raw.source === "upstream-error" ? "upstream-error" : "legacy";
+  return {
+    limit,
+    observedAt,
+    lastSeenAt,
+    ...(observedInputTokens !== undefined ? { observedInputTokens } : {}),
+    source,
+  };
+}
+
+/**
+ * Load the persisted gates into memory. Called once at server start.
+ *
+ * Two on-disk shapes are accepted:
+ *   v2: { "version": 2, "gates": { "<provider>/<model>": { limit, observedAt, ... } } }
+ *   v1: { "<provider>": 1048576 }  - a provider-level number with no timestamp.
+ */
 export function loadLearnedLimits(): void {
   try {
     const path = learnedLimitsPath();
     if (!existsSync(path)) return;
     const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
-    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+    const record = parsed as Record<string, unknown>;
+    const gates = record.gates;
+    if (gates && typeof gates === "object" && !Array.isArray(gates)) {
+      for (const [key, value] of Object.entries(gates as Record<string, unknown>)) {
+        const gate = normalizeGate(value);
+        if (gate) learnedGates.set(key, gate);
+      }
+      return;
+    }
+    for (const [key, value] of Object.entries(record)) {
       if (typeof value === "number" && Number.isFinite(value) && value > 0) {
-        learnedLimits.set(key, value);
+        learnedGates.set(key, { limit: value, observedAt: "", lastSeenAt: "", source: "legacy" });
       }
     }
   } catch {
@@ -90,68 +172,154 @@ export function loadLearnedLimits(): void {
   }
 }
 
-/** Persist the ceilings to the sidecar file. Called after a NEW ceiling is learned. */
+/** Persist the gates to the sidecar file. Called after a NEW gate is learned. */
 export function saveLearnedLimits(): void {
   try {
     const path = learnedLimitsPath();
     mkdirSync(join(path, ".."), { recursive: true });
-    writeFileSync(path, JSON.stringify(Object.fromEntries(learnedLimits), null, 2), "utf-8");
+    const gates: Record<string, LearnedGate> = {};
+    for (const [key, gate] of learnedGates) gates[key] = gate;
+    writeFileSync(path, JSON.stringify({ version: 2, gates }, null, 2), "utf-8");
   } catch {
     /* diagnostics must never break the request path */
   }
 }
 
 /**
- * Extract the upstream's context window from its error text.
- * Handles the MiniMax/new-api shape: "prompt is too long: 2225110 tokens > 1048576 maximum".
+ * Extract the upstream's hard gate from its error text.
+ *
+ * The MiniMax / new-api shape is "prompt is too long: 2225110 tokens > 1048576 maximum".
+ * Other upstreams word it differently, so several shapes are accepted; the LIMIT is what we
+ * obey, and the quoted request size is kept as evidence of what tripped it.
  */
+export interface ParsedUpstreamGate {
+  /** The ceiling the upstream reported. */
+  limit: number;
+  /** The request size the upstream quoted, when it said one. */
+  observedInputTokens?: number;
+}
+
+const UPSTREAM_GATE_SHAPES: RegExp[] = [
+  /maximum\s+context\s+length(?:\s+is|:)\s*(\d+)/i,
+  /context[_\s-]length[_\s-]exceeded[^\d]{0,60}(\d+)/i,
+  /exceed(?:s|ed)?\s+(?:the\s+)?context\s+limit[^\d]{0,20}(\d+)/i,
+  /(?:max(?:imum)?\s+)?(?:token\s+)?limit\s*(?:is|of|:)\s*(\d+)/i,
+];
+
+export function parseUpstreamPromptGate(errorText: string): ParsedUpstreamGate | undefined {
+  if (!errorText) return undefined;
+  const cmp = errorText.match(/(\d+)\s*tokens?\s*>\s*(\d+)\s+maximum/i);
+  if (cmp) {
+    const limit = Number(cmp[2]);
+    const observed = Number(cmp[1]);
+    if (Number.isFinite(limit) && limit > 0) {
+      return {
+        limit,
+        ...(Number.isFinite(observed) && observed > 0 ? { observedInputTokens: observed } : {}),
+      };
+    }
+  }
+  for (const shape of UPSTREAM_GATE_SHAPES) {
+    const m = errorText.match(shape);
+    if (!m) continue;
+    const limit = Number(m[1]);
+    if (Number.isFinite(limit) && limit > 0) return { limit };
+  }
+  return undefined;
+}
+
+/** Back-compat wrapper: just the number. */
 export function parseUpstreamPromptLimit(errorText: string): number | undefined {
-  const m = errorText.match(/tokens?\s*>\s*(\d+)\s+maximum/i);
-  if (!m) return undefined;
-  const n = Number(m[1]);
-  return Number.isFinite(n) && n > 0 ? n : undefined;
+  return parseUpstreamPromptGate(errorText)?.limit;
 }
 
-/** Record the upstream's real window so the NEXT request can be protected. */
-export function noteUpstreamPromptLimit(providerKey: string, limitTokens: number): void {
+/**
+ * Record the upstream's real gate so the NEXT request can be protected.
+ *
+ * `modelId` scopes the gate to one model under the provider: one provider routinely fronts
+ * models with different windows, and a provider-level number would let one model's 400
+ * poison every other model's brake.
+ */
+export function noteUpstreamPromptLimit(
+  providerKey: string,
+  limitTokens: number,
+  meta: { modelId?: string; observedInputTokens?: number } = {},
+): void {
   if (!providerKey || !Number.isFinite(limitTokens) || limitTokens <= 0) return;
-  const prev = learnedLimits.get(providerKey);
-  // Keep the smallest limit we ever saw: a provider that reports 1,048,576 is the real ceiling
-  // even if another message quotes a bigger number.
-  if (prev === undefined || limitTokens < prev) learnedLimits.set(providerKey, limitTokens);
+  const key = gateKey(providerKey, meta.modelId);
+  const now = new Date().toISOString();
+  const prev = learnedGates.get(key);
+  // Keep the SMALLEST ceiling we ever saw: a gate that reported 1,048,576 is the real one
+  // even if another message quotes a bigger number. The timestamps still track every
+  // sighting, so the UI can show both "the smallest gate we know" and "when we last heard".
+  if (prev === undefined || limitTokens < prev.limit) {
+    learnedGates.set(key, {
+      limit: limitTokens,
+      observedAt: now,
+      lastSeenAt: now,
+      ...(meta.observedInputTokens !== undefined ? { observedInputTokens: meta.observedInputTokens } : {}),
+      source: "upstream-error",
+    });
+    return;
+  }
+  learnedGates.set(key, {
+    ...prev,
+    lastSeenAt: now,
+    ...(meta.observedInputTokens !== undefined ? { observedInputTokens: meta.observedInputTokens } : {}),
+  });
 }
 
-/** The learned upstream window for a provider, if we have seen one. */
-export function learnedUpstreamPromptLimit(providerKey: string): number | undefined {
-  return learnedLimits.get(providerKey);
+/**
+ * The learned gate for a route: the model-scoped one when we have it, else the provider-level
+ * one. Provider-level is a legitimate fallback (some upstreams quote a single ceiling for
+ * everything they serve), but a model-scoped gate always wins.
+ */
+export function learnedGate(providerKey: string, modelId?: string): LearnedGate | undefined {
+  if (!providerKey) return undefined;
+  if (modelId) {
+    const exact = learnedGates.get(gateKey(providerKey, modelId));
+    if (exact) return exact;
+  }
+  return learnedGates.get(providerKey);
+}
+
+/** The learned upstream window for a route, if we have seen one. */
+export function learnedUpstreamPromptLimit(providerKey: string, modelId?: string): number | undefined {
+  return learnedGate(providerKey, modelId)?.limit;
+}
+
+/** Every gate we know about, for display. */
+export function allLearnedGates(): Array<{ key: string; provider: string; model?: string; gate: LearnedGate }> {
+  const out: Array<{ key: string; provider: string; model?: string; gate: LearnedGate }> = [];
+  for (const [key, gate] of learnedGates) {
+    const { provider, model } = splitGateKey(key);
+    out.push({ key, provider, ...(model !== undefined ? { model } : {}), gate });
+  }
+  return out;
 }
 
 /** Test seam: forget everything we learned. */
 export function resetLearnedUpstreamLimits(): void {
-  learnedLimits.clear();
+  learnedGates.clear();
 }
 
 /**
- * Is this an Anthropic wire body?
+ * The wire shape the budget brake can act on.
  *
- * `detectWireShape` is not enough: an OpenAI chat-completions body also has `messages`. The
- * discriminators we use are Anthropic's own `max_tokens` field and the absence of the
- * OpenAI-only content block types.
+ * `anthropic` and `chat-completions` are both handled: the brake has to cover the
+ * OpenAI-shaped providers too, because they were previously invisible to it (their
+ * `image_url` blocks read as "unknown" and their bodies were skipped outright).
+ *
+ * `responses` is deliberately NOT handled: those bodies go to passthrough upstreams
+ * (the ChatGPT backend, Google) that manage their own window, and rewriting them would
+ * corrupt a protocol we do not own.
  */
-function isAnthropicWireBody(body: unknown): boolean {
-  if (!body || typeof body !== "object") return false;
-  const wire = body as { messages?: unknown; max_tokens?: unknown };
-  if (!Array.isArray(wire.messages)) return false;
-  if (typeof wire.max_tokens !== "number") return false;
-  for (const msg of wire.messages as Array<{ content?: unknown }>) {
-    const content = msg?.content;
-    if (!Array.isArray(content)) continue;
-    for (const block of content as Array<{ type?: unknown }>) {
-      const t = String(block?.type ?? "");
-      if (t === "image_url" || t === "input_text" || t === "input_image") return false;
-    }
-  }
-  return true;
+type BudgetableWireShape = "anthropic" | "chat-completions";
+
+function budgetableWireShape(body: unknown): BudgetableWireShape | undefined {
+  const shape = detectWireShape(body);
+  if (shape === "anthropic" || shape === "chat-completions") return shape;
+  return undefined;
 }
 
 export interface PromptBudgetResult {
@@ -278,12 +446,11 @@ export async function enforceUpstreamPromptBudget(
       };
     }
   }
-  const before = measureAnthropicWireComposition(parsed);
-  // The brake models the Anthropic wire format (a native image block vs. a payload that the
-  // upstream bills as text). On any other wire shape the estimate would be wrong — it would
-  // read an OpenAI-style `image_url` part as text and drop images for no reason — so the
-  // budget is not applied there.
-  if (!isAnthropicWireBody(parsed)) {
+  const before = measureWireComposition(parsed);
+  // The brake models the Anthropic and chat-completions wire formats (a native image block
+  // vs. a payload that the upstream bills as text). On any other wire shape the estimate
+  // would be wrong, so the budget is not applied there.
+  if (!budgetableWireShape(parsed)) {
     return {
       body,
       estimatedTokens: before.estimatedTokens,
@@ -339,10 +506,15 @@ export async function enforceUpstreamPromptBudget(
   const targetMaxEdge = options.downsampleMaxEdge ?? targetMaxEdgeForFamily(plan.family);
   let guard = 0;
   while (guard++ < 200) {
-    const current = measureAnthropicWireComposition(wire);
+    const current = measureWireComposition(wire);
     if (current.estimatedTokens <= budget) break;
-    const stillImages = (item: typeof plan.items[number]): boolean =>
-      (item.entry.container[item.entry.index] as { type?: unknown } | undefined)?.type === "image";
+    // An image block is spelled differently in each wire shape: "image" (Anthropic),
+    // "image_url" (chat-completions), "input_image" (Responses). Matching on one literal
+    // made the brake silently do nothing on the other two.
+    const stillImages = (item: typeof plan.items[number]): boolean => {
+      const t = String((item.entry.container[item.entry.index] as { type?: unknown } | undefined)?.type ?? "");
+      return t === "image" || t === "image_url" || t === "input_image";
+    };
 
     // 2a. A repeated payload is the cheapest thing we can give up: the same bytes are
     //     still in the request, so nothing is lost. It goes first.
@@ -422,7 +594,7 @@ export async function enforceUpstreamPromptBudget(
     dropped++;
   }
 
-  const after = measureAnthropicWireComposition(wire);
+  const after = measureWireComposition(wire);
   return {
     body: isString ? JSON.stringify(wire) : wire,
     estimatedTokens: after.estimatedTokens,

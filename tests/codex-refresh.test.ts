@@ -9,7 +9,7 @@ const config = {
 } as OcxConfig;
 
 describe("Codex catalog refresh", () => {
-  test("writes an expired Codex models cache whenever the materialized catalog exists", async () => {
+  test("never invalidates the Codex models cache: the Codex home is not ours to touch", async () => {
     let invalidated = 0;
     const result = await refreshCodexModelCatalog(config, {
       syncCatalogModels: async () => ({ added: 0, path: "/tmp/opencodex-catalog.json" }),
@@ -21,9 +21,9 @@ describe("Codex catalog refresh", () => {
       added: 0,
       path: "/tmp/opencodex-catalog.json",
       catalogExists: true,
-      cacheSynced: true,
+      cacheSynced: false,
     });
-    expect(invalidated).toBe(1);
+    expect(invalidated).toBe(0);
   });
 
   test("does not touch the cache when no Codex catalog can be materialized", async () => {

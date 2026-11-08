@@ -41,6 +41,10 @@ function routedEntry(slug: string, priority: number): Record<string, unknown> {
 }
 
 describe("Codex catalog sync hardening", () => {
+  // opencodex does not own the Codex home, so it never writes the Codex catalog. These
+  // tests used to pin down HOW we rewrote it safely; they now pin down that we do not
+  // touch it at all - the catalog comes out exactly as it went in, whatever we were asked
+  // to sync.
   let codexHome: string;
   let opencodexHome: string;
 
@@ -54,7 +58,7 @@ describe("Codex catalog sync hardening", () => {
     if (existsSync(opencodexHome)) rmSync(opencodexHome, { recursive: true, force: true });
   });
 
-  test("Gap B: drops legacy OpenAI-family natives but keeps supported + user natives", () => {
+  test("legacy OpenAI-family natives are left alone too", () => {
     const catalogPath = join(codexHome, "catalog.json");
     writeFileSync(join(codexHome, "config.toml"), 'model_catalog_json = "catalog.json"\n', "utf8");
     writeFileSync(catalogPath, JSON.stringify({
@@ -88,9 +92,9 @@ describe("Codex catalog sync hardening", () => {
     expect(slugs).toContain("gpt-5.6-terra");
     expect(slugs).toContain("gpt-5.6-luna");
     expect(slugs).toContain("user-native");           // genuine user native preserved
-    expect(slugs).not.toContain("gpt-5.3-codex");      // legacy dropped
-    expect(slugs).not.toContain("gpt-5.2");            // legacy dropped
-    expect(slugs).not.toContain("codex-auto-review");  // legacy dropped
+    expect(slugs).toContain("gpt-5.3-codex");          // legacy kept: we do not rewrite
+    expect(slugs).toContain("gpt-5.2");
+    expect(slugs).toContain("codex-auto-review");
   });
 
   test("Gap A: an empty routed fetch preserves existing routed entries on disk", () => {
@@ -110,7 +114,6 @@ describe("Codex catalog sync hardening", () => {
       syncCatalogModels({ providers: {}, enableCodexLauncherMode: true }).then(res => console.log(JSON.stringify(res)));
     `);
     expect(r.status).toBe(0);
-    expect(r.stderr).toContain("routed model fetch returned empty; preserving 2 existing routed entries");
 
     const slugs = (JSON.parse(readFileSync(catalogPath, "utf8")).models as Array<{ slug: string }>).map(m => m.slug);
     expect(slugs).toContain("kiro/claude-opus-4.8");   // routed preserved despite empty fetch
@@ -135,12 +138,11 @@ describe("Codex catalog sync hardening", () => {
       syncCatalogModels({ providers: {}, enableCodexLauncherMode: true }).then(res => console.log(JSON.stringify(res)));
     `);
     expect(r.status).toBe(0);
-    expect(r.stderr).toContain("routed model fetch returned empty; preserving 2 existing routed entries");
 
     const slugs = (JSON.parse(readFileSync(catalogPath, "utf8")).models as Array<{ slug: string }>).map(m => m.slug);
     expect(slugs).toContain("kiro/claude-opus-4.8");
     expect(slugs).toContain("opencode-go/glm-5.2");
-    expect(slugs).not.toContain("opencode-go/hy3-preview");
+    expect(slugs).toContain("opencode-go/hy3-preview");
   });
 
   test("preserves existing routed entries for providers absent from the current sync config", () => {
@@ -172,8 +174,7 @@ describe("Codex catalog sync hardening", () => {
 
     const slugs = (JSON.parse(readFileSync(catalogPath, "utf8")).models as Array<{ slug: string }>).map(m => m.slug);
     expect(slugs).toContain("cursor/composer-2.5");
-    expect(slugs).toContain("openai/fresh-model");
-    expect(slugs).not.toContain("openai/stale-model");
+    expect(slugs).toContain("openai/stale-model");
   });
 
   test("replaces existing routed entries for providers present in the current sync config", () => {
@@ -204,9 +205,8 @@ describe("Codex catalog sync hardening", () => {
     expect(r.status).toBe(0);
 
     const slugs = (JSON.parse(readFileSync(catalogPath, "utf8")).models as Array<{ slug: string }>).map(m => m.slug);
-    expect(slugs).toContain("cursor/composer-2.5");
     expect(slugs).toContain("xai/grok-5-code");
-    expect(slugs).not.toContain("cursor/stale-model");
+    expect(slugs).toContain("cursor/stale-model");
   });
 
   test("readCodexCatalogPath honors CODEX_HOME at call time", () => {

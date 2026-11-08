@@ -252,15 +252,157 @@ export function summarizeComposition(composition: TokenComposition): Array<{
 }
 
 /** Wire-shape detection so the caller does not need to know which adapter built the body. */
-export type WireShape = "anthropic" | "responses" | "unknown";
+export type WireShape = "anthropic" | "chat-completions" | "responses" | "unknown";
+
+/** Block types that only ever appear in an OpenAI chat-completions body. */
+const CHAT_ONLY_BLOCK_TYPES = new Set(["image_url", "input_text", "input_audio", "file"]);
+/** Block types that only ever appear in an Anthropic body. */
+const ANTHROPIC_ONLY_BLOCK_TYPES = new Set(["tool_use", "tool_result", "thinking", "redacted_thinking"]);
+
+/**
+ * An Anthropic body and a chat-completions body BOTH carry `messages`, so the presence of
+ * `messages` says nothing. The content block types do: `image_url` / `input_text` are
+ * OpenAI-only, `tool_use` / `tool_result` / `thinking` are Anthropic-only.
+ *
+ * Getting this wrong is not cosmetic: the budget brake models the Anthropic wire format, so
+ * a chat-completions body misread as Anthropic would be measured with the wrong rules and
+ * the brake would fire at the wrong moment (or not at all).
+ */
+function looksLikeChatCompletions(messages: unknown[]): boolean {
+  for (const msg of messages) {
+    const content = (msg as { content?: unknown })?.content;
+    if (!Array.isArray(content)) continue;
+    for (const block of content) {
+      const type = String((block as { type?: unknown })?.type ?? "");
+      if (ANTHROPIC_ONLY_BLOCK_TYPES.has(type)) return false;
+      if (CHAT_ONLY_BLOCK_TYPES.has(type)) return true;
+    }
+  }
+  return false;
+}
 
 export function detectWireShape(wireBody: unknown): WireShape {
   if (!wireBody || typeof wireBody !== "object") return "unknown";
   const body = wireBody as { messages?: unknown; input?: unknown; contents?: unknown };
-  if (Array.isArray(body.messages)) return "anthropic";
+  if (Array.isArray(body.messages)) return looksLikeChatCompletions(body.messages) ? "chat-completions" : "anthropic";
   if (Array.isArray(body.input)) return "responses";
   if (Array.isArray(body.contents)) return "responses";
   return "unknown";
+}
+
+/**
+ * The base64 payload of a data URL, or undefined when the URL is not a data URL.
+ *
+ * Shared by the estimator and the image inventory: both need to know whether an image is
+ * carried as vision (a data URL the upstream can decode) or as text (anything else, which
+ * the upstream bills per character - the shape that produced a 2.2M-token prompt).
+ */
+export function base64OfDataUrl(url: string): string | undefined {
+  if (!url) return undefined;
+  const m = url.match(/^data:[a-z0-9.+-]+\/[a-z0-9.+-]+;base64,([A-Za-z0-9+/=]+)$/i);
+  return m ? m[1] : undefined;
+}
+
+/**
+ * Measure the outgoing OpenAI chat-completions wire body by content class.
+ *
+ * The OpenAI-shaped sibling of `measureAnthropicWireComposition`. Providers whose adapter is
+ * `openai-chat` used to be invisible to the budget brake: the Anthropic-only estimator read
+ * their `image_url` blocks as "unknown" and their text blocks with the wrong ratios.
+ */
+export function measureChatCompletionsWireComposition(wireBody: unknown): TokenComposition {
+  const classes: Record<string, CompositionClass> = {};
+  const add = (name: string, chars: number, tokens: number, count = 1): void => {
+    const c = (classes[name] ??= emptyClass());
+    c.count += count;
+    c.chars += chars;
+    c.estimatedTokens += tokens;
+  };
+
+  const body = (wireBody ?? {}) as {
+    messages?: Array<{ role?: unknown; content?: unknown; tool_calls?: unknown }>;
+    tools?: unknown;
+  };
+
+  if (Array.isArray(body.tools)) {
+    for (const tool of body.tools) {
+      const json = JSON.stringify(tool) ?? "";
+      add("tool_schema", json.length, Math.ceil(json.length / PROSE_CHARS_PER_TOKEN));
+    }
+  }
+
+  for (const msg of body.messages ?? []) {
+    const role = String(msg.role ?? "");
+    const systemish = role === "system" || role === "developer";
+
+    if (typeof msg.content === "string") {
+      const text = msg.content;
+      const inlined = text.match(DATA_URL_IN_TEXT);
+      let inlinedChars = 0;
+      for (const m of inlined ?? []) inlinedChars += m.length;
+      const plainChars = text.length - inlinedChars;
+      add(systemish ? "system" : "text", plainChars, Math.ceil(plainChars / PROSE_CHARS_PER_TOKEN));
+      if (inlinedChars > 0) {
+        add("base64_in_text", inlinedChars, Math.ceil(inlinedChars / BASE64_TEXT_CHARS_PER_TOKEN));
+      }
+      if (Array.isArray(msg.tool_calls)) {
+        for (const call of msg.tool_calls) {
+          const json = JSON.stringify(call) ?? "";
+          add("tool_call_args", json.length, Math.ceil(json.length / PROSE_CHARS_PER_TOKEN));
+        }
+      }
+      continue;
+    }
+
+    if (!Array.isArray(msg.content)) {
+      if (Array.isArray(msg.tool_calls)) {
+        for (const call of msg.tool_calls) {
+          const json = JSON.stringify(call) ?? "";
+          add("tool_call_args", json.length, Math.ceil(json.length / PROSE_CHARS_PER_TOKEN));
+        }
+      }
+      continue;
+    }
+
+    for (const block of msg.content as Array<Record<string, unknown>>) {
+      const type = String(block?.type ?? "unknown");
+      if (type === "image_url") {
+        const url = String((block.image_url as { url?: unknown })?.url ?? "");
+        const data = base64OfDataUrl(url);
+        if (data) {
+          add("image_native", data.length, visionTokensForImage(data));
+        } else if (url && !/^https?:\/\//i.test(url)) {
+          // Not fetchable: the upstream cannot render it, so the string is billed as TEXT.
+          add("image_unusable_as_text", url.length, Math.ceil(url.length / BASE64_TEXT_CHARS_PER_TOKEN));
+        } else {
+          add("image_native", url.length, VISION_TOKENS_PER_IMAGE);
+        }
+        continue;
+      }
+      if (type === "text" || type === "input_text") {
+        const text = String(block.text ?? "");
+        const inlined = text.match(DATA_URL_IN_TEXT);
+        let inlinedChars = 0;
+        for (const m of inlined ?? []) inlinedChars += m.length;
+        const plainChars = text.length - inlinedChars;
+        add(systemish ? "system" : "text", plainChars, Math.ceil(plainChars / PROSE_CHARS_PER_TOKEN));
+        if (inlinedChars > 0) {
+          add("base64_in_text", inlinedChars, Math.ceil(inlinedChars / BASE64_TEXT_CHARS_PER_TOKEN));
+        }
+        continue;
+      }
+      const json = JSON.stringify(block) ?? "";
+      add(type, json.length, Math.ceil(json.length / PROSE_CHARS_PER_TOKEN));
+    }
+  }
+
+  let totalChars = 0;
+  let estimatedTokens = 0;
+  for (const c of Object.values(classes)) {
+    totalChars += c.chars;
+    estimatedTokens += c.estimatedTokens;
+  }
+  return { totalChars, estimatedTokens, classes };
 }
 
 /**
@@ -365,6 +507,8 @@ export function measureWireComposition(wireBody: unknown): TokenComposition {
   switch (detectWireShape(wireBody)) {
     case "anthropic":
       return measureAnthropicWireComposition(wireBody);
+    case "chat-completions":
+      return measureChatCompletionsWireComposition(wireBody);
     case "responses":
       return measureResponsesWireComposition(wireBody);
     default:

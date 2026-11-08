@@ -30,6 +30,7 @@ import { getUsageDebugLogEntries } from "../usage/debug";
 import { parseRange, summarizeUsage } from "../usage/summary";
 import { stripCodexRuntimeProviderFields } from "../codex/auth-context";
 import { getDebugLogEntries } from "../lib/debug-log-buffer";
+import { UPSTREAM_BUDGET_MARGIN } from "../lib/upstream-prompt-budget";
 import {
   clearDebugSettings,
   clearDebugSetting,
@@ -770,6 +771,12 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
         label: "enforced ceiling (learned from the upstream's own rejection)",
         value: typeof probe.learned === "number" ? probe.learned : null,
         source: typeof probe.learned === "number" ? "upstream-error" : "not-observed-yet",
+        // When we saw it, and what the upstream said the request was. The GUI renders this
+        // in the operator's language, so the facts travel as fields, not as prose.
+        ...(probe.learnedObservedAt ? { observedAt: probe.learnedObservedAt } : {}),
+        ...(typeof probe.learnedObservedInputTokens === "number"
+          ? { observedInputTokens: probe.learnedObservedInputTokens }
+          : {}),
       },
       {
         key: "current",
@@ -778,8 +785,16 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
         source: row?.capSource ?? "unknown",
       },
       {
+        key: "brake",
+        label: "our brake (what the proxy enforces before sending)",
+        value: typeof probe.learned === "number"
+          ? Math.floor(probe.learned * UPSTREAM_BUDGET_MARGIN)
+          : null,
+        source: "proxy-side",
+      },
+      {
         key: "suggestion",
-        label: "suggested window (safety margin applied)",
+        label: "suggested window (safety margin applied, for whoever compiles the Codex profile)",
         value: typeof probe.suggestion === "number" ? probe.suggestion : null,
         source: probe.source,
       },

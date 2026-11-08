@@ -25,6 +25,9 @@ function runScript(codexHome: string, opencodexHome: string, script: string): { 
 }
 
 describe("Codex catalog restore", () => {
+  // opencodex does not own the Codex home, so it never writes the Codex catalog - not to
+  // restore it, not to sync it. Every test below asserts the SAME thing from a different
+  // angle: the file on disk comes out byte-for-byte unchanged, whatever we were asked to do.
   let codexHome: string;
   let opencodexHome: string;
 
@@ -81,10 +84,10 @@ describe("Codex catalog restore", () => {
     `);
 
     expect(r.status).toBe(0);
-    expect(JSON.parse(r.stdout)).toMatchObject({ removed: 1, kept: 1 });
-    // The empty backup is ignored, so the in-place filter runs and keeps the native entry.
+    expect(JSON.parse(r.stdout)).toMatchObject({ removed: 0, kept: 0 });
+    // Nothing is written at all: the live catalog keeps both of its entries.
     const slugs = JSON.parse(readFileSync(catalogPath, "utf8")).models.map((m: { slug: string }) => m.slug);
-    expect(slugs).toEqual(["gpt-5.5"]);
+    expect(slugs).toEqual(["gpt-5.5", "m.aiio.chat/MiniMax-M3.1-Flash-Preview"]);
   });
 
   test("pass-through mode never writes to a foreign (relay) catalog", () => {
@@ -150,9 +153,9 @@ describe("Codex catalog restore", () => {
     `);
 
     expect(r.status).toBe(0);
-    expect(JSON.parse(r.stdout)).toMatchObject({ removed: 1, kept: 2 });
+    expect(JSON.parse(r.stdout)).toMatchObject({ removed: 0, kept: 0 });
     const slugs = JSON.parse(readFileSync(catalogPath, "utf8")).models.map((m: { slug: string }) => m.slug);
-    expect(slugs).toEqual(["gpt-5.5", "user-native"]);
+    expect(slugs).toEqual(["gpt-5.5", "opencode-go/deepseek-v4-pro", "user-native"]);
   });
 
   test("uses pristine backup while preserving native entries added after sync", () => {
@@ -181,11 +184,12 @@ describe("Codex catalog restore", () => {
     `);
 
     expect(r.status).toBe(0);
-    expect(JSON.parse(r.stdout)).toMatchObject({ removed: 1, kept: 3 });
+    expect(JSON.parse(r.stdout)).toMatchObject({ removed: 0, kept: 0 });
     const restored = JSON.parse(readFileSync(catalogPath, "utf8")).models as Array<Record<string, unknown>>;
     expect(restored).toEqual([
-      { slug: "gpt-5.5", priority: 50 },
-      { slug: "codex-mini", priority: 60 },
+      { slug: "gpt-5.5", priority: 0, supports_websockets: true },
+      { slug: "codex-mini", priority: 60, supports_websockets: true },
+      { slug: "umans/umans-kimi-k2.7" },
       { slug: "user-native", priority: 10 },
     ]);
   });
@@ -211,20 +215,21 @@ describe("Codex catalog restore", () => {
     `);
 
     expect(r.status).toBe(0);
-    expect(JSON.parse(r.stdout)).toMatchObject({ removed: 1, kept: 2 });
+    expect(JSON.parse(r.stdout)).toMatchObject({ removed: 0, kept: 0 });
     const restored = JSON.parse(readFileSync(catalogPath, "utf8")).models as Array<Record<string, unknown>>;
-    expect(restored.map(m => m.slug)).toEqual(["gpt-5.5", "user-native"]);
+    expect(restored.map(m => m.slug)).toEqual(["gpt-5.5", "umans/umans-kimi-k2.7", "user-native"]);
   });
 
   test("sync applies native-only subagent priority selections", () => {
     const catalogPath = join(codexHome, "catalog.json");
     writeFileSync(join(codexHome, "config.toml"), 'model_catalog_json = "catalog.json"\n', "utf8");
-    writeFileSync(catalogPath, JSON.stringify({
+    const original = JSON.stringify({
       models: [
         { slug: "gpt-5.5", priority: 50, base_instructions: "native", visibility: "list" },
         { slug: "gpt-5.4", priority: 0, base_instructions: "native", visibility: "list" },
       ],
-    }, null, 2) + "\n");
+    }, null, 2) + "\n";
+    writeFileSync(catalogPath, original, "utf8");
 
     const r = runScript(codexHome, opencodexHome, `
       const { syncCatalogModels } = require("./src/codex/catalog");
@@ -242,15 +247,14 @@ describe("Codex catalog restore", () => {
 
     expect(r.status).toBe(0);
     expect(JSON.parse(r.stdout)).toMatchObject({ added: 0 });
-    const synced = JSON.parse(readFileSync(catalogPath, "utf8")).models as Array<Record<string, unknown>>;
-    expect(synced.find(m => m.slug === "gpt-5.5")?.priority).toBe(0);
-    expect(synced.find(m => m.slug === "gpt-5.4")?.priority).toBeGreaterThan(100);
+    // The catalog belongs to whoever owns the Codex home: we do not reorder it.
+    expect(readFileSync(catalogPath, "utf8")).toBe(original);
   });
 
   test("sync advertises documented Codex-native additions omitted by the bundled catalog", () => {
     const catalogPath = join(codexHome, "catalog.json");
     writeFileSync(join(codexHome, "config.toml"), 'model_catalog_json = "catalog.json"\n', "utf8");
-    writeFileSync(catalogPath, JSON.stringify({
+    const original = JSON.stringify({
       models: [
         {
           slug: "gpt-5.5",
@@ -269,7 +273,8 @@ describe("Codex catalog restore", () => {
           max_context_window: 1_000_000,
         },
       ],
-    }, null, 2) + "\n");
+    }, null, 2) + "\n";
+    writeFileSync(catalogPath, original, "utf8");
 
     const r = runScript(codexHome, opencodexHome, `
       const { syncCatalogModels } = require("./src/codex/catalog");
@@ -286,11 +291,7 @@ describe("Codex catalog restore", () => {
     `);
 
     expect(r.status).toBe(0);
-    const synced = JSON.parse(readFileSync(catalogPath, "utf8")).models as Array<Record<string, unknown>>;
-    expect(synced.map(m => m.slug)).toContain("gpt-5.3-codex-spark");
-    expect(synced.map(m => m.slug)).toContain("gpt-5.6-sol");
-    expect(synced.map(m => m.slug)).toContain("gpt-5.6-terra");
-    expect(synced.map(m => m.slug)).toContain("gpt-5.6-luna");
-    expect(synced.find(m => m.slug === "gpt-5.4")?.max_context_window).toBe(1_000_000);
+    // We do not add native entries to someone else's catalog either.
+    expect(readFileSync(catalogPath, "utf8")).toBe(original);
   });
 });

@@ -12,7 +12,7 @@
  * safety margin: Codex counts the prompt in its own tokenizer, which under-counts a
  * CJK/JSON/tool-output mix by ~25%, so the client's brake has to fire before the ceiling.
  */
-import { learnedUpstreamPromptLimit } from "../lib/upstream-prompt-budget";
+import { learnedGate } from "../lib/upstream-prompt-budget";
 import { readCodexCatalogPath } from "../codex/catalog";
 import { existsSync, readFileSync } from "node:fs";
 
@@ -24,8 +24,16 @@ export interface ContextWindowProbe {
   model: string;
   /** What the upstream's metadata declares (may be missing). */
   declared?: number;
-  /** The ceiling the upstream actually enforced, learned from its own error. */
+  /** The gate the upstream actually enforced, learned from its own error. */
   learned?: number;
+  /** How that gate was observed. */
+  learnedSource?: "upstream-error" | "legacy";
+  /** When the gate was first seen (ISO). */
+  learnedObservedAt?: string;
+  /** When the upstream last mentioned this gate (ISO). */
+  learnedLastSeenAt?: string;
+  /** The request size the upstream quoted alongside the gate. */
+  learnedObservedInputTokens?: number;
   /** The number to advertise, already discounted by the safety margin. */
   suggestion?: number;
   /** Where `suggestion` came from. */
@@ -65,7 +73,8 @@ export function probeContextWindow(
   model: string,
   opts: { declared?: number; current?: number } = {},
 ): ContextWindowProbe {
-  const learned = learnedUpstreamPromptLimit(provider);
+  const gate = learnedGate(provider, model);
+  const learned = gate?.limit;
   const declared = typeof opts.declared === "number" && opts.declared > 0 ? opts.declared : undefined;
   const real = learned ?? declared;
   const source: ContextWindowProbe["source"] = learned !== undefined
@@ -76,6 +85,12 @@ export function probeContextWindow(
     model,
     ...(declared !== undefined ? { declared } : {}),
     ...(learned !== undefined ? { learned } : {}),
+    ...(gate ? { learnedSource: gate.source } : {}),
+    ...(gate && gate.observedAt ? { learnedObservedAt: gate.observedAt } : {}),
+    ...(gate && gate.lastSeenAt ? { learnedLastSeenAt: gate.lastSeenAt } : {}),
+    ...(gate && gate.observedInputTokens !== undefined
+      ? { learnedObservedInputTokens: gate.observedInputTokens }
+      : {}),
     ...(real !== undefined ? { suggestion: Math.floor(real * PROBE_SAFETY_MARGIN) } : {}),
     source,
     ...(typeof opts.current === "number" && opts.current > 0 ? { current: opts.current } : {}),
