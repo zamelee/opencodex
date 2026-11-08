@@ -21,6 +21,10 @@ export interface ProbeStep {
   label: string;
   value: number | null;
   source: string;
+  /** When the gate was observed (ISO), for the learned step. */
+  observedAt?: string;
+  /** The request size the upstream quoted alongside the gate. */
+  observedInputTokens?: number;
 }
 
 export interface ProbeResult {
@@ -131,6 +135,7 @@ const PROBE_STEP_LABEL: Record<string, TKey> = {
   declared: "models.probeStepDeclared",
   learned: "models.probeStepLearned",
   current: "models.probeStepCurrent",
+  brake: "models.probeStepBrake",
   suggestion: "models.probeStepSuggested",
 };
 
@@ -148,6 +153,7 @@ const PROBE_SOURCE_LABEL: Record<string, TKey> = {
   unknown: "models.probeSrcUnknown",
   learned: "models.probeSrcLearned",
   declared: "models.probeSrcDeclared",
+  "proxy-side": "models.probeSrcProxySide",
 };
 
 /** What the step means, in one sentence. This is the column people actually need. */
@@ -155,6 +161,7 @@ const PROBE_STEP_NOTE: Record<string, TKey> = {
   declared: "models.probeNoteDeclared",
   learned: "models.probeNoteLearned",
   current: "models.probeNoteCurrent",
+  brake: "models.probeNoteBrake",
   suggestion: "models.probeNoteSuggested",
 };
 
@@ -201,6 +208,14 @@ export function ProbeTrace({ result }: { result: ProbeResult }) {
               </td>
               <td className="probe-td-note">
                 {PROBE_STEP_NOTE[s.key] ? t(PROBE_STEP_NOTE[s.key]) : ""}
+                {s.observedAt ? (
+                  <span className="muted" style={{ display: "block", fontSize: 11 }}>
+                    {t("models.probeObservedAt", { at: s.observedAt })}
+                    {typeof s.observedInputTokens === "number"
+                      ? ` · ${t("models.probeObservedTokens", { tokens: s.observedInputTokens })}`
+                      : ""}
+                  </span>
+                ) : null}
               </td>
             </tr>
           ))}

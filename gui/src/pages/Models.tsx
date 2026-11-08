@@ -28,6 +28,13 @@ interface ModelRow {
   modelOverride?: number | false;
   /** The window the upstream declares for this model (before our caps). */
   nativeContextWindow?: number;
+  /**
+   * The gate the UPSTREAM actually enforced, learned from its own "prompt is too long"
+   * rejection. It is the one number we trust: not a declaration, not our cap.
+   */
+  learnedContextWindow?: number;
+  /** When that gate was first observed (ISO). */
+  learnedGateObservedAt?: string;
   /** The window we advertise after our caps. */
   effectiveContextWindow?: number;
   /** At which token count Codex should auto-compact (window x the provider's ratio). */
@@ -59,88 +66,38 @@ const THREAD_OPTIONS = [4, 8, 16, 32, 64, 128, 256, 500, 1000];
 const PAGE = 60; // rows rendered per provider before a "show more" (keeps 1000s-of-models providers usable)
 
 /**
- * Compact per-model override Select. Options:
- *   - "default" -> follow provider cap (key absent from modelContextOverrides).
- *   - "opt-out" -> false (this model ignores the provider cap; upstream contextWindow wins).
- *   - hard-coded preset numbers (CAP_OPTIONS) -> numeric override that beats the provider cap.
- *   - "custom" -> inline input + apply button (re-uses the page-level customCap input style).
- * The native ("openai") passthrough group never mounts this widget because it has no upstream cap.
+ * The context window we work against, read-only.
+ *
+ * We no longer set a per-model limit here. Codex's side belongs to the CodexPlusPlus relay
+ * profile; the proxy's side is protected by the brake, which already uses the gate the
+ * upstream reported. What is worth SHOWING is that gate: the one number the upstream
+ * actually enforced, learned from its own rejection. Until we have one, we show the
+ * declared window and say so.
  */
-function PerModelCapSelect({
-  value,
-  providerCapValue,
-  providerCapOn,
-  disabled,
-  onPick,
+function ContextGateCell({
+  learned,
+  effective,
+  observedAt,
 }: {
-  value: number | false | undefined;
-  providerCapValue: number;
-  providerCapOn: boolean;
-  disabled: boolean;
-  onPick: (v: number | false | null) => void;
+  learned?: number;
+  effective?: number;
+  observedAt?: string;
 }) {
   const t = useT();
-  const [customOpen, setCustomOpen] = useState(false);
-  const [customVal, setCustomVal] = useState("");
-  // When no override is set, the Select sits on "default" and shows the provider cap as a hint.
-  const isCustomNumeric = typeof value === "number" && !CAP_OPTIONS.includes(value);
-  const selectValue =
-    value === undefined ? "default"
-      : value === false ? "opt-out"
-      : isCustomNumeric ? "custom"
-      : String(value);
-  const handleChange = (raw: string) => {
-    if (raw === "custom") {
-      setCustomOpen(true);
-      setCustomVal(typeof value === "number" ? String(value) : "");
-      return;
-    }
-    setCustomOpen(false);
-    if (raw === "default") { onPick(null); return; }
-    if (raw === "opt-out") { onPick(false); return; }
-    const n = Number(raw);
-    if (Number.isFinite(n) && n > 0) onPick(Math.floor(n));
-  };
-  const submitCustom = () => {
-    const n = Number(customVal.replace(/[_,\s]/g, ""));
-    if (!Number.isFinite(n) || n <= 0) return;
-    setCustomOpen(false);
-    onPick(Math.floor(n));
-  };
+  if (typeof learned === "number" && learned > 0) {
+    return (
+      <span
+        className="mono gate-cell"
+        title={t("models.gateLearnedTitle", { value: fmtK(learned), at: observedAt ?? "-" })}
+      >
+        {fmtK(learned)}
+      </span>
+    );
+  }
   return (
-    <>
-      <Select
-        value={selectValue}
-        options={[
-          { value: "default", label: providerCapOn
-              ? t("models.inheritValue", { value: fmtK(providerCapValue) })
-              : t("models.perModelCapDefault") },
-          ...CAP_OPTIONS.map(v => ({ value: String(v), label: fmtK(v) })),
-          ...(isCustomNumeric ? [{ value: "custom", label: fmtK(value as number) }] : []),
-          { value: "opt-out", label: t("models.perModelCapOptOut") },
-          { value: "custom", label: t("models.perModelCapCustom") },
-        ]}
-        onChange={handleChange}
-        disabled={disabled}
-        label={t("models.perModelCap")}
-        align="right"
-      />
-      {customOpen && (
-        <>
-          <input
-            className="input"
-            style={{ width: 120 }}
-            inputMode="numeric"
-            placeholder={t("models.customPlaceholder")}
-            value={customVal}
-            onChange={e => setCustomVal(e.target.value)}
-            onKeyDown={e => { if (e.key === "Enter") submitCustom(); }}
-            disabled={disabled}
-          />
-          <button type="button" className="btn btn-ghost btn-sm" disabled={disabled} onClick={submitCustom}>{t("models.customApply")}</button>
-        </>
-      )}
-    </>
+    <span className="muted mono gate-cell" title={t("models.gateNoneTitle")}>
+      {typeof effective === "number" && effective > 0 ? fmtK(effective) : "-"}
+    </span>
   );
 }
 
@@ -414,35 +371,6 @@ export default function Models({ apiBase }: { apiBase: string }) {
   );
   const setAll = () => { void putCap({ setAll: !allCapped }); };
 
-  // Per-model override: PUT only the single changed entry. The backend re-reads
-  // config.modelContextOverrides and we re-fetch /api/models so the row reflects truth.
-  const applyModelOverride = async (namespaced: string, value: number | false | null) => {
-    setBusy(true);
-    busyRef.current = true;
-    setStatus("");
-    try {
-      const r = await fetch(`${apiBase}/api/provider-context-caps`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ modelOverrides: { [namespaced]: value } }),
-      });
-      if (r.ok) {
-        setOk(true);
-        setStatus(t("models.perModelCapApplied"));
-        await load();
-      } else {
-        setOk(false);
-        setStatus(t("models.capSaveFailed"));
-      }
-    } catch {
-      setOk(false);
-      setStatus(t("models.networkError"));
-    } finally {
-      setBusy(false);
-      busyRef.current = false;
-    }
-  };
-
   // Image downsampling switch: global default + provider override + model override.
   // Same three-state shape as the context cap (follow provider / force on / force off).
   const putDownsample = async (
@@ -551,16 +479,10 @@ export default function Models({ apiBase }: { apiBase: string }) {
           applied: null,
         },
       }));
-      const apply = await fetch(`${apiBase}/api/provider-context-caps`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ modelOverrides: { [namespaced]: suggestion } }),
-      });
-      if (apply.ok) {
-        // Say out loud what we wrote, instead of letting the write happen silently.
-        setProbeResults(prev => ({ ...prev, [namespaced]: { ...prev[namespaced], applied: suggestion } }));
-        await load();
-      }
+      // The probe only REPORTS now. It used to write the suggestion back as a per-model
+      // override; that made opencodex the author of a window it does not own, and Codex's
+      // side belongs to the CodexPlusPlus relay profile now. The proxy's own brake uses
+      // the learned gate directly, so nothing needs to be written for it to work.
     } catch (err) {
       setOk(false);
       setStatus(t("models.probeFailed", { error: err instanceof Error ? err.message : String(err) }));
@@ -895,12 +817,10 @@ export default function Models({ apiBase }: { apiBase: string }) {
                       </span>
                       <span className="model-cell model-cell-cap">
                         {!m.native && (
-                          <PerModelCapSelect
-                            value={m.modelOverride}
-                            providerCapValue={contextCapValue}
-                            providerCapOn={contextCaps[m.provider] === contextCapValue}
-                            disabled={busy}
-                            onPick={(v) => { void applyModelOverride(m.namespaced, v); }}
+                          <ContextGateCell
+                            learned={m.learnedContextWindow}
+                            effective={m.effectiveContextWindow}
+                            observedAt={m.learnedGateObservedAt}
                           />
                         )}
                       </span>

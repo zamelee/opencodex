@@ -710,6 +710,15 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 .model-cell-cap .custom-select,
 .model-cell-downsample .custom-select { width: 100%; }
 
+/* The gate cell is a plain value now (we no longer set a per-model cap here), so it has to
+   centre itself under its own column header like the other columns do. */
+.gate-cell {
+  display: block;
+  text-align: center;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
 .model-cell-cap .select-trigger,
 .model-cell-downsample .select-trigger {
   width: 100%;
