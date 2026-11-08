@@ -199,11 +199,38 @@ export interface ParsedUpstreamGate {
   observedInputTokens?: number;
 }
 
+/**
+ * The same parse, but tolerant of a rejection that carries no usable number.
+ *
+ * Some relays answer an over-long prompt with "context window exceeds limit (2013)" and
+ * never state a token ceiling. We know the request was rejected for being too long, but
+ * (2013) is not a token count, so treating it as one would be a lie. The caller gets
+ * `rejectedWithoutLimit` instead, and the UI can say "the upstream refused it, but did
+ * not say where its ceiling is".
+ */
+export interface ParsedUpstreamRejection extends Partial<ParsedUpstreamGate> {
+  /** True when the upstream clearly refused the request for being too long. */
+  rejected: boolean;
+  /** True when it said so but named no ceiling we could use. */
+  rejectedWithoutLimit: boolean;
+}
+
 const UPSTREAM_GATE_SHAPES: RegExp[] = [
   /maximum\s+context\s+length(?:\s+is|:)\s*(\d+)/i,
   /context[_\s-]length[_\s-]exceeded[^\d]{0,60}(\d+)/i,
   /exceed(?:s|ed)?\s+(?:the\s+)?context\s+limit[^\d]{0,20}(\d+)/i,
   /(?:max(?:imum)?\s+)?(?:token\s+)?limit\s*(?:is|of|:)\s*(\d+)/i,
+];
+
+/** Phrases that mean "your prompt was too long", with no number attached. */
+const UPSTREAM_REJECTION_PHRASES: RegExp[] = [
+  /context\s+window\s+exceeds?\s+limit/i,
+  /prompt\s+is\s+too\s+long/i,
+  /context[_\s-]length[_\s-]exceeded/i,
+  /input\s+(?:is\s+)?too\s+long/i,
+  /too\s+many\s+tokens/i,
+  /exceeds?\s+the\s+(?:maximum|context)/i,
+  /maximum\s+context\s+length/i,
 ];
 
 export function parseUpstreamPromptGate(errorText: string): ParsedUpstreamGate | undefined {
@@ -226,6 +253,31 @@ export function parseUpstreamPromptGate(errorText: string): ParsedUpstreamGate |
     if (Number.isFinite(limit) && limit > 0) return { limit };
   }
   return undefined;
+}
+
+/**
+ * Parse an upstream's refusal, whether or not it named a ceiling.
+ *
+ * A refusal with a number is a ceiling we can obey. A refusal without one is still
+ * information - the upstream confirmed the request was too long - but it is NOT a limit
+ * we may store, and pretending otherwise would put a wrong number in front of the brake.
+ */
+export function parseUpstreamRejection(errorText: string): ParsedUpstreamRejection {
+  const withLimit = parseUpstreamPromptGate(errorText);
+  if (withLimit?.limit) {
+    return {
+      rejected: true,
+      rejectedWithoutLimit: false,
+      limit: withLimit.limit,
+      ...(withLimit.observedInputTokens !== undefined
+        ? { observedInputTokens: withLimit.observedInputTokens }
+        : {}),
+    };
+  }
+  if (errorText && UPSTREAM_REJECTION_PHRASES.some((re) => re.test(errorText))) {
+    return { rejected: true, rejectedWithoutLimit: true };
+  }
+  return { rejected: false, rejectedWithoutLimit: false };
 }
 
 /** Back-compat wrapper: just the number. */

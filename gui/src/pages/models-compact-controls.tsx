@@ -40,6 +40,29 @@ export interface ProbeResult {
   error?: string;
 }
 
+/** One step of the ACTIVE probe: what we sent, and what the upstream said. */
+export interface GateProbeAttempt {
+  action: string;
+  targetTokens: number;
+  status?: number;
+  reportedTokens?: number;
+  limit?: number;
+  lowerBoundTokens?: number;
+  outcome: "rejected" | "accepted" | "unknown";
+  /** Why the attempt ended the way it did. */
+  reason?: string;
+  detail?: string;
+}
+
+export interface GateProbeLiveResult {
+  attempts: GateProbeAttempt[];
+  limit?: number;
+  lowerBound?: number;
+  ok: boolean;
+  reason?: string;
+  error?: string;
+}
+
 /**
  * The compact point, as a slider.
  *
@@ -219,16 +242,110 @@ export function ProbeTrace({ result }: { result: ProbeResult }) {
               </td>
             </tr>
           ))}
-          <tr className="probe-row-applied">
-            <td className="probe-td-item">{t("models.probeAppliedLabel")}</td>
-            <td className="probe-td-value mono">
-              {typeof result.applied === "number" ? fmtK(result.applied) : t("models.probeNotApplied")}
-            </td>
-            <td className="probe-td-source" />
-            <td className="probe-td-note" />
-          </tr>
         </tbody>
       </table>
+    </div>
+  );
+}
+
+/**
+ * The ACTIVE probe, and the trace of what it did.
+ *
+ * The read-only probe above only rearranges evidence we already have. This one spends a
+ * request: it sends a body far larger than any plausible window and lets the upstream
+ * name its own ceiling. The steps are shown one by one, so "what happened" is never a
+ * black box - and the cost is stated before the button is pressed.
+ */
+export function LiveProbe({
+  result,
+  running,
+  onRun,
+  testId,
+}: {
+  result?: GateProbeLiveResult;
+  running: boolean;
+  onRun: () => void;
+  testId?: string;
+}) {
+  const t = useT();
+  const outcomeLabel: Record<GateProbeAttempt["outcome"], TKey> = {
+    rejected: "models.liveProbeOutcomeRejected",
+    accepted: "models.liveProbeOutcomeAccepted",
+    unknown: "models.liveProbeOutcomeUnknown",
+  };
+  const reasonLabel: Record<string, TKey> = {
+    "gate-learned": "models.liveProbeReasonLearned",
+    "rejected-no-limit": "models.liveProbeReasonNoLimit",
+    "accepted-lower-bound": "models.liveProbeReasonLowerBound",
+    "rate-limited": "models.liveProbeReasonRateLimited",
+    "no-balance": "models.liveProbeReasonNoBalance",
+    "bad-key": "models.liveProbeReasonBadKey",
+    "model-not-found": "models.liveProbeReasonNotFound",
+    "upstream-error": "models.liveProbeReasonUpstreamError",
+    timeout: "models.liveProbeReasonTimeout",
+    "unsupported-adapter": "models.liveProbeReasonUnsupported",
+  };
+  return (
+    <div className="probe-live">
+      <div className="probe-live-head">
+        <span className="muted" style={{ fontSize: 12 }}>{t("models.liveProbeHint")}</span>
+        <button
+          type="button"
+          className="btn btn-ghost btn-sm"
+          disabled={running}
+          onClick={onRun}
+          data-testid={testId}
+          title={t("models.liveProbeHint")}
+        >
+          {running ? t("models.liveProbeRunning") : t("models.liveProbeRun")}
+        </button>
+      </div>
+      {result && (
+        <>
+          {result.error && (
+            <p className="muted" style={{ fontSize: 12, margin: "4px 0" }}>
+              {result.reason && reasonLabel[result.reason] ? t(reasonLabel[result.reason]) : result.error}
+            </p>
+          )}
+          <table className="probe-table">
+            <thead>
+              <tr>
+                <th>{t("models.probeTableItem")}</th>
+                <th>{t("models.probeTableValue")}</th>
+                <th>{t("models.liveProbeColStatus")}</th>
+                <th>{t("models.probeTableNote")}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {result.attempts.map((a, i) => (
+                <tr key={i}>
+                  <td className="probe-td-item">{t("models.liveProbeSent")}</td>
+                  <td className="probe-td-value mono">{fmtK(a.targetTokens)}</td>
+                  <td className="probe-td-source">
+                    {a.status ?? "-"} · {a.reason && reasonLabel[a.reason]
+                      ? t(reasonLabel[a.reason])
+                      : a.outcome === "rejected" && a.limit === undefined
+                        ? t("models.liveProbeOutcomeRejectedNoLimit")
+                        : t(outcomeLabel[a.outcome])}
+                  </td>
+                  <td className="probe-td-note">
+                    {a.limit !== undefined
+                      ? t("models.liveProbeLearned", { value: fmtK(a.limit) })
+                      : a.lowerBoundTokens !== undefined
+                        ? t("models.liveProbeLowerBound", { value: fmtK(a.lowerBoundTokens) })
+                        : ""}
+                    {a.detail ? (
+                      <span className="muted" style={{ display: "block", fontSize: 11 }}>
+                        {t("models.liveProbeUpstreamSaid")} {a.detail}
+                      </span>
+                    ) : null}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
     </div>
   );
 }

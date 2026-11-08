@@ -809,6 +809,66 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
     return jsonResponse({ ...probe, safetyMargin: PROBE_SAFETY_MARGIN, steps });
   }
 
+  if (url.pathname === "/api/provider-context-caps/probe-live" && req.method === "POST") {
+    // The ACTIVE probe: spend one request to make the upstream name its ceiling. The
+    // read-only probe above only rearranges what we already know; this one asks.
+    let body: { provider?: unknown; model?: unknown };
+    try { body = await req.json(); } catch { return jsonResponse({ error: "invalid JSON body" }, 400); }
+    const provider = typeof body.provider === "string" ? body.provider.trim() : "";
+    const model = typeof body.model === "string" ? body.model.trim() : "";
+    if (!provider || !model) return jsonResponse({ error: "provider and model are required" }, 400);
+    const providerConfig = config.providers?.[provider];
+    if (!providerConfig) return jsonResponse({ error: `unknown provider: ${provider}` }, 400);
+    // The probe talks to the upstream DIRECTLY (it is a diagnostic, not a relayed turn),
+    // so it needs a usable key of its own. The configured primary key wins; otherwise we
+    // take the first pool entry. A key the upstream refuses
+    // (401) or that has no balance (403) is reported as-is - we do not go shopping
+    // through the pool, because every attempt is another request upstream.
+    const pool = Array.isArray(providerConfig.apiKeyPool) ? providerConfig.apiKeyPool : [];
+    const key = providerConfig.apiKey
+      ?? pool.find((k) => !!k?.key)?.key
+      ?? pool[0]?.key;
+    if (!key) return jsonResponse({ error: "the provider has no API key" }, 400);
+
+    const { probeUpstreamGate } = await import("../providers/context-gate-probe");
+    const { learnedUpstreamPromptLimit, noteUpstreamPromptLimit, saveLearnedLimits } =
+      await import("../lib/upstream-prompt-budget");
+    const { catalogDeclaredWindow } = await import("./context-window-probe");
+    const learned = learnedUpstreamPromptLimit(provider, model);
+    const declared = catalogDeclaredWindow(`${provider}/${model}`) ?? catalogDeclaredWindow(model);
+    const { appendDebugLogLine } = await import("../lib/debug-log-buffer");
+    appendDebugLogLine(`[ocx:gate-probe] ${provider}/${model} start (known ceiling: ${learned ?? "-"}, declared: ${declared ?? "-"})`);
+
+    const result = await probeUpstreamGate({
+      provider: providerConfig,
+      modelId: model,
+      apiKey: key,
+      ...(learned !== undefined ? { learnedLimit: learned } : {}),
+      ...(declared !== undefined ? { declaredLimit: declared } : {}),
+    });
+
+    for (const attempt of result.attempts) {
+      appendDebugLogLine(
+        `[ocx:gate-probe] ${provider}/${model} target=${attempt.targetTokens} status=${attempt.status ?? "-"}`
+        + ` outcome=${attempt.outcome} limit=${attempt.limit ?? "-"} ${attempt.detail ?? ""}`,
+      );
+    }
+    if (result.limit !== undefined) {
+      // A learned ceiling is the only thing worth keeping: it is what the upstream
+      // actually enforced. Store it against this provider+model.
+      noteUpstreamPromptLimit(provider, result.limit, { modelId: model });
+      saveLearnedLimits();
+      appendDebugLogLine(`[ocx:gate-probe] ${provider}/${model} learned ceiling ${result.limit}`);
+    }
+    if (result.error) appendDebugLogLine(`[ocx:gate-probe] ${provider}/${model} ${result.error}`);
+    console.log(
+      `[ocx:gate-probe] ${provider}/${model} ok=${result.ok}`
+      + ` limit=${result.limit ?? "-"} lowerBound=${result.lowerBound ?? "-"}`
+      + ` ${result.error ?? ""}`,
+    );
+    return jsonResponse(result);
+  }
+
   if (url.pathname === "/api/provider-context-caps" && req.method === "PUT") {
     let body: { provider?: unknown; enabled?: unknown; value?: unknown; setAll?: unknown; providerValue?: unknown; modelOverrides?: unknown };
     try { body = await req.json(); } catch { return jsonResponse({ error: "invalid JSON body" }, 400); }

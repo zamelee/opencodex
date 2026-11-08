@@ -6,6 +6,8 @@ import { modelLabel } from "../model-display";
 import {
   CompactRatioSlider,
   ProbeTrace,
+  LiveProbe,
+  type GateProbeLiveResult,
   fmtK,
   type ProbeResult,
   type ProbeStep,
@@ -167,6 +169,9 @@ export default function Models({ apiBase }: { apiBase: string }) {
   const [probing, setProbing] = useState<string | null>(null);
   // Per-row probe results, rendered INLINE next to the model (not only in the toast).
   const [probeResults, setProbeResults] = useState<Record<string, ProbeResult>>({});
+  /** The ACTIVE probe: one request per click, with its steps kept for the row. */
+  const [liveResults, setLiveResults] = useState<Record<string, GateProbeLiveResult>>({});
+  const [probingLive, setProbingLive] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
@@ -492,6 +497,47 @@ export default function Models({ apiBase }: { apiBase: string }) {
       }));
     } finally {
       setProbing(null);
+    }
+  };
+
+  // The ACTIVE probe: one request that asks the upstream to name its own ceiling.
+  // It costs a request (a rejected one is normally not billed) and it can only ever
+  // find a ceiling the upstream is willing to state.
+  const probeLive = async (namespaced: string) => {
+    const [provider, ...rest] = namespaced.split("/");
+    const model = rest.join("/");
+    setProbingLive(namespaced);
+    setStatus("");
+    try {
+      const r = await fetch(`${apiBase}/api/provider-context-caps/probe-live`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider, model }),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        setOk(false);
+        setStatus(t("models.liveProbeFailed", { error: body.error ?? `HTTP ${r.status}` }));
+        return;
+      }
+      // A probe that ran but learned nothing is still a RESULT: the steps it took are
+      // exactly what the operator wants to see. Only a broken endpoint is a failure.
+      const result = body as GateProbeLiveResult;
+      setLiveResults(prev => ({ ...prev, [namespaced]: result }));
+      if (result.ok) {
+        setOk(true);
+        setStatus(t("models.liveProbeLearned", { value: fmtK(result.limit ?? 0) }));
+        // The ceiling is stored now, so the row shows it without another probe.
+        await load();
+      } else {
+        setOk(false);
+        setStatus(t("models.liveProbeNoGate"));
+      }
+    } catch (err) {
+      setOk(false);
+      setStatus(t("models.liveProbeFailed", { error: err instanceof Error ? err.message : String(err) }));
+    } finally {
+      setProbingLive(null);
     }
   };
 
@@ -865,7 +911,17 @@ export default function Models({ apiBase }: { apiBase: string }) {
                           />
                         )}
                       </span>
-                      {probe && <ProbeTrace result={probe} />}
+                      {probe && (
+                        <>
+                          <ProbeTrace result={probe} />
+                          <LiveProbe
+                            result={liveResults[m.namespaced]}
+                            running={probingLive === m.namespaced}
+                            onRun={() => { void probeLive(m.namespaced); }}
+                            testId={`probe-live-${m.namespaced}`}
+                          />
+                        </>
+                      )}
                     </div>
                   );
                 })}

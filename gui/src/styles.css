@@ -1283,6 +1283,23 @@ select.input { appearance: none; }
   color: var(--text);
 }
 
+/* The active probe: a button that spends a request, and the steps it took. */
+.probe-live {
+  margin: 6px 0 0;
+  padding-top: 6px;
+  border-top: 1px dashed var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.probe-live-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
 .probe-table {
   width: 100%;
   border-collapse: collapse;
