@@ -9,6 +9,7 @@ import {
   loadLearnedLimits,
   noteUpstreamPromptLimit,
   parseUpstreamPromptGate,
+  parseUpstreamRejection,
   resetLearnedUpstreamLimits,
   saveLearnedLimits,
 } from "../src/lib/upstream-prompt-budget";
@@ -111,6 +112,23 @@ describe("the upstream gate is read out of the error text", () => {
     );
     expect(parsed?.limit).toBe(1_048_576);
     expect(parsed?.observedInputTokens).toBe(1_580_773);
+  });
+
+  test("the gate survives the JSON escaping the upstream's nested message carries", () => {
+    // The upstream nests its message as a JSON string, so ">" arrives as the six
+    // characters \u003e. A regex looking for ">" misses it, and the proxy then claims
+    // "the upstream gave no ceiling" for an error that said "1048576 maximum".
+    const raw = '{"error":{"type":"prompt_too_long","message":"{\\"code\\":11115,'
+      + '\\"msg\\":\\"prompt is too long: 2010775 tokens \\u003e 1048576 maximum\\"}"}}';
+    const parsed = parseUpstreamPromptGate(raw);
+    expect(parsed?.limit).toBe(1_048_576);
+    expect(parsed?.observedInputTokens).toBe(2_010_775);
+    // And the refusal is recognized AS a refusal-with-a-limit, not a bare refusal.
+    expect(parseUpstreamRejection(raw)).toMatchObject({
+      rejected: true,
+      rejectedWithoutLimit: false,
+      limit: 1_048_576,
+    });
   });
 
   test("other upstreams word it differently", () => {

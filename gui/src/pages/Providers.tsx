@@ -17,6 +17,7 @@ import KeyTestResultDialog, {
 } from "../components/KeyTestResultDialog";
 import { hasFreshMatrixCache } from "../components/AuthMatrixPanel";
 import { providerIconSrc } from "../provider-icons";
+import { providerAccent } from "../provider-accent";
 
 interface Config {
   port: number;
@@ -81,25 +82,6 @@ function AccountRowSkeleton({ tone = "dim" }: { tone?: "dim" | "muted" }) {
       <span className="prov-account-skeleton-bar" aria-hidden="true" />
     </div>
   );
-}
-
-/** Per-provider visual identity: a left-border accent + a faint tinted
- *  background, picked by adapter so each card is recognisable at a glance
- *  even before the user reads the URL/adapter chip. Colors lean into the
- *  existing palette (warm/cool/violet/green) without colliding with the
- *  default blue used for the default-provider badge. */
-function providerAccent(adapter: string | undefined): { border: string; tint: string } {
-  const a = (adapter ?? "").toLowerCase();
-  if (a.startsWith("anthropic")) return { border: "#e09a5f", tint: "rgba(224,154,95,0.06)" };
-  if (a === "openai-chat") return { border: "#5fb1e3", tint: "rgba(95,177,227,0.06)" };
-  if (a === "openai-responses") return { border: "#a285f5", tint: "rgba(162,133,245,0.06)" };
-  if (a.startsWith("google")) return { border: "#5fc18a", tint: "rgba(95,193,138,0.06)" };
-  if (a.startsWith("xai")) return { border: "#c98ad6", tint: "rgba(201,138,214,0.06)" };
-  if (a === "kimi") return { border: "#d6c25f", tint: "rgba(214,194,95,0.06)" };
-  if (a === "kiro") return { border: "#e35f7f", tint: "rgba(227,95,127,0.06)" };
-  if (a === "cursor") return { border: "#7fc9c8", tint: "rgba(127,201,200,0.06)" };
-  if (a === "chatgpt" || a === "openai-responses-forward") return { border: "#7a7a7a", tint: "rgba(122,122,122,0.05)" };
-  return { border: "var(--blue)", tint: "rgba(88,166,255,0.05)" };
 }
 
 /** Tiny top-corner mark keyed off `authMode` so the three keyless/oauth/passthrough

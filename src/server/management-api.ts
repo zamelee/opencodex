@@ -1024,6 +1024,14 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
     return jsonResponse(gateLimitSettings(config));
   }
 
+  // The learned token-scale factors: how many upstream tokens our estimate is worth, per
+  // provider. They come from the upstream's OWN counts (its refusal names the size it was
+  // asked to handle), so they are the closest thing to the upstream's ruler we have.
+  if (url.pathname === "/api/token-scales" && req.method === "GET") {
+    const { allLearnedScales } = await import("../lib/upstream-token-scale");
+    return jsonResponse({ scales: allLearnedScales() });
+  }
+
   if (url.pathname === "/api/gate-limits" && req.method === "PUT") {
     let body: { model?: unknown; value?: unknown };
     try { body = await req.json(); } catch { return jsonResponse({ error: "invalid JSON body" }, 400); }

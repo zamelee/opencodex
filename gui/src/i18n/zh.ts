@@ -521,6 +521,9 @@ export const zh: Record<TKey, string> = {
   "logs.detailRaw": "原始日志",
   "logs.detailPromptComposition": "上游提示词构成（按上游计费口径估算）",
   "logs.col.estimatedTokens": "预估提示词 token",
+  "logs.col.upstreamTokens": "上游计数",
+  "logs.detailTokenGap": "估算与上游计数的差额",
+  "logs.detailTokenGapNote": "上游按它自己的口径数这个请求；倍数越大，我们的刹车就越早动手。",
 
   "debug.title": "调试",
   "debug.subtitle": "可选的 provider transport 与 usage 提取诊断。请求错误和 502 在 Logs 页面。",

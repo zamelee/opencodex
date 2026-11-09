@@ -22,6 +22,7 @@ import {
 } from "../oauth";
 import { invalidateCodexModelsCache } from "../codex/catalog";
 import { loadLearnedLimits } from "../lib/upstream-prompt-budget";
+import { loadLearnedScales } from "../lib/upstream-token-scale";
 import { loadGateCircuit } from "../lib/upstream-gate-circuit";
 import {
   CodexAccountCooldownError,
@@ -192,6 +193,11 @@ export function startServer(port?: number) {
   // are the only numbers that come from the upstream's ENFORCED limit (a declaration is
   // marketing), and learning one costs an over-long turn — a restart must not throw it away.
   loadLearnedLimits();
+  // Restore the token-scale factors: how many upstream tokens our estimate is worth for
+  // each provider. Without them the brake compares our heuristic against the upstream's
+  // ceiling in two different units, and a provider that counts 4x more than we do (measured:
+  // m.aiio.chat) never gets braked.
+  loadLearnedScales();
   // Restore the upstream's refusals: how often it refused us for being too long, and whether
   // it ever named a ceiling. The circuit that stops a compaction loop counts on this.
   loadGateCircuit();

@@ -521,6 +521,9 @@ export const en = {
   "logs.detailRaw": "Raw log entry",
   "logs.detailPromptComposition": "Upstream prompt composition (as the provider counts it)",
   "logs.col.estimatedTokens": "Estimated prompt tokens",
+  "logs.col.upstreamTokens": "Upstream count",
+  "logs.detailTokenGap": "Estimate vs the upstream's own count",
+  "logs.detailTokenGapNote": "The upstream counts this request on its own scale; the bigger the factor, the earlier our brake acts.",
 
   // debug page
   "debug.title": "Debug",

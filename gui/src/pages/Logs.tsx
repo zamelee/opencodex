@@ -4,6 +4,7 @@ import { formatTokens } from "../format-tokens";
 import { statusCodeInfo } from "../status-codes";
 import { IconX } from "../icons";
 import { modelLabel } from "../model-display";
+import { providerAccent, providerAccentText, type ProviderAccent } from "../provider-accent";
 import { EmptyState } from "../ui";
 
 interface UsageBreakdown {
@@ -42,6 +43,11 @@ interface LogEntry {
     totalChars: number;
     estimatedTokens: number;
     classes: Array<{ name: string; count: number; chars: number; estimatedTokens: number }>;
+  };
+  upstreamTokenGap?: {
+    upstreamTokens: number;
+    estimatedTokens: number;
+    factor: number;
   };
 }
 
@@ -97,9 +103,25 @@ function modelTitle(log: LogEntry): string {
 export default function Logs({ apiBase }: { apiBase: string }) {
   const { t, locale } = useI18n();
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  // provider name -> adapter, so a row can wear the SAME color the provider
+  // card wears on the Providers page. The logs endpoint only knows the name.
+  const [providerAdapters, setProviderAdapters] = useState<Record<string, string>>({});
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [detail, setDetail] = useState<LogEntry | null>(null);
   const localeTag = LOCALES.find(l => l.code === locale)?.htmlLang;
+
+  useEffect(() => {
+    const fetchProviders = async () => {
+      try {
+        const res = await fetch(`${apiBase}/api/providers`);
+        const data = await res.json() as Array<{ name: string; adapter?: string }>;
+        const map: Record<string, string> = {};
+        for (const p of data) if (p?.name) map[p.name] = p.adapter ?? "";
+        setProviderAdapters(map);
+      } catch { /* ignore */ }
+    };
+    fetchProviders();
+  }, [apiBase]);
 
   useEffect(() => {
     const fetchLogs = async () => {
@@ -118,6 +140,10 @@ export default function Logs({ apiBase }: { apiBase: string }) {
 
   const detailInfo = detail ? statusCodeInfo(detail.status, locale) : null;
 
+  /** The accent of the provider that served this row (name -> adapter -> color). */
+  const accentFor = (provider: string): ProviderAccent =>
+    providerAccent(providerAdapters[provider]);
+
   return (
     <>
       <div className="page-head">
@@ -133,23 +159,26 @@ export default function Logs({ apiBase }: { apiBase: string }) {
         <EmptyState title={t("logs.noRequests")} />
       ) : (
         <div className="tbl-wrap">
-          <table className="tbl">
+          <table className="tbl logs-tbl">
             <thead>
              <tr>
-               <th>{t("logs.col.time")}</th>
+               <th className="log-col-time">{t("logs.col.time")}</th>
                 <th className="num log-col-tokens">{t("logs.col.tokens")}</th>
                <th className="log-col-model">{t("logs.col.model")}</th>
-               <th>{t("logs.col.effort")}</th>
-               <th>{t("logs.col.provider")}</th>
-               <th>{t("logs.col.status")}</th>
-                <th>{t("logs.col.request")}</th>
-               <th className="num">{t("logs.col.duration")}</th>
+               <th className="log-col-effort">{t("logs.col.effort")}</th>
+               <th className="log-col-provider">{t("logs.col.provider")}</th>
+               <th className="log-col-status">{t("logs.col.status")}</th>
+                <th className="log-col-request">{t("logs.col.request")}</th>
+               <th className="num log-col-duration">{t("logs.col.duration")}</th>
              </tr>
             </thead>
             <tbody>
-              {[...logs].reverse().map((log, i) => (
-               <tr key={log.requestId ?? `${log.timestamp}-${i}`}>
-                 <td className="muted mono">{new Date(log.timestamp).toLocaleTimeString(localeTag)}</td>
+              {[...logs].reverse().map((log, i) => {
+                const accent = accentFor(log.provider);
+                return (
+               <tr key={log.requestId ?? `${log.timestamp}-${i}`} className="logs-row"
+                   style={{ backgroundImage: `linear-gradient(${accent.tint}, transparent 180px)` }}>
+                 <td className="muted mono log-col-time">{new Date(log.timestamp).toLocaleTimeString(localeTag)}</td>
                   <td className="num mono log-col-tokens" title={tokensTitle(log)}>
                     {(() => {
                       const tokenTotal = displayTokenTotal(log);
@@ -170,13 +199,18 @@ export default function Logs({ apiBase }: { apiBase: string }) {
                   </td>
                  <td className="mono log-col-model" title={modelTitle(log)}>
                    <span style={{ display: "inline-flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                    <span>{modelLabel(log.resolvedModel ?? log.model)}</span>
+                    <span style={{ color: providerAccentText(accent) }}>{modelLabel(log.resolvedModel ?? log.model)}</span>
                       {speedLabel(log) && <span className="badge badge-amber">{speedLabel(log)}</span>}
                     </span>
                   </td>
-                  <td className="mono">{log.requestedEffort ?? "-"}</td>
-                  <td className="muted">{log.provider}</td>
-                  <td>
+                  <td className="mono log-col-effort">{log.requestedEffort ?? "-"}</td>
+                  <td className="log-col-provider">
+                    <span className="log-provider-cell">
+                      <span className="log-provider-dot" style={{ background: accent.border }} aria-hidden="true" />
+                      <span style={{ color: providerAccentText(accent) }}>{log.provider}</span>
+                    </span>
+                  </td>
+                  <td className="log-col-status">
                     <span className="log-status-cell">
                       <span className="mono" style={{ color: statusColor(log.status), fontWeight: 600 }}>{log.status}</span>
                       {log.status >= 400 && (
@@ -185,11 +219,12 @@ export default function Logs({ apiBase }: { apiBase: string }) {
                         </button>
                       )}
                     </span>
-                 </td>
-                  <td className="muted mono"><span className="log-reqid" title={log.requestId}>{log.requestId ?? "-"}</span></td>
-                 <td className="num">{log.durationMs}ms</td>
-                </tr>
-              ))}
+                  </td>
+                  <td className="muted mono log-col-request"><span className="log-reqid" title={log.requestId}>{log.requestId ?? "-"}</span></td>
+                  <td className="num log-col-duration">{log.durationMs}ms</td>
+               </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -240,6 +275,27 @@ export default function Logs({ apiBase }: { apiBase: string }) {
                     </Fragment>
                   ))}
                 </div>
+              </>
+            )}
+            {detail.upstreamTokenGap && (
+              <>
+                <div className="muted" style={{ fontSize: 12, margin: "12px 0 6px" }}>
+                  {t("logs.detailTokenGap")}
+                </div>
+                <div className="log-detail-grid">
+                  <span className="muted">{t("logs.col.upstreamTokens")}</span>
+                  <span className="mono">
+                    {detail.upstreamTokenGap.upstreamTokens.toLocaleString(localeTag)}
+                    <span className="muted">
+                      {" "}· ×{detail.upstreamTokenGap.factor.toFixed(2)}
+                    </span>
+                  </span>
+                  <span className="muted">{t("logs.col.estimatedTokens")}</span>
+                  <span className="mono">
+                    ~{detail.upstreamTokenGap.estimatedTokens.toLocaleString(localeTag)}
+                  </span>
+                </div>
+                <p className="modal-desc" style={{ marginTop: 6 }}>{t("logs.detailTokenGapNote")}</p>
               </>
             )}
             <div className="muted" style={{ fontSize: 12, margin: "12px 0 6px" }}>{t("logs.detailRaw")}</div>

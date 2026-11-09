@@ -51,6 +51,16 @@ export interface RequestLogContext {
    * dominant class is visible instead of inferred.
    */
   promptComposition?: PromptCompositionSummary;
+  /**
+   * The gap between OUR token estimate and the UPSTREAM's own count for this request.
+   *
+   * The upstream names the size it was asked to handle when it refuses ("prompt is too
+   * long: 2010775 tokens"). That is the upstream's own ruler, applied to the exact body we
+   * put on the wire, and it is the only ground truth about how big the request really is.
+   * Recording both numbers turns "the prompt was too long" into a measurable fact: on
+   * 2026-11-09 the upstream counted 2,010,775 tokens for a body we estimated at 498,000.
+   */
+  upstreamTokenGap?: UpstreamTokenGap;
 }
 
 export interface PromptCompositionSummary {
@@ -58,6 +68,15 @@ export interface PromptCompositionSummary {
   estimatedTokens: number;
   /** Per-class breakdown, sorted by estimated tokens (descending). */
   classes: Array<{ name: string; count: number; chars: number; estimatedTokens: number }>;
+}
+
+export interface UpstreamTokenGap {
+  /** The upstream's own count for the body we sent. */
+  upstreamTokens: number;
+  /** Our estimate of the same body. */
+  estimatedTokens: number;
+  /** upstreamTokens divided by estimatedTokens. 1 means the two rulers agree. */
+  factor: number;
 }
 
 export interface RequestLogEntry {
@@ -86,6 +105,8 @@ export interface RequestLogEntry {
   totalTokens?: number;
   /** Upstream-side token composition of the outgoing request body (see RequestLogContext). */
   promptComposition?: PromptCompositionSummary;
+  /** How far our estimate sat from the upstream's own count of the same body. */
+  upstreamTokenGap?: UpstreamTokenGap;
 }
 
 const requestLog: RequestLogEntry[] = [];
@@ -399,6 +420,7 @@ export function addFinalRequestLog(
     ...(loggedUsage ? { usage: loggedUsage } : {}),
     ...(totalTokens !== undefined ? { totalTokens } : {}),
     ...(logCtx.promptComposition ? { promptComposition: logCtx.promptComposition } : {}),
+    ...(logCtx.upstreamTokenGap ? { upstreamTokenGap: logCtx.upstreamTokenGap } : {}),
   });
   if (isUsageDebugEnabled()) {
     appendUsageDebug({

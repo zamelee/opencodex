@@ -233,9 +233,45 @@ const UPSTREAM_REJECTION_PHRASES: RegExp[] = [
   /maximum\s+context\s+length/i,
 ];
 
+/**
+ * Decode the JSON string escapes that hide an upstream's numbers from a regex.
+ *
+ * An upstream error body nests its message as a JSON string, so a character that matters
+ * to the shapes above arrives escaped:
+ *
+ *   {"error":{"message":"{\"msg\":\"prompt is too long: 2010775 tokens \u003e 1048576 maximum\"}"}}
+ *
+ * The ">" is the six characters `\u003e`, NOT a ">". Any pattern looking for a literal ">"
+ * silently fails, and the proxy concludes the upstream "refused without naming a ceiling" -
+ * while the ceiling was right there. Decoding the escapes before matching is what turns
+ * that error back into the fact it is.
+ *
+ * Only the escapes that can appear in a number-bearing message are decoded; a general
+ * JSON.parse is not possible because the body is an error FRAGMENT, not a whole document.
+ */
+function decodeJsonEscapes(text: string): string {
+  if (!text.includes("\\u")) return text;
+  return text
+    .replace(/\\u003[cC]/g, "<")
+    .replace(/\\u003[eE]/g, ">")
+    .replace(/\\u0026/g, "&")
+    .replace(/\\u0027/g, "'")
+    .replace(/\\u0060/g, "`")
+    .replace(/\\u003[dD]/g, "=")
+    .replace(/\\u002[fF]/g, "/")
+    .replace(/\\u000[aA]/g, "\n")
+    .replace(/\\u000[dD]/g, "\r")
+    .replace(/\\u000[tT]/g, "\t");
+}
+
 export function parseUpstreamPromptGate(errorText: string): ParsedUpstreamGate | undefined {
   if (!errorText) return undefined;
-  const cmp = errorText.match(/(\d+)\s*tokens?\s*>\s*(\d+)\s+maximum/i);
+  // The upstream nests its message as a JSON STRING inside the error body, so the ">"
+  // arrives escaped as the six characters \u003e. A regex looking for a literal ">"
+  // never matches it, and the proxy then reports "the upstream gave no ceiling" for an
+  // error that literally said "1048576 maximum". Decode the escapes first.
+  const decoded = decodeJsonEscapes(errorText);
+  const cmp = decoded.match(/(\d+)\s*tokens?\s*>\s*(\d+)\s+maximum/i);
   if (cmp) {
     const limit = Number(cmp[2]);
     const observed = Number(cmp[1]);
@@ -247,7 +283,7 @@ export function parseUpstreamPromptGate(errorText: string): ParsedUpstreamGate |
     }
   }
   for (const shape of UPSTREAM_GATE_SHAPES) {
-    const m = errorText.match(shape);
+    const m = decoded.match(shape);
     if (!m) continue;
     const limit = Number(m[1]);
     if (Number.isFinite(limit) && limit > 0) return { limit };
@@ -409,6 +445,18 @@ export interface PromptBudgetOptions {
   providerName?: string;
   /** Model id, for the billing-family detection behind the per-image estimate. */
   modelId?: string;
+  /**
+   * How many upstream tokens our estimate is worth.
+   *
+   * The limit we brake against is the UPSTREAM's number, so our estimate has to be in the
+   * upstream's unit before the two are comparable. A provider whose tokenizer counts
+   * several times more than our character heuristic (measured 2026-11-09: m.aiio.chat /
+   * MiniMax-M3.1-Flash counted 2,010,775 tokens for a body we estimated at 498,000, a
+   * 4.04x gap) would otherwise see a doomed request as a small one and send it anyway.
+   *
+   * 1 means "our estimate already speaks the upstream's unit".
+   */
+  estimateScale?: number;
   /** How many recent turns keep their images when the brake has to give some up. */
   preserveRecentTurns?: number;
   /**
@@ -481,6 +529,14 @@ export async function enforceUpstreamPromptBudget(
   limitTokens: number | undefined,
   options: PromptBudgetOptions = {},
 ): Promise<PromptBudgetResult> {
+  // The limit is the upstream's number; our estimate has to be scaled into the same unit
+  // before the two can be compared. Everything below compares `upstreamTokens`, never the
+  // raw estimate, so a provider that counts more than we do is braked at ITS ceiling.
+  const scale = options.estimateScale !== undefined && Number.isFinite(options.estimateScale)
+    && options.estimateScale > 0
+    ? options.estimateScale
+    : 1;
+  const toUpstreamTokens = (tokens: number): number => Math.round(tokens * scale);
   const isString = typeof body === "string";
   let parsed: unknown = body;
   if (isString) {
@@ -513,15 +569,15 @@ export async function enforceUpstreamPromptBudget(
       overBudget: false,
     };
   }
-  if (limitTokens === undefined || before.estimatedTokens <= limitTokens) {
+  if (limitTokens === undefined || toUpstreamTokens(before.estimatedTokens) <= limitTokens) {
     return {
       body,
-      estimatedTokens: before.estimatedTokens,
+      estimatedTokens: toUpstreamTokens(before.estimatedTokens),
       limitTokens: limitTokens ?? null,
       droppedImages: 0,
       imageDrops: [],
       imageDownsamples: [],
-      overBudget: limitTokens !== undefined && before.estimatedTokens > limitTokens,
+      overBudget: limitTokens !== undefined && toUpstreamTokens(before.estimatedTokens) > limitTokens,
     };
   }
 
@@ -559,7 +615,7 @@ export async function enforceUpstreamPromptBudget(
   let guard = 0;
   while (guard++ < 200) {
     const current = measureWireComposition(wire);
-    if (current.estimatedTokens <= budget) break;
+    if (toUpstreamTokens(current.estimatedTokens) <= budget) break;
     // An image block is spelled differently in each wire shape: "image" (Anthropic),
     // "image_url" (chat-completions), "input_image" (Responses). Matching on one literal
     // made the brake silently do nothing on the other two.
@@ -649,11 +705,11 @@ export async function enforceUpstreamPromptBudget(
   const after = measureWireComposition(wire);
   return {
     body: isString ? JSON.stringify(wire) : wire,
-    estimatedTokens: after.estimatedTokens,
+    estimatedTokens: toUpstreamTokens(after.estimatedTokens),
     limitTokens,
     droppedImages: dropped,
     imageDrops,
     imageDownsamples,
-    overBudget: after.estimatedTokens > limitTokens,
+    overBudget: toUpstreamTokens(after.estimatedTokens) > limitTokens,
   };
 }

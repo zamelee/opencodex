@@ -64,6 +64,11 @@ import {
   saveGateCircuit,
 } from "../lib/upstream-gate-circuit";
 import {
+  noteUpstreamTokenScale,
+  saveLearnedScales,
+  upstreamTokenScaleFactor,
+} from "../lib/upstream-token-scale";
+import {
   catalogModelSupportsServiceTier,
   inspectResponseLogJson,
   readConfiguredCodexServiceTier,
@@ -1085,6 +1090,9 @@ export async function handleResponses(
     const budget = await enforceUpstreamPromptBudget(request.body, effectiveLimit, {
       providerName: route.providerName,
       modelId: route.modelId,
+      // The limit is the upstream's number, so the estimate is scaled into the upstream's
+      // unit before the two are compared.
+      estimateScale: upstreamTokenScaleFactor(route.providerName),
       ...(resolveImageDownsampleEnabled(config, route.providerName, route.modelId)
         ? { imageDownsample: true }
         : {}),
@@ -1254,6 +1262,35 @@ export async function handleResponses(
         // would mean paying for it twice. The probe reads this back (that is the number the
         // upstream REALLY enforces, unlike any declaration).
         saveLearnedLimits();
+      }
+      // The refusal also names the SIZE the upstream was asked to handle. That is a free
+      // calibration point: it says how many tokens the upstream counted for a body whose
+      // size WE estimated, and the ratio between the two is what our brake needs to speak
+      // the upstream's unit. Learning it here means the NEXT request for this provider is
+      // braked at the upstream's ceiling instead of being sent into the same wall.
+      const observedUpstreamTokens = learnedGate?.observedInputTokens ?? rejection.observedInputTokens;
+      if (observedUpstreamTokens !== undefined && requestEstimate > 0) {
+        // Record the gap on the request itself: the upstream's own count for the exact body
+        // we sent, next to our estimate of it. This is what turns "the prompt was too long"
+        // into a number an operator can act on.
+        logCtx.upstreamTokenGap = {
+          upstreamTokens: observedUpstreamTokens,
+          estimatedTokens: requestEstimate,
+          factor: observedUpstreamTokens / requestEstimate,
+        };
+      }
+      const learnedScale = noteUpstreamTokenScale(
+        route.providerName,
+        observedUpstreamTokens,
+        requestEstimate,
+      );
+      if (learnedScale) {
+        saveLearnedScales();
+        console.warn(
+          `[${route.providerName}] learned token scale x${learnedScale.factor.toFixed(2)}: `
+          + `upstream counted ${learnedScale.observedInputTokens} tokens for a body we estimated `
+          + `at ${learnedScale.estimatedTokens}. The brake now compares in the upstream's unit.`,
+        );
       }
       // Upstreams occasionally echo request details in error bodies — scrub token-shaped
       // material before it reaches the client-facing error surface.

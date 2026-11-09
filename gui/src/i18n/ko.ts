@@ -521,6 +521,9 @@ export const ko: Record<TKey, string> = {
   "logs.detailRaw": "원본 로그",
   "logs.detailPromptComposition": "업스트림 프롬프트 구성(제공자가 계산하는 기준)",
   "logs.col.estimatedTokens": "예상 프롬프트 토큰",
+  "logs.col.upstreamTokens": "업스트림 카운트",
+  "logs.detailTokenGap": "예상과 업스트림 카운트의 차이",
+  "logs.detailTokenGapNote": "업스트림은 자체 기준으로 이 요청을 계산합니다. 배수가 클수록 브레이크가 더 일찍 동작합니다.",
 
   "debug.title": "디버그",
   "debug.subtitle": "선택적 provider transport 및 usage 추출 진단. 요청 오류와 502는 Logs에 표시됩니다.",

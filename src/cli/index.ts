@@ -36,9 +36,21 @@ import { maybeShowUpdatePrompt } from "../update/notify";
 import { syncModelsToCodex } from "../codex/sync";
 import { applyLauncherFlagsToConfig, formatLauncherFlags, getLauncherFlagsFromArgv, getLauncherFlagsFromEnv, logCodexWriteBannerIfNeeded, mergeLauncherFlags, resolveLauncherFlags } from "./launcher-flags";
 import { normalizeUpdateChannel, runGuiUpdateWorker } from "../update/job";
+import { installLogTimestamps } from "../lib/log-timestamp";
 
 const args = process.argv.slice(2);
 const command = args[0];
+
+// Every line the proxy writes to stdout/stderr lands in ocx.out.log / ocx.err.log, which is
+// the only durable record of a machine we cannot watch. Prefix it with a timestamp so the
+// file sorts chronologically and a grep can place a line in time.
+//
+// The daemon commands ONLY: the short-lived ones (`ocx models --json`, `ocx status --json`)
+// print machine-readable output that a script parses, and a timestamp in front of a JSON
+// document makes it unparseable. An interactive terminal is excluded too - there the
+// timestamp is noise, not a record.
+const DAEMON_COMMANDS = new Set(["start", "ensure", "restart"]);
+if (DAEMON_COMMANDS.has(command ?? "") && !process.stdout.isTTY) installLogTimestamps();
 
 // Phase 5 launcher-flag log: surface any non-default launcher-mode override for visibility.
 {

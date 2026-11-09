@@ -258,7 +258,7 @@ export default function App() {
         </div>
       </aside>
       <main className="main">
-        <div className="main-inner">
+        <div className={`main-inner${page === "logs" ? " main-inner-wide" : ""}`}>
           {page === "dashboard" && <Dashboard apiBase={API_BASE} />}
           {page === "providers" && <Providers apiBase={API_BASE} />}
           {page === "models" && <Models apiBase={API_BASE} />}

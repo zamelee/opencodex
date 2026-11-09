@@ -88,4 +88,42 @@ describe("the budget brake sees the OpenAI chat-completions wire shape", () => {
     expect(result.droppedImages).toBe(0);
     expect(result.body).toBe(body);
   });
+
+  test("the estimate is scaled into the upstream's unit before the gate is compared", async () => {
+    // The measured case (2026-11-09, m.aiio.chat): the upstream counted 2,010,775 tokens
+    // for a body our heuristic estimated at 498,000. Without the 4.04x factor the brake
+    // sees a 498k request against a 1,048,576 gate and lets it through - which is exactly
+    // how a doomed request reaches the upstream.
+    // The text is ~16.7k tokens by our heuristic and ~67k by the upstream's ruler, so a
+    // 50k gate separates the two.
+    const unscaled = await enforceUpstreamPromptBudget(
+      chatBody("data:image/png;base64," + PNG_1PX, "x".repeat(50_000)),
+      50_000,
+    );
+    expect(unscaled.droppedImages).toBe(0);
+
+    const scaled = await enforceUpstreamPromptBudget(
+      chatBody("data:image/png;base64," + PNG_1PX, "x".repeat(50_000)),
+      50_000,
+      { estimateScale: 4.04 },
+    );
+    expect(scaled.droppedImages).toBeGreaterThan(0);
+    // And the reported estimate is in the upstream's unit, not ours.
+    expect(scaled.estimatedTokens).toBeGreaterThan(unscaled.estimatedTokens);
+  });
+
+  test("a scale of 1 leaves the brake exactly as it was", async () => {
+    // Fresh bodies: the brake degrades the body it is given IN PLACE.
+    const plain = await enforceUpstreamPromptBudget(
+      chatBody("data:image/png;base64," + PNG_1PX, "x".repeat(50_000)),
+      1_000,
+    );
+    const scaled = await enforceUpstreamPromptBudget(
+      chatBody("data:image/png;base64," + PNG_1PX, "x".repeat(50_000)),
+      1_000,
+      { estimateScale: 1 },
+    );
+    expect(scaled.droppedImages).toBe(plain.droppedImages);
+    expect(scaled.estimatedTokens).toBe(plain.estimatedTokens);
+  });
 });
