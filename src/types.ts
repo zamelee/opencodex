@@ -379,6 +379,15 @@ export interface OcxConfig {
   modelImageDownsample?: Record<string, boolean>;
   /** Target long edge (px) for the downscaled image. Defaults to the provider family's limit. */
   imageDownsampleMaxEdge?: number;
+  /**
+   * Per-model MANUAL gate overrides, keyed by the routed id ("<provider>/<model>").
+   *
+   * A number is the ceiling the PROXY brakes at before the request goes upstream (images get
+   * degraded instead of the upstream killing the turn). The string "upstream" means: no local
+   * gate at all for this model - let the upstream refuse and let the anti-loop circuit stop a
+   * runaway compaction. Undefined = follow what we know (learned gate, else the declared window).
+   */
+  modelGateLimits?: Record<string, number | "upstream">;
   /** Vision sidecar: describe images via a gpt vision model so text-only models can "see" them. */
   visionSidecar?: OcxVisionSidecarConfig;
   /** /v1/images relay for codex's built-in image_gen tool. */

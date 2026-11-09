@@ -719,11 +719,81 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
   line-height: 1.7;
 }
 
+/* Every gate cell can be opened for manual editing, so it has to LOOK openable - even the quiet ones (learned, confirmed-but-unnamed, or empty). */
+.gate-cell-editable {
+  cursor: pointer;
+  display: inline-block;
+  border-bottom: 1px dashed var(--border);
+}
+
+.gate-cell-editable:hover {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+
 /* "Confirmed over limit, but the upstream never named its ceiling": a fact we know, and it
    deserves a different colour from the plain declared window next to it. */
 .gate-cell-confirmed {
   color: var(--amber);
   font-weight: 600;
+}
+
+/* A MANUAL gate: the operator's own number. It is clickable, so it has to look like it. */
+.gate-cell-manual {
+  cursor: pointer;
+  color: var(--text);
+  font-weight: 600;
+  border-bottom: 1px dashed var(--border);
+  display: inline-block;
+}
+
+.gate-cell-manual:hover { border-bottom-color: var(--accent); }
+
+/* "Handed to the upstream": no local gate at all. */
+.gate-cell-upstream {
+  color: var(--muted);
+  font-weight: 500;
+  font-style: italic;
+}
+
+.gate-tag {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 0 5px;
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  font-size: 9.5px;
+  font-weight: 500;
+  color: var(--muted);
+  vertical-align: 1px;
+}
+
+/* The inline editor for a manual gate. */
+.gate-editor {
+  grid-column: 2 / -1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 4px 0 6px;
+  padding: 7px 12px;
+  border: 1px solid var(--border-soft);
+  border-left: 2px solid var(--border);
+  border-radius: 8px;
+  background: var(--raised);
+}
+
+/* A switch and the label it controls, as ONE unit. Without the frame, two switches in a row
+   read as "this label belongs to the switch on its right", which is exactly the confusion
+   this grouping removes. */
+.toggle-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  white-space: nowrap;
 }
 
 .model-cell-cap .select-trigger,

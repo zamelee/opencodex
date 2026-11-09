@@ -41,6 +41,7 @@ import { readJsonRequestBody, DecompressedBodyTooLargeError, UnsupportedContentE
 import { resolveAdapter, resolveWireProtocolOverride } from "./adapter-resolve";
 import { hasKeyPoolFailover, rotateKeyOn429 } from "../providers/key-failover";
 import { resolveImageDownsampleEnabled } from "../providers/image-downsample";
+import { resolveGateLimit } from "../providers/gate-limit";
 import type { WsData } from "./ws-bridge";
 import { registerTurn, trackStreamLifetime, unregisterTurn } from "./lifecycle";
 import { redactSecretString } from "../lib/redact";
@@ -426,7 +427,13 @@ function upstreamPromptLimitFor(route: {
   provider: OcxProviderConfig;
   providerName: string;
   modelId: string;
-}): number | undefined {
+}, config: Pick<OcxConfig, "modelGateLimits">): number | undefined {
+  // The operator's manual gate wins over everything we know: it is a CURRENT decision, while
+  // the learned number is a historical observation. "upstream" means no local gate at all -
+  // the request goes out as it is and the upstream's own refusal is the truth.
+  const manual = resolveGateLimit(config, route.providerName, route.modelId);
+  if (manual.mode === "upstream") return undefined;
+  if (manual.mode === "manual" && manual.limit !== undefined) return manual.limit;
   const learned = learnedUpstreamPromptLimit(route.providerName, route.modelId);
   // The LEARNED limit is the upstream's real ceiling; the declared one is what we tell the
   // client on purpose (usually conservative, to make the client's brake fire earlier). Using the
@@ -1003,7 +1010,7 @@ export async function handleResponses(
       selectedForwardHeaders: sidecarForwardHeaders,
       settings: wsPlan.settings,
       maxSearches: wsPlan.maxSearches,
-      upstreamPromptLimit: upstreamPromptLimitFor(route),
+      upstreamPromptLimit: upstreamPromptLimitFor(route, config),
       providerName: route.providerName,
       modelId: route.modelId,
       ...(resolveImageDownsampleEnabled(config, route.providerName, route.modelId)
@@ -1065,7 +1072,7 @@ export async function handleResponses(
   // it goes out. The limit is the smallest of what the provider declares and what the upstream
   // has told us in a previous "prompt is too long" error. Degrading images here is strictly
   // better than letting the upstream kill the whole turn.
-  const upstreamLimit = upstreamPromptLimitFor(route);
+  const upstreamLimit = upstreamPromptLimitFor(route, config);
   if (upstreamLimit !== undefined) {
     // The upstream counts the completion against the same window, so reserve room for the
     // output; a compaction request gets its own stricter budget because it carries the whole

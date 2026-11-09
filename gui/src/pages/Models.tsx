@@ -53,6 +53,11 @@ interface ModelRow {
   autoCompactRatioPinned?: boolean;
   /** The provider-wide ratio this row falls back to when it has no pin. */
   providerAutoCompactRatio?: number;
+  /**
+   * The operator's MANUAL gate for this row: a number is the ceiling the proxy brakes at,
+   * "upstream" means no local gate at all. Undefined = follow what we know.
+   */
+  manualGateLimit?: number | "upstream";
 }
 
 interface ProviderContextCapsResponse {
@@ -74,6 +79,31 @@ const THREAD_OPTIONS = [4, 8, 16, 32, 64, 128, 256, 500, 1000];
 const PAGE = 60; // rows rendered per provider before a "show more" (keeps 1000s-of-models providers usable)
 
 /**
+ * Parse the manual gate input.
+ *
+ * The unit DEFAULTS TO K: "250" means 250k. A raw token count is unreadable at a glance and
+ * easy to mistype by three orders of magnitude, so the editor shows the resolved number before
+ * anything is saved. "k" and "m" are still accepted for the explicit.
+ */
+function parseGateDraft(raw: string): number | null {
+  const s = raw.trim().toLowerCase().replace(/,/g, "");
+  if (!s) return null;
+  const m = s.match(/^(\d+(?:\.\d+)?)\s*([km])?$/);
+  if (!m) return null;
+  const n = Number(m[1]);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  const tokens = Math.floor(n * (m[2] === "m" ? 1_000_000 : 1_000));
+  if (tokens < 1_000 || tokens > 200_000_000) return null;
+  return tokens;
+}
+
+/** What the draft will actually mean, shown next to the input. */
+function gateDraftHint(raw: string): string {
+  const parsed = parseGateDraft(raw);
+  return parsed === null ? "—" : `= ${fmtK(parsed)}`;
+}
+
+/**
  * The context window we work against, read-only.
  *
  * We no longer set a per-model limit here. Codex's side belongs to the CodexPlusPlus relay
@@ -88,19 +118,47 @@ function ContextGateCell({
   observedAt,
   rejectionCount,
   rejectionWithoutLimitCount,
+  manual,
+  onEdit,
 }: {
   learned?: number;
   effective?: number;
   observedAt?: string;
   rejectionCount?: number;
   rejectionWithoutLimitCount?: number;
+  manual?: number | "upstream";
+  onEdit?: () => void;
 }) {
   const t = useT();
+  // A MANUAL gate is the operator's current decision, so it outranks everything we learned:
+  // show it first, and make it obvious that it was set by hand.
+  if (manual !== undefined) {
+    const isUpstream = manual === "upstream";
+    return (
+      <span
+        className={`mono gate-cell gate-cell-manual gate-cell-editable${isUpstream ? " gate-cell-upstream" : ""}`}
+        title={isUpstream
+          ? t("models.gateUpstreamTitle")
+          : t("models.gateManualTitle", { value: fmtK(manual as number) })}
+        onClick={onEdit}
+        role="button"
+        tabIndex={0}
+        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onEdit?.(); } }}
+      >
+        {isUpstream ? t("models.gateUpstreamTag") : fmtK(manual as number)}
+        {!isUpstream && <span className="gate-tag">{t("models.gateManualTag")}</span>}
+      </span>
+    );
+  }
   if (typeof learned === "number" && learned > 0) {
     return (
       <span
-        className="mono gate-cell"
+        className="mono gate-cell gate-cell-editable"
         title={t("models.gateLearnedTitle", { value: fmtK(learned), at: observedAt ?? "-" })}
+        onClick={onEdit}
+        role="button"
+        tabIndex={0}
+        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onEdit?.(); } }}
       >
         {fmtK(learned)}
       </span>
@@ -112,15 +170,26 @@ function ContextGateCell({
   if (confirmedRefusals > 0) {
     return (
       <span
-        className="mono gate-cell gate-cell-confirmed"
+        className="mono gate-cell gate-cell-confirmed gate-cell-editable"
         title={t("models.gateConfirmedTitle", { count: confirmedRefusals })}
+        onClick={onEdit}
+        role="button"
+        tabIndex={0}
+        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onEdit?.(); } }}
       >
         {t("models.gateConfirmedLabel")}
       </span>
     );
   }
   return (
-    <span className="muted mono gate-cell" title={t("models.gateNoneTitle")}>
+    <span
+      className="muted mono gate-cell gate-cell-editable"
+      title={t("models.gateNoneTitle")}
+      onClick={onEdit}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onEdit?.(); } }}
+    >
       {typeof effective === "number" && effective > 0 ? fmtK(effective) : "-"}
     </span>
   );
@@ -179,6 +248,11 @@ export default function Models({ apiBase }: { apiBase: string }) {
     providers: Record<string, boolean>;
     models: Record<string, boolean>;
   }>({ defaultEnabled: false, providers: {}, models: {} });
+  // Per-model MANUAL gate: a number is the proxy-side brake ceiling, "upstream" hands the
+  // decision to the upstream (no local gate at all).
+  const [gateLimits, setGateLimits] = useState<Record<string, number | "upstream">>({});
+  const [gateEditor, setGateEditor] = useState<{ model: string } | null>(null);
+  const [gateDraft, setGateDraft] = useState("");
   const [customCap, setCustomCap] = useState("");
   const [showCustom, setShowCustom] = useState(false);
   const [collapsed, setCollapsed] = useState<Set<string>>(() => {
@@ -229,11 +303,14 @@ export default function Models({ apiBase }: { apiBase: string }) {
 
   const load = async () => {
     try {
-     const [data, capsData, downsampleData] = await Promise.all([
+     const [data, capsData, downsampleData, gateData] = await Promise.all([
        fetch(`${apiBase}/api/models`).then(r => r.json()) as Promise<ModelRow[]>,
        fetch(`${apiBase}/api/provider-context-caps`).then(r => r.json()) as Promise<ProviderContextCapsResponse>,
        fetch(`${apiBase}/api/image-downsample`).then(r => r.ok ? r.json() : null).catch(() => null) as Promise<{
          defaultEnabled?: boolean; providers?: Record<string, boolean>; models?: Record<string, boolean>;
+       } | null>,
+       fetch(`${apiBase}/api/gate-limits`).then(r => r.ok ? r.json() : null).catch(() => null) as Promise<{
+         models?: Record<string, number | "upstream">;
        } | null>,
      ]);
      void loadV2(); // best-effort, independent of the models fetch
@@ -251,6 +328,7 @@ export default function Models({ apiBase }: { apiBase: string }) {
          models: downsampleData.models ?? {},
        });
      }
+     if (gateData) setGateLimits(gateData.models ?? {});
    } catch {
       setOk(false); setStatus(t("models.loadFail"));
     } finally {
@@ -447,6 +525,48 @@ export default function Models({ apiBase }: { apiBase: string }) {
 
   const applyModelDownsample = (namespaced: string, value: boolean | null) => {
     void putDownsample({ scope: "model", model: namespaced, enabled: value });
+  };
+
+  // The manual gate editor. The unit defaults to K ("250" means 250k), because a raw token
+  // count is unreadable and easy to mistype; the resolved number is always shown next to it.
+  const openGateEditor = (namespaced: string) => {
+    const current = gateLimits[namespaced];
+    setGateEditor({ model: namespaced });
+    setGateDraft(typeof current === "number" ? String(Math.round(current / 1000)) : "");
+  };
+
+  const putGateLimit = async (model: string, value: number | "upstream" | null) => {
+    setBusy(true);
+    busyRef.current = true;
+    try {
+      const r = await fetch(`${apiBase}/api/gate-limits`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model, value }),
+      });
+      if (r.ok) {
+        const data = (await r.json()) as { models?: Record<string, number | "upstream"> };
+        setGateLimits(data.models ?? {});
+        setOk(true);
+        setStatus(t("models.gateSaved"));
+        setGateEditor(null);
+      } else {
+        setOk(false);
+        setStatus(t("models.gateSaveFailed"));
+      }
+    } catch {
+      setOk(false); setStatus(t("models.networkError"));
+    } finally {
+      setBusy(false);
+      busyRef.current = false;
+    }
+  };
+
+  const saveGateDraft = () => {
+    if (!gateEditor) return;
+    const parsed = parseGateDraft(gateDraft);
+    if (parsed === null) { setStatus(t("models.gateInvalid")); return; }
+    void putGateLimit(gateEditor.model, parsed);
   };
 
   // Probe the REAL context window for a model: what the upstream declares vs. the ceiling it
@@ -795,14 +915,18 @@ export default function Models({ apiBase }: { apiBase: string }) {
           </>
         )}
         <div style={{ flex: 1 }} />
-        <Switch on={allCapped} onClick={setAll} disabled={busy} label={t("models.setAll")} />
-        <span className="muted mono" style={{ fontSize: 12 }}>{t("models.setAll")}</span>
+        <span className="toggle-field">
+          <span className="muted mono" style={{ fontSize: 12 }}>{t("models.setAll")}</span>
+          <Switch on={allCapped} onClick={setAll} disabled={busy} label={t("models.setAll")} />
+        </span>
       </div>
 
-      <div className="row" style={{ gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
-        <span className="muted" style={{ fontSize: 13 }}>{t("models.downsampleLabel")}</span>
-        <Switch on={downsample.defaultEnabled} onClick={toggleGlobalDownsample} disabled={busy} label={t("models.downsampleGlobal")} />
-        <span className="muted mono" style={{ fontSize: 12 }}>{t("models.downsampleGlobal")}</span>
+      <div className="row" style={{ gap: 10, marginBottom: 8, flexWrap: "wrap" }}>
+        <span className="toggle-field">
+          <span className="muted" style={{ fontSize: 13 }}>{t("models.downsampleLabel")}</span>
+          <span className="muted mono" style={{ fontSize: 12 }}>{t("models.downsampleGlobal")}</span>
+          <Switch on={downsample.defaultEnabled} onClick={toggleGlobalDownsample} disabled={busy} label={t("models.downsampleGlobal")} />
+        </span>
       </div>
 
      {groups.map(([provider, rows]) => {
@@ -835,15 +959,19 @@ export default function Models({ apiBase }: { apiBase: string }) {
                 <button className="btn btn-ghost btn-sm" disabled={busy || allOn} onClick={() => bulkToggle(true)} style={{ fontSize: 11, padding: "2px 8px" }}>{t("models.allOn")}</button>
                 <button className="btn btn-ghost btn-sm" disabled={busy || allOff} onClick={() => bulkToggle(false)} style={{ fontSize: 11, padding: "2px 8px" }}>{t("models.allOff")}</button>
                 {!isNative && <>
-                  <Switch on={capOn} onClick={() => toggleProviderCap(provider)} disabled={busy} label={t("models.capValue", { value: fmtK(contextCapValue) })} />
-                  <span className="muted mono" style={{ fontSize: 12 }}>{t("models.capValue", { value: fmtK(contextCapValue) })}</span>
-                  <Switch
-                    on={downsample.providers[provider] ?? downsample.defaultEnabled}
-                    onClick={() => toggleProviderDownsample(provider)}
-                    disabled={busy}
-                    label={t("models.downsampleLabel")}
-                  />
-                  <span className="muted mono" style={{ fontSize: 12 }}>{t("models.downsampleLabel")}</span>
+                  <span className="toggle-field">
+                    <span className="muted mono" style={{ fontSize: 12 }}>{t("models.capValue", { value: fmtK(contextCapValue) })}</span>
+                    <Switch on={capOn} onClick={() => toggleProviderCap(provider)} disabled={busy} label={t("models.capValue", { value: fmtK(contextCapValue) })} />
+                  </span>
+                  <span className="toggle-field">
+                    <span className="muted mono" style={{ fontSize: 12 }}>{t("models.downsampleLabel")}</span>
+                    <Switch
+                      on={downsample.providers[provider] ?? downsample.defaultEnabled}
+                      onClick={() => toggleProviderDownsample(provider)}
+                      disabled={busy}
+                      label={t("models.downsampleLabel")}
+                    />
+                  </span>
                 </>}
               </div>
            </div>
@@ -892,6 +1020,8 @@ export default function Models({ apiBase }: { apiBase: string }) {
                             observedAt={m.learnedGateObservedAt}
                             rejectionCount={m.gateRejectionCount}
                             rejectionWithoutLimitCount={m.gateRejectionWithoutLimitCount}
+                            manual={m.manualGateLimit ?? gateLimits[m.namespaced]}
+                            onEdit={() => openGateEditor(m.namespaced)}
                           />
                         )}
                       </span>
@@ -936,6 +1066,40 @@ export default function Models({ apiBase }: { apiBase: string }) {
                           />
                         )}
                       </span>
+                      {gateEditor?.model === m.namespaced && (
+                        <div className="gate-editor">
+                          <span className="muted" style={{ fontSize: 12 }}>{t("models.gateEditorLabel")}</span>
+                          <input
+                            className="input"
+                            style={{ width: 92 }}
+                            autoFocus
+                            value={gateDraft}
+                            placeholder="250"
+                            onChange={e => setGateDraft(e.target.value)}
+                            onKeyDown={e => {
+                              if (e.key === "Enter") saveGateDraft();
+                              if (e.key === "Escape") setGateEditor(null);
+                            }}
+                          />
+                          <span className="muted mono" style={{ fontSize: 11 }}>
+                            {gateDraftHint(gateDraft)}
+                          </span>
+                          <button className="btn btn-ghost btn-sm" disabled={busy} onClick={saveGateDraft}>
+                            {t("models.gateSave")}
+                          </button>
+                          <button className="btn btn-ghost btn-sm" disabled={busy}
+                            onClick={() => { if (gateEditor) void putGateLimit(gateEditor.model, "upstream"); }}>
+                            {t("models.gateHandToUpstream")}
+                          </button>
+                          <button className="btn btn-ghost btn-sm" disabled={busy}
+                            onClick={() => { if (gateEditor) void putGateLimit(gateEditor.model, null); }}>
+                            {t("models.gateClear")}
+                          </button>
+                          <button className="btn btn-ghost btn-sm" onClick={() => setGateEditor(null)}>
+                            {t("models.gateCancel")}
+                          </button>
+                        </div>
+                      )}
                       {probe && (
                         <>
                           <ProbeTrace result={probe} />

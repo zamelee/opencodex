@@ -25,6 +25,7 @@ import { enrichProviderFromCatalog, listKeyLoginProviders } from "../oauth/key-p
 import { deriveProviderPresets } from "../providers/derive";
 import { fetchProviderQuotaReports } from "../providers/quota";
 import { DEFAULT_CONTEXT_CAP_KEY, DEFAULT_PROVIDER_CONTEXT_CAP, contextCapValueRecord, globalContextCapValue, modelContextOverrides, providerContextCap, providerContextCaps, setAllProviderContextCaps, setGlobalContextCapValue, setModelContextOverride, setProviderCapValue, setProviderContextCap } from "../providers/context-cap";
+import { gateLimitSettings } from "../providers/gate-limit";
 import { readUsageEntries } from "../usage/log";
 import { getUsageDebugLogEntries } from "../usage/debug";
 import { parseRange, summarizeUsage } from "../usage/summary";
@@ -668,6 +669,8 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
     // joining with /api/provider-context-caps. Native rows have no override (provider cap never
     // applies to the openai passthrough).
     const overrides = modelContextOverrides(config);
+    // Per-model manual gates (the proxy-side brake ceiling), keyed by the routed id.
+    const manualGates = gateLimitSettings(config).models;
     // Native GPT passthrough rows lead (provider "openai", bare-slug namespaced ids): sourced
     // from the static supported set so a disabled model stays listed and re-enableable.
     const native = nativeModelRows(config).map(row => ({
@@ -696,6 +699,8 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
         ...(contextCap !== undefined ? { contextCap, contextCapped: m.contextCapped === true } : {}),
         ...(override !== undefined ? { modelOverride: override } : {}),
         autoCompactRatioPinned: ratioPinned,
+        // The operator's manual gate for this row (a number, or "upstream" for no local gate).
+        ...(manualGates[namespaced] !== undefined ? { manualGateLimit: manualGates[namespaced] } : {}),
         providerAutoCompactRatio: resolveAutoCompactRatio(prov?.autoCompactRatio),
         // The token count at which Codex should auto-compact: the effective window times the
         // provider's ratio. Surfaced so whoever writes the catalog can publish the brake point
@@ -1010,6 +1015,37 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
     save(config);
     refreshCodexCatalogBestEffort();
     return jsonResponse({ ok: true, disabled });
+  }
+
+  // The per-model MANUAL gate: a number is the proxy-side brake ceiling, "upstream" hands the
+  // decision to the upstream (no local gate at all).
+  if (url.pathname === "/api/gate-limits" && req.method === "GET") {
+    const { gateLimitSettings } = await import("../providers/gate-limit");
+    return jsonResponse(gateLimitSettings(config));
+  }
+
+  if (url.pathname === "/api/gate-limits" && req.method === "PUT") {
+    let body: { model?: unknown; value?: unknown };
+    try { body = await req.json(); } catch { return jsonResponse({ error: "invalid JSON body" }, 400); }
+    if (typeof body.model !== "string" || !body.model.trim()) {
+      return jsonResponse({ error: "model string is required" }, 400);
+    }
+    const key = body.model.trim();
+    let value: number | "upstream" | null;
+    if (body.value === null) {
+      value = null;
+    } else if (body.value === "upstream") {
+      value = "upstream";
+    } else if (typeof body.value === "number" && Number.isFinite(body.value) && body.value > 0) {
+      value = Math.floor(body.value);
+    } else {
+      return jsonResponse({ error: "value must be a positive number, \"upstream\", or null" }, 400);
+    }
+    const { setModelGateLimit, gateLimitSettings } = await import("../providers/gate-limit");
+    setModelGateLimit(config, key, value);
+    const { saveConfig: save } = await import("../config");
+    save(config);
+    return jsonResponse({ ok: true, ...gateLimitSettings(config) });
   }
 
   // Image downsampling switch: a global default plus a per-provider and per-model override.

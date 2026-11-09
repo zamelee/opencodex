@@ -128,6 +128,9 @@ const configSchema = z.object({
   providerImageDownsample: z.record(z.string(), z.boolean()).optional(),
   modelImageDownsample: z.record(z.string(), z.boolean()).optional(),
   imageDownsampleMaxEdge: z.number().int().min(256).max(8192).optional(),
+  // Per-model manual gate: a number is the proxy-side brake ceiling, "upstream" hands the
+  // decision to the upstream (no local gate).
+  modelGateLimits: z.record(z.string(), z.union([z.number().int().positive(), z.literal("upstream")])).optional(),
 }).passthrough().transform((config) => {
   // Path C: legacy number-valued providerContextCaps entries (e.g. { anthropic: 200000 }) are
   // promoted to boolean on/off toggles, with the per-provider number absorbed into
