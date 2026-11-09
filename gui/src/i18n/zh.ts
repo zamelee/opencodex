@@ -318,6 +318,7 @@ export const zh: Record<TKey, string> = {
   "models.liveProbeReasonUpstreamError": "上游报错了，没有给出上限。",
   "models.liveProbeReasonTimeout": "上游没在超时前回应。这一轮什么都没学到。",
   "models.liveProbeReasonUnsupported": "这个 provider 的协议我们还不会主动发探测请求。",
+  "models.probeTitle": "上下文闸门",
   "models.probeTableItem": "项目",
   "models.probeTableValue": "数值",
   "models.probeTableSource": "来源",

@@ -318,6 +318,7 @@ export const en = {
   "models.liveProbeReasonUpstreamError": "the upstream errored without naming a ceiling.",
   "models.liveProbeReasonTimeout": "the upstream did not answer before the timeout. Nothing was learned.",
   "models.liveProbeReasonUnsupported": "we cannot send an active probe for this provider's protocol yet.",
+  "models.probeTitle": "Context gate",
   "models.probeTableItem": "Item",
   "models.probeTableValue": "Value",
   "models.probeTableSource": "Source",

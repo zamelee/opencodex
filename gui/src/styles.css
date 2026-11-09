@@ -768,9 +768,12 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
   opacity: 0.75;
 }
 
-.model-entry .probe-trace {
+.model-entry .probe-trace,
+.model-entry > .probe-live {
+  /* The trace and the live probe are one card: the trace is the body, the live probe
+     is its footer. No gap between them, or the card reads as two slabs. */
   grid-column: 2 / -1;
-  margin: 2px 0 6px;
+  margin: 4px 0 0;
 }
 
 @media (max-width: 1000px) {
@@ -1275,29 +1278,56 @@ select.input { appearance: none; }
 
 }
 
-/* The probe's reasoning chain, rendered inline under a model row. */
+/* The probe's reasoning chain, rendered inline under a model row.
+   It is a panel, not a table that happens to be there: a card whose header states the
+   conclusion first, the evidence below it, and the live probe as the card's footer. */
 .probe-trace {
-  margin: 0 0 6px 22px; padding: 6px 10px;
+  margin: 4px 0 0;
+  border: 1px solid var(--border-soft);
+  /* The left rule echoes the divider between the model name and the control cluster:
+     the same page language, not a new colour scheme. */
   border-left: 2px solid var(--border);
+  border-radius: 8px;
   background: var(--raised);
-  display: flex; flex-direction: column; gap: 6px;
+  overflow: hidden;
+}
+
+/* The header: what we concluded, and the title that says what the panel is about. */
+.probe-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 8px 14px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.probe-head-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
 }
 
 .probe-summary {
   margin: 0;
-  font-size: 11px;
+  font-size: 11.5px;
   line-height: 1.5;
-  color: var(--text);
+  color: var(--muted);
 }
 
-/* The active probe: a button that spends a request, and the steps it took. */
+/* The active probe: a button that spends a request, and the steps it took.
+   It is the foot of the same card, not a second slab below it. */
 .probe-live {
-  margin: 6px 0 0;
-  padding-top: 6px;
-  border-top: 1px dashed var(--border);
+  margin: 0;
+  padding: 8px 14px 10px;
+  border: 1px solid var(--border-soft);
+  border-top: none;
+  border-radius: 0 0 8px 8px;
+  background: var(--raised);
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
 }
 
 .probe-live-head {
@@ -1305,37 +1335,59 @@ select.input { appearance: none; }
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+  flex-wrap: wrap;
 }
+
+/* The hint is the long one: it takes the slack, the button keeps its size. */
+.probe-live-head > span { flex: 1 1 320px; min-width: 0; }
 
 .probe-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 11px;
+  font-size: 11.5px;
   table-layout: fixed;
 }
 
 .probe-table th {
   text-align: left;
-  font-weight: 600;
+  font-size: 10.5px;
+  font-weight: 500;
   color: var(--faint);
-  padding: 2px 8px 3px 0;
+  padding: 7px 14px 6px 0;
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
 }
 
 .probe-table td {
-  padding: 3px 8px 3px 0;
+  padding: 7px 14px 7px 0;
   border-bottom: 1px solid var(--border-soft);
   vertical-align: top;
-  line-height: 1.45;
+  line-height: 1.5;
 }
 
-.probe-table th:nth-child(1), .probe-table td:nth-child(1) { width: 116px; }
-.probe-table th:nth-child(2), .probe-table td:nth-child(2) { width: 74px; text-align: right; }
-.probe-table th:nth-child(3), .probe-table td:nth-child(3) { width: 108px; }
+/* The last row has nothing below it to separate from. */
+.probe-table tbody tr:last-child td { border-bottom: none; padding-bottom: 0; }
 
-.probe-td-value { color: var(--text); }
+.probe-table th:nth-child(1), .probe-table td:nth-child(1) { width: 132px; }
+.probe-table th:nth-child(2), .probe-table td:nth-child(2) { width: 86px; text-align: right; }
+.probe-table th:nth-child(3), .probe-table td:nth-child(3) { width: 128px; }
+
+.probe-td-item { color: var(--text); font-weight: 500; }
+.probe-td-value { color: var(--text); font-weight: 600; }
 .probe-td-source, .probe-td-note { color: var(--muted); }
+
+/* Where a number came from: a tag, so it reads as a label and not as another column
+   of prose. */
+.probe-chip {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border-soft);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
 
 .probe-row-applied .probe-td-item,
 .probe-row-applied .probe-td-value { font-weight: 600; color: var(--text); }

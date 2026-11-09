@@ -218,7 +218,10 @@ export function ProbeTrace({ result }: { result: ProbeResult }) {
       : t("models.probeSummaryNone");
   return (
     <div className="probe-trace" role="status">
-      <p className="probe-summary">{summary}</p>
+      <div className="probe-head">
+        <span className="probe-head-title">{t("models.probeTitle")}</span>
+        <p className="probe-summary">{summary}</p>
+      </div>
       <table className="probe-table">
         <thead>
           <tr>
@@ -239,7 +242,9 @@ export function ProbeTrace({ result }: { result: ProbeResult }) {
                   ?? (typeof s.value === "number" ? fmtK(s.value) : t("models.probeUnavailable"))}
               </td>
               <td className="probe-td-source">
-                {PROBE_SOURCE_LABEL[s.source] ? t(PROBE_SOURCE_LABEL[s.source]) : s.source}
+                <span className="probe-chip">
+                  {PROBE_SOURCE_LABEL[s.source] ? t(PROBE_SOURCE_LABEL[s.source]) : s.source}
+                </span>
               </td>
               <td className="probe-td-note">
                 {PROBE_STEP_NOTE[s.key]

@@ -312,6 +312,7 @@ export const de = {
   "models.liveProbeReasonUpstreamError": "der Anbieter meldete einen Fehler, ohne eine Grenze zu nennen.",
   "models.liveProbeReasonTimeout": "der Anbieter hat vor dem Timeout nicht geantwortet. Nichts gelernt.",
   "models.liveProbeReasonUnsupported": "für das Protokoll dieses Providers können wir noch keine aktive Probe senden.",
+  "models.probeTitle": "Kontext-Gate",
   "models.probeTableItem": "Eintrag",
   "models.probeTableValue": "Wert",
   "models.probeTableSource": "Quelle",

@@ -318,6 +318,7 @@ export const ko: Record<TKey, string> = {
   "models.liveProbeReasonUpstreamError": "업스트림이 상한을 말하지 않고 오류를 냈습니다.",
   "models.liveProbeReasonTimeout": "업스트림이 제한 시간 안에 답하지 않았습니다. 아무것도 배우지 못했습니다.",
   "models.liveProbeReasonUnsupported": "이 provider의 프로토콜로는 아직 활성 탐지 요청을 보낼 수 없습니다.",
+  "models.probeTitle": "컨텍스트 게이트",
   "models.probeTableItem": "항목",
   "models.probeTableValue": "값",
   "models.probeTableSource": "출처",
