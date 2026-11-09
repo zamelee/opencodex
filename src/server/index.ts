@@ -22,6 +22,7 @@ import {
 } from "../oauth";
 import { invalidateCodexModelsCache } from "../codex/catalog";
 import { loadLearnedLimits } from "../lib/upstream-prompt-budget";
+import { loadGateCircuit } from "../lib/upstream-gate-circuit";
 import {
   CodexAccountCooldownError,
   CodexAuthContextError,
@@ -191,6 +192,9 @@ export function startServer(port?: number) {
   // are the only numbers that come from the upstream's ENFORCED limit (a declaration is
   // marketing), and learning one costs an over-long turn — a restart must not throw it away.
   loadLearnedLimits();
+  // Restore the upstream's refusals: how often it refused us for being too long, and whether
+  // it ever named a ceiling. The circuit that stops a compaction loop counts on this.
+  loadGateCircuit();
 
   const listenPort = port ?? config.port ?? 10100;
   setCorsOrigin(listenPort);

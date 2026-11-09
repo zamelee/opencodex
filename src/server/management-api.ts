@@ -740,6 +740,7 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
       ?? models.find((m) => `${m.provider}/${m.id}` === model)
       ?? models.find((m) => m.id === model);
     const { probeContextWindow, catalogDeclaredWindow, PROBE_SAFETY_MARGIN } = await import("./context-window-probe");
+    const { gateRejectionRecord } = await import("../lib/upstream-gate-circuit");
     // The catalog stores namespaced slugs ("provider/model"); the GUI sends the bare model id.
     const fromCatalog = catalogDeclaredWindow(`${provider}/${model}`) ?? catalogDeclaredWindow(model);
     const rowDeclared = typeof row?.upstreamContextWindow === "number" ? row.upstreamContextWindow : undefined;
@@ -748,6 +749,10 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
     // declaration - it is our capped window - and quoting it here would let the probe answer
     // "the upstream says 700k" with a number WE chose.
     const declared = fromCatalog ?? rowDeclared;
+    // "The upstream refused us for being too long, but named no ceiling" is worth showing even
+    // when it carries no number: it is the difference between "never observed" and "observed,
+    // and it told us nothing".
+    const refusal = gateRejectionRecord(provider, model);
     const declaredSource = fromCatalog !== undefined ? "codex-catalog"
       : rowDeclared !== undefined ? "upstream-metadata"
         : undefined;
@@ -777,6 +782,17 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
         ...(typeof probe.learnedObservedInputTokens === "number"
           ? { observedInputTokens: probe.learnedObservedInputTokens }
           : {}),
+      },
+      {
+        key: "confirmed",
+        label: "confirmed over limit (the upstream refused, but named no ceiling)",
+        // No number: the upstream never said one. The count is the evidence we do have.
+        value: null,
+        ...(refusal ? { valueText: `${refusal.confirmedCount}x` } : {}),
+        source: refusal ? "upstream-rejection" : "not-observed-yet",
+        ...(refusal ? { refusalCount: refusal.confirmedCount } : {}),
+        ...(refusal ? { refusalWithoutLimitCount: refusal.withoutLimitCount } : {}),
+        ...(refusal ? { refusalLastSeenAt: refusal.lastSeenAt } : {}),
       },
       {
         key: "current",

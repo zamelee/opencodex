@@ -719,6 +719,13 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
   line-height: 1.7;
 }
 
+/* "Confirmed over limit, but the upstream never named its ceiling": a fact we know, and it
+   deserves a different colour from the plain declared window next to it. */
+.gate-cell-confirmed {
+  color: var(--amber);
+  font-weight: 600;
+}
+
 .model-cell-cap .select-trigger,
 .model-cell-downsample .select-trigger {
   width: 100%;

@@ -53,7 +53,15 @@ import {
   noteUpstreamPromptLimit,
   saveLearnedLimits,
   parseUpstreamPromptGate,
+  parseUpstreamRejection,
 } from "../lib/upstream-prompt-budget";
+import {
+  gateCircuitState,
+  gateCircuitVerdictFor,
+  noteGateRejection,
+  noteGateSuccess,
+  saveGateCircuit,
+} from "../lib/upstream-gate-circuit";
 import {
   catalogModelSupportsServiceTier,
   inspectResponseLogJson,
@@ -1112,6 +1120,44 @@ export async function handleResponses(
   if (typeof request.usageLog?.inputTokens === "number") {
     logCtx.usageLogInputTokens = request.usageLog.inputTokens;
   }
+  // The STOP (the brake above is the throttle; this is the brake pedal).
+  //
+  // Codex's answer to an over-long prompt is to COMPACT and retry. When the compacted history
+  // is still over the upstream's ceiling, that loop never ends: request -> 400 -> compact ->
+  // request -> 400 ... forever, burning upstream quota the whole way. The upstream's own
+  // refusals are the evidence we act on - we do not predict an overflow ourselves (a
+  // character estimate is wrong for CJK and JSON, and a wrong "no" kills a good turn).
+  //
+  // The error we return deliberately does NOT use Codex's `context_length_exceeded` code:
+  // that code is the trigger for Codex's auto-compact, and re-triggering it would restart the
+  // very loop we are breaking. This one ends the turn with an explanation instead.
+  const requestEstimate = logCtx.promptComposition?.estimatedTokens ?? 0;
+  const gateLimit = learnedUpstreamPromptLimit(route.providerName, route.modelId);
+  const verdict = gateCircuitVerdictFor(
+    route.providerName,
+    route.modelId,
+    requestEstimate,
+  );
+  if (verdict.refuse) {
+    const circuit = gateCircuitState(route.providerName, route.modelId);
+    const gateText = gateLimit !== undefined
+      ? `上游闸门 ${gateLimit} tokens`
+      : "上游未给出闸门数字";
+      const message =
+        `上游已连续 ${verdict.consecutive} 次拒绝同等大小的请求（${gateText}）。`
+        + "为避免无限压缩循环，代理已停止转发该请求：请手动压缩对话或新建会话后重试。";
+    console.warn(
+      `[${route.providerName}] gate circuit armed after ${verdict.consecutive} comparable refusals; `
+      + `refusing locally (estimate ${requestEstimate} vs baseline ${verdict.baselineTokens}, ${gateText})`,
+    );
+    return new Response(
+      JSON.stringify({
+        error: { message, type: "invalid_request_error", code: "upstream_context_gate_blocked" },
+      }),
+      { status: 400, headers: { "Content-Type": "application/json" } },
+    );
+  }
+
   let upstreamResponse: Response;
   try {
     upstreamResponse = adapter.fetchResponse
@@ -1167,6 +1213,25 @@ export async function handleResponses(
     if (!upstreamResponse.ok) {
       const errorText = await upstreamResponse.text().catch(() => "unknown error");
       cleanupUpstreamAbort();
+      // Record the refusal itself. "The upstream refused us for being too long, but named no
+      // ceiling" is a fact worth keeping: it is the difference between "we know the gate" and
+      // "we know the request is over some gate we cannot name", and it is what the circuit
+      // counts to break a compaction loop.
+      const rejection = parseUpstreamRejection(errorText);
+      if (rejection.rejected) {
+        noteGateRejection(route.providerName, route.modelId, {
+          ...(rejection.limit !== undefined ? { limit: rejection.limit } : {}),
+          ...(rejection.observedInputTokens !== undefined
+            ? { observedInputTokens: rejection.observedInputTokens }
+            : {}),
+          ...(rejection.rejectedWithoutLimit ? { withoutLimit: true } : {}),
+          // OUR estimate of the request that was refused: the circuit compares later
+          // requests against it, and only OUR units are comparable.
+          estimatedTokens: requestEstimate,
+          sample: redactSecretString(errorText.slice(0, 200)),
+        });
+        saveGateCircuit();
+      }
       // Learn the upstream's real context window from its own error, so the NEXT request for
       // this provider can be protected before it goes out. Without this the proxy only learns
       // the ceiling by killing a turn.
@@ -1188,6 +1253,10 @@ export async function handleResponses(
       return formatErrorResponse(upstreamResponse.status, "upstream_error", `Provider error ${upstreamResponse.status}: ${redactSecretString(errorText.slice(0, 500))}`);
     }
   }
+
+  // The upstream took this one. It only clears the streak when the request that got
+  // through was of a comparable size - a small success belongs to another conversation.
+  noteGateSuccess(route.providerName, route.modelId, requestEstimate);
 
   if (parsed.stream) {
     const eventStream = adapter.parseStream(upstreamResponse);

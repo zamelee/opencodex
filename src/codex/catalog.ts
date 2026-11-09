@@ -14,6 +14,7 @@ import { getJawcodeModelMetadata, getJawcodeModelMetadataCaseInsensitive, listJa
 import { enrichProviderFromRegistry, shouldCaseFoldMetadataModelId } from "../providers/derive";
 import { applyProviderContextCap, providerContextCap, resolveEffectiveContextCap } from "../providers/context-cap";
 import { learnedGate, learnedUpstreamPromptLimit } from "../lib/upstream-prompt-budget";
+import { gateRejectionRecord } from "../lib/upstream-gate-circuit";
 import { CODEX_GPT5_IDENTITY_LINE } from "../adapters/identity";
 import { filterCursorConfiguredModelsByLiveDiscovery } from "../adapters/cursor/discovery";
 import { fetchCursorUsableModels } from "../adapters/cursor/live-models";
@@ -333,6 +334,17 @@ export interface CatalogModel {
   learnedGateLastSeenAt?: string;
   /** The request size the upstream quoted alongside the gate. */
   learnedGateObservedInputTokens?: number;
+  /**
+   * How many times the upstream refused this model for being too long. Kept even when the
+   * upstream named no ceiling: "it refused, but said nothing" is a fact, and without it the
+   * operator sees an empty gate cell and cannot tell "never observed" from "observed, no
+   * number".
+   */
+  gateRejectionCount?: number;
+  /** How many of those refusals named no ceiling. */
+  gateRejectionWithoutLimitCount?: number;
+  /** When the upstream last refused this model for being too long (ISO). */
+  gateRejectionLastSeenAt?: string;
 }
 type RawEntry = Record<string, unknown>;
 type RawCatalog = { models?: RawEntry[]; [k: string]: unknown };
@@ -1247,6 +1259,14 @@ export function applyProviderConfigHints(name: string, prov: OcxProviderConfig, 
     if (gate?.observedInputTokens !== undefined) {
       next.learnedGateObservedInputTokens = gate.observedInputTokens;
     }
+  }
+  // The refusals that named no ceiling. They do not give us a number to brake on, but they
+  // DO tell us the limit exists - and the operator deserves to see that instead of a dash.
+  const refusal = gateRejectionRecord(name, model.id);
+  if (refusal) {
+    next.gateRejectionCount = refusal.confirmedCount;
+    next.gateRejectionWithoutLimitCount = refusal.withoutLimitCount;
+    next.gateRejectionLastSeenAt = refusal.lastSeenAt;
   }
   return next;
 }

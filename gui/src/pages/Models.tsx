@@ -37,6 +37,12 @@ interface ModelRow {
   learnedContextWindow?: number;
   /** When that gate was first observed (ISO). */
   learnedGateObservedAt?: string;
+  /** How many times the upstream refused this model for being too long. */
+  gateRejectionCount?: number;
+  /** How many of those refusals named no ceiling (the limit exists, its value is unknown). */
+  gateRejectionWithoutLimitCount?: number;
+  /** When the upstream last refused this model (ISO). */
+  gateRejectionLastSeenAt?: string;
   /** The window we advertise after our caps. */
   effectiveContextWindow?: number;
   /** At which token count Codex should auto-compact (window x the provider's ratio). */
@@ -80,10 +86,14 @@ function ContextGateCell({
   learned,
   effective,
   observedAt,
+  rejectionCount,
+  rejectionWithoutLimitCount,
 }: {
   learned?: number;
   effective?: number;
   observedAt?: string;
+  rejectionCount?: number;
+  rejectionWithoutLimitCount?: number;
 }) {
   const t = useT();
   if (typeof learned === "number" && learned > 0) {
@@ -93,6 +103,19 @@ function ContextGateCell({
         title={t("models.gateLearnedTitle", { value: fmtK(learned), at: observedAt ?? "-" })}
       >
         {fmtK(learned)}
+      </span>
+    );
+  }
+  // No number, but the upstream DID refuse us for being too long: the limit exists, its
+  // value is unknown. Showing the declared window here would hide a known fact.
+  const confirmedRefusals = rejectionCount ?? rejectionWithoutLimitCount ?? 0;
+  if (confirmedRefusals > 0) {
+    return (
+      <span
+        className="mono gate-cell gate-cell-confirmed"
+        title={t("models.gateConfirmedTitle", { count: confirmedRefusals })}
+      >
+        {t("models.gateConfirmedLabel")}
       </span>
     );
   }
@@ -867,6 +890,8 @@ export default function Models({ apiBase }: { apiBase: string }) {
                             learned={m.learnedContextWindow}
                             effective={m.effectiveContextWindow}
                             observedAt={m.learnedGateObservedAt}
+                            rejectionCount={m.gateRejectionCount}
+                            rejectionWithoutLimitCount={m.gateRejectionWithoutLimitCount}
                           />
                         )}
                       </span>

@@ -25,6 +25,14 @@ export interface ProbeStep {
   observedAt?: string;
   /** The request size the upstream quoted alongside the gate. */
   observedInputTokens?: number;
+  /** A non-numeric value (the "confirmed" step carries a count, not a token number). */
+  valueText?: string;
+  /** How many refusals the upstream made for this route. */
+  refusalCount?: number;
+  /** How many of those refusals named no ceiling. */
+  refusalWithoutLimitCount?: number;
+  /** When the upstream last refused this route (ISO). */
+  refusalLastSeenAt?: string;
 }
 
 export interface ProbeResult {
@@ -159,6 +167,7 @@ const PROBE_STEP_LABEL: Record<string, TKey> = {
   learned: "models.probeStepLearned",
   current: "models.probeStepCurrent",
   brake: "models.probeStepBrake",
+  confirmed: "models.probeStepConfirmed",
   suggestion: "models.probeStepSuggested",
 };
 
@@ -177,6 +186,7 @@ const PROBE_SOURCE_LABEL: Record<string, TKey> = {
   learned: "models.probeSrcLearned",
   declared: "models.probeSrcDeclared",
   "proxy-side": "models.probeSrcProxySide",
+  "upstream-rejection": "models.probeSrcUpstreamRejection",
 };
 
 /** What the step means, in one sentence. This is the column people actually need. */
@@ -185,6 +195,7 @@ const PROBE_STEP_NOTE: Record<string, TKey> = {
   learned: "models.probeNoteLearned",
   current: "models.probeNoteCurrent",
   brake: "models.probeNoteBrake",
+  confirmed: "models.probeNoteConfirmed",
   suggestion: "models.probeNoteSuggested",
 };
 
@@ -224,13 +235,27 @@ export function ProbeTrace({ result }: { result: ProbeResult }) {
                 {PROBE_STEP_LABEL[s.key] ? t(PROBE_STEP_LABEL[s.key]) : s.label}
               </td>
               <td className="probe-td-value mono">
-                {typeof s.value === "number" ? fmtK(s.value) : t("models.probeUnavailable")}
+                {s.valueText
+                  ?? (typeof s.value === "number" ? fmtK(s.value) : t("models.probeUnavailable"))}
               </td>
               <td className="probe-td-source">
                 {PROBE_SOURCE_LABEL[s.source] ? t(PROBE_SOURCE_LABEL[s.source]) : s.source}
               </td>
               <td className="probe-td-note">
-                {PROBE_STEP_NOTE[s.key] ? t(PROBE_STEP_NOTE[s.key]) : ""}
+                {PROBE_STEP_NOTE[s.key]
+                  ? (
+                    s.key === "confirmed" && s.refusalCount === undefined
+                      // Nothing observed yet: the "{count}" note would be a lie, so the
+                      // row says plainly that there is no observation.
+                      ? t("models.probeNoteConfirmedNone")
+                      : t(PROBE_STEP_NOTE[s.key], s.refusalCount !== undefined ? { count: s.refusalCount } : undefined)
+                  )
+                  : ""}
+                {s.refusalLastSeenAt ? (
+                  <span className="muted" style={{ display: "block", fontSize: 11 }}>
+                    {t("models.probeObservedAt", { at: s.refusalLastSeenAt })}
+                  </span>
+                ) : null}
                 {s.observedAt ? (
                   <span className="muted" style={{ display: "block", fontSize: 11 }}>
                     {t("models.probeObservedAt", { at: s.observedAt })}

@@ -1333,31 +1333,61 @@ def run_upgrade(port: int) -> int:
             return 1
 
     tags = _available_tags()
-    if not tags:
-        print("[err] 没有可用 tag。", file=sys.stderr)
-        return 1
-    latest = tags[-1]
-    print(f"[upgrade] 可用 tag: {', '.join(tags[-5:])}", file=sys.stderr)
-    print(f"[upgrade] 最新: {latest}", file=sys.stderr)
+    latest = tags[-1] if tags else None
+    if latest:
+        print(f"[upgrade] 可用 tag: {', '.join(tags[-5:])}", file=sys.stderr)
+        print(f"[upgrade] 最新 tag: {latest}", file=sys.stderr)
+    else:
+        # A fork usually pushes commits, not tags. The branch is then the only thing
+        # there is to upgrade to, so the menu offers it instead of failing.
+        print("[upgrade] 远端没有 tag（fork 常见）：只能跟随分支。", file=sys.stderr)
 
+    # The branch tip is a target too, and for a fork it is often the NEWEST thing
+    # (tags lag behind, or do not exist at all).
+    branch_sha = ""
+    rc, out = _git_run("rev-parse", "--short", "origin/main")
+    if rc == 0:
+        branch_sha = out.strip()
+
+    follow_branch = False
     target = latest
-    if len(tags) > 1:
+    if latest and branch_sha:
+        print(f"[upgrade] origin/main 最新提交: {branch_sha}", file=sys.stderr)
         try:
-            ans = input(f"  升级到哪个 tag？[{latest}] > ").strip()
+            ans = input(
+                f"  升级到哪个？[1]=最新 tag {latest}  [2]=origin/main 最新提交  [回车=1] > "
+            ).strip()
         except (EOFError, KeyboardInterrupt):
             ans = ""
-        if ans:
-            target = ans if ans in tags else latest
-            if ans not in tags:
-                print(f"  [warn] 未知 tag {ans}，改用 {latest}", file=sys.stderr)
-
-    rc, out = _git_run("rev-parse", "--short", target)
-    if rc != 0:
-        print(f"[err] tag {target} 不存在。", file=sys.stderr)
+        if ans == "2":
+            follow_branch = True
+        elif ans == "1" or not ans:
+            follow_branch = False
+        else:
+            # A typed tag is taken literally, so an operator can pin an old release.
+            if ans in tags:
+                target = ans
+            else:
+                print(f"  [warn] 未知目标 {ans}，改用 {latest}", file=sys.stderr)
+    elif branch_sha:
+        print(f"[upgrade] origin/main 最新提交: {branch_sha}", file=sys.stderr)
+        follow_branch = True
+    else:
+        print("[err] 没有可用的升级目标（无 tag，也拿不到 origin/main）。", file=sys.stderr)
         return 1
-    target_sha = out.strip()
+
+    if follow_branch:
+        target_label = "origin/main"
+        target_sha = branch_sha
+    else:
+        target_label = target
+        rc, out = _git_run("rev-parse", "--short", target)
+        if rc != 0:
+            print(f"[err] tag {target} 不存在。", file=sys.stderr)
+            return 1
+        target_sha = out.strip()
     if target_sha == current_sha:
-        print(f"[upgrade] 已经是 {target}（{target_sha}），无需升级。", file=sys.stderr)
+        print(f"[upgrade] 已经是最新（{target_label} @ {target_sha}），无需升级。", file=sys.stderr)
         return 0
 
     rc, out = _git_run("status", "--porcelain")
@@ -1389,12 +1419,20 @@ def run_upgrade(port: int) -> int:
             print("[upgrade] 已取消。", file=sys.stderr)
             return 1
 
-    print(f"[upgrade] 切换到 {target} ...", file=sys.stderr)
-    rc, out = _git_run("checkout", "-f", target)
+    print(f"[upgrade] 切换到 {target_label} ...", file=sys.stderr)
+    if follow_branch:
+        # Stay on the branch when we were already on it: a detached HEAD would make the
+        # NEXT upgrade unable to follow origin/main without a manual checkout.
+        if current_branch == "main":
+            rc, out = _git_run("reset", "--hard", "origin/main")
+        else:
+            rc, out = _git_run("checkout", "-f", "origin/main")
+    else:
+        rc, out = _git_run("checkout", "-f", target_label)
     if rc != 0:
-        print(f"[err] git checkout 失败：{out.strip()[:300]}", file=sys.stderr)
+        print(f"[err] git 切换失败：{out.strip()[:300]}", file=sys.stderr)
         return 1
-    print(f"[upgrade] 已切到 {target}（{target_sha}）", file=sys.stderr)
+    print(f"[upgrade] 已切到 {target_label}（{target_sha}）", file=sys.stderr)
 
     print("[upgrade] 安装依赖 ...", file=sys.stderr)
     ensure_deps_installed()
@@ -1403,7 +1441,12 @@ def run_upgrade(port: int) -> int:
     if not _build_gui(force=True):
         print("[warn] GUI 构建失败，服务仍可用（GUI 可能是旧版）。", file=sys.stderr)
 
-    print(f"[upgrade] 完成。回滚命令：git -C {ROOT} checkout -f {current_sha}", file=sys.stderr)
+    rollback = (
+        f"git -C {ROOT} reset --hard {current_sha}"
+        if follow_branch and current_branch == "main"
+        else f"git -C {ROOT} checkout -f {current_sha}"
+    )
+    print(f"[upgrade] 完成。回滚命令：{rollback}", file=sys.stderr)
     try:
         ans = input("  现在重启服务？[y/N] ").strip().lower()
     except (EOFError, KeyboardInterrupt):
