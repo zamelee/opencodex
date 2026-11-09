@@ -70,11 +70,13 @@ import {
 } from "../lib/upstream-token-scale";
 import {
   catalogModelSupportsServiceTier,
+  captureUpstreamErrorFromText,
   inspectResponseLogJson,
   readConfiguredCodexServiceTier,
   requestLogSpeedLabel,
   type RequestLogContext,
 } from "./request-log";
+import { summarizeUpstreamErrorBody } from "../lib/upstream-error-body";
 import {
   consumeForInspection,
   consumeForResponseLogMetadata,
@@ -1228,6 +1230,14 @@ export async function handleResponses(
     if (!upstreamResponse.ok) {
       const errorText = await upstreamResponse.text().catch(() => "unknown error");
       cleanupUpstreamAbort();
+      // Record WHAT the upstream said, not just its status code. A JSON error
+      // envelope is parsed for its message; an HTML gateway page or a plain-text
+      // reset notice is normalized to one readable line. Without this the log
+      // shows a bare "502" with no reason and the raw HTML is echoed back to
+      // Codex verbatim.
+      logCtx.upstreamStatus = upstreamResponse.status;
+      logCtx.upstreamContentType = upstreamResponse.headers.get("content-type") ?? undefined;
+      captureUpstreamErrorFromText(logCtx, errorText);
       // Record the refusal itself. "The upstream refused us for being too long, but named no
       // ceiling" is a fact worth keeping: it is the difference between "we know the gate" and
       // "we know the request is over some gate we cannot name", and it is what the circuit
@@ -1294,7 +1304,16 @@ export async function handleResponses(
       }
       // Upstreams occasionally echo request details in error bodies — scrub token-shaped
       // material before it reaches the client-facing error surface.
-      return formatErrorResponse(upstreamResponse.status, "upstream_error", `Provider error ${upstreamResponse.status}: ${redactSecretString(errorText.slice(0, 500))}`);
+      //
+      // A non-JSON body (nginx/ALB HTML page, plain-text reset notice) is
+      // normalized to one readable line instead of being echoed verbatim: raw
+      // HTML in a Codex error bubble is unreadable and can carry an internal
+      // hostname. A JSON body keeps its own message, because that is the part
+      // with the gate/limit/token detail the user actually needs.
+      const upstreamMessage = parseUpstreamRejection(errorText).rejected
+        ? errorText
+        : summarizeUpstreamErrorBody(errorText, upstreamResponse.status, upstreamResponse.headers.get("content-type")).summary;
+      return formatErrorResponse(upstreamResponse.status, "upstream_error", `Provider error ${upstreamResponse.status}: ${redactSecretString(upstreamMessage.slice(0, 500))}`);
     }
   }
 

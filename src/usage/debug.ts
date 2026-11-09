@@ -1,6 +1,6 @@
 /** Usage-shape diagnostic JSONL. Enable with `ocx debug usage on` or OPENCODEX_USAGE_DEBUG=1. */
 
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getConfigDir } from "../config";
 import { DEBUG_ENV } from "../lib/debug-settings";
@@ -55,14 +55,61 @@ function trimRollingFile(path: string): void {
   try { chmodSync(path, 0o600); } catch { /* best-effort */ }
 }
 
+/**
+ * Line count of the rolling file, tracked in memory.
+ *
+ * Without this, every append had to read the whole file back to see whether it
+ * was over the cap: at the steady-state size (200 lines x ~2 KB = ~400 KB) that
+ * was a full re-read AND re-write per request, which is pure waste for a file
+ * that only needs trimming once every 100 requests. The count is seeded lazily
+ * from disk and then maintained by the append path.
+ *
+ * The cache is keyed by PATH and validated against the file's SIZE. A stale
+ * count would silently break the rotation cap, and the size check catches
+ * every way the cache can go stale: a different file (the config dir changed),
+ * the file being deleted or truncated underneath us, or another writer.
+ */
+let usageDebugCache: { path: string; lines: number; size: number } | null = null;
+
+function currentLineCount(path: string): number {
+  let size = -1;
+  try {
+    size = statSync(path).size;
+  } catch {
+    /* file does not exist yet */
+  }
+  const cached = usageDebugCache;
+  if (cached && cached.path === path && cached.size === size) return cached.lines;
+  try {
+    const text = readFileSync(path, "utf-8");
+    const lines = text.split(/\r?\n/).filter(line => line.length > 0).length;
+    usageDebugCache = { path, lines, size };
+    return lines;
+  } catch {
+    usageDebugCache = { path, lines: 0, size: -1 };
+    return 0;
+  }
+}
+
 export function appendUsageDebug(record: UsageDebugRecord): void {
   try {
     ensureUsageDebugDir();
     const path = usageDebugPath();
+    // Count BEFORE appending, so it reflects the pre-append state; the append
+    // then adds exactly one line.
+    const before = currentLineCount(path);
     const safeRecord = redactSecrets(record) as UsageDebugRecord;
-    appendFileSync(path, `${JSON.stringify(safeRecord)}\n`, { encoding: "utf-8", mode: 0o600 });
+    const line = `${JSON.stringify(safeRecord)}\n`;
+    appendFileSync(path, line, { encoding: "utf-8", mode: 0o600 });
     try { chmodSync(path, 0o600); } catch { /* best-effort */ }
-    if (existsSync(path)) trimRollingFile(path);
+    const after = before + 1;
+    // Trim only when the cap is actually crossed, not on every append.
+    if (after > USAGE_DEBUG_MAX_LINES) {
+      trimRollingFile(path);
+      usageDebugCache = { path, lines: USAGE_DEBUG_KEEP_LINES, size: -1 };
+    } else {
+      usageDebugCache = { path, lines: after, size: (usageDebugCache?.size ?? -1) + Buffer.byteLength(line, "utf-8") };
+    }
   } catch {
     /* debug capture must never break the proxy */
   }

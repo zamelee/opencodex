@@ -24,6 +24,7 @@ import { invalidateCodexModelsCache } from "../codex/catalog";
 import { loadLearnedLimits } from "../lib/upstream-prompt-budget";
 import { loadLearnedScales } from "../lib/upstream-token-scale";
 import { loadGateCircuit } from "../lib/upstream-gate-circuit";
+import { installConsoleLogCapture } from "../lib/console-log-capture";
 import {
   CodexAccountCooldownError,
   CodexAuthContextError,
@@ -153,6 +154,10 @@ const WEBSOCKET_IDLE_TIMEOUT_SECONDS = 0;
 // export function relaySseWithHeartbeat
 
 export function startServer(port?: number) {
+  // Mirror the daemon's console output into memory so the Debug page can show
+  // it. Installed FIRST, before anything logs, so the earliest startup lines
+  // are captured too. The original console still runs — this only mirrors.
+  installConsoleLogCapture();
   const config = loadConfig();
   applyProxyEnv(config);
   assertServerAuthConfig(config);

@@ -5,6 +5,7 @@ import { CODEX_CONFIG_PATH, readRootTomlString } from "../codex/paths";
 import { readCodexCatalogPath } from "../codex/catalog";
 import type { OcxUsage } from "../types";
 import { redactSecretString } from "../lib/redact";
+import { summarizeUpstreamErrorBody } from "../lib/upstream-error-body";
 import {
   appendUsageEntry,
   usageForFinalLog,
@@ -37,6 +38,10 @@ export interface RequestLogContext {
   usageDebugBodyKind?: UsageDebugBodyKind;
   usageDebugBodySample?: string;
   usageDebugContentType?: string;
+  /** Content type of the upstream response body (used to describe a non-JSON error body). */
+  upstreamContentType?: string;
+  /** HTTP status of the upstream response (used to describe a non-JSON error body). */
+  upstreamStatus?: number;
   /** Secret-redacted upstream error reason (e.g. the granular Cursor "rate limit exceeded…"
    * message) extracted from a `response.failed` SSE payload or non-streaming error body, so the
    * request log / GUI shows the actual upstream failure rather than only the HTTP-mapped code. */
@@ -256,7 +261,7 @@ export function inspectResponseLogJson(logCtx: RequestLogContext, text: string):
   } catch {
     /* body may not be JSON; request log metadata is best-effort only */
   }
-  captureUpstreamError(logCtx, text);
+  captureUpstreamErrorFromText(logCtx, text);
   if (isUsageDebugEnabled() && logCtx.usageDebugBodyKind === undefined) {
     logCtx.usageDebugBodyKind = "json";
     logCtx.usageDebugBodySample = truncateForDebug(text);
@@ -272,7 +277,7 @@ export function inspectResponseLogSsePayload(logCtx: RequestLogContext, payload:
   } catch {
     /* SSE block payload may not be JSON; metadata inspection is best-effort */
   }
-  captureUpstreamError(logCtx, payload);
+  captureUpstreamErrorFromText(logCtx, payload);
   if (debugEnabled) {
     if (!sseAlreadyMarked) {
       logCtx.usageDebugBodyKind = "sse";
@@ -292,8 +297,25 @@ export function inspectResponseLogSsePayload(logCtx: RequestLogContext, payload:
  * a non-streaming JSON error body. We keep the FIRST non-empty reason (the original failure) and
  * run it through redactSecretString so secrets never reach /api/logs. Pure; safe on any text.
  */
-function captureUpstreamError(logCtx: RequestLogContext, text: string | null): void {
-  if (!text || logCtx.upstreamError) return;
+/**
+ * Record the upstream's own words about why it refused.
+ *
+ * Exported so the non-2xx path in responses.ts can feed the raw error body
+ * here: that path reads the body itself (it must, to parse the upstream's
+ * gate/limit hints) and would otherwise never reach the request log.
+ */
+export function captureUpstreamErrorFromText(logCtx: RequestLogContext, text: string | null): void {
+  if (logCtx.upstreamError) return;
+  // An EMPTY body is still a fact ("upstream refused and said nothing"), but only
+  // when we actually know the upstream failed. A successful empty body says nothing.
+  if (!text) {
+    const status = logCtx.upstreamStatus;
+    if (status !== undefined && status >= 400) {
+      const summary = summarizeUpstreamErrorBody("", status, logCtx.upstreamContentType);
+      logCtx.upstreamError = redactSecretString(summary.summary).slice(0, 500);
+    }
+    return;
+  }
   try {
     const json = JSON.parse(text) as {
       type?: unknown;
@@ -321,7 +343,14 @@ function captureUpstreamError(logCtx: RequestLogContext, text: string | null): v
       logCtx.upstreamError = redactSecretString(incompleteReasonLabel(reason.trim())).slice(0, 500);
     }
   } catch {
-    /* not JSON; nothing to capture */
+    // Not JSON. An upstream that answers with an HTML error page or a plain-text
+    // reset notice (nginx, ALB, Cloudflare) would otherwise leave the log with a
+    // bare status code and NO reason, which is exactly the "502 with no reason"
+    // blind spot. Normalize it to one readable line instead of dropping it.
+    const summary = summarizeUpstreamErrorBody(text, logCtx.upstreamStatus ?? logCtx.terminalHttpStatus ?? 0, logCtx.upstreamContentType);
+    if (summary.summary) {
+      logCtx.upstreamError = redactSecretString(summary.summary).slice(0, 500);
+    }
   }
 }
 

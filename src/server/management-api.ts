@@ -28,6 +28,7 @@ import { DEFAULT_CONTEXT_CAP_KEY, DEFAULT_PROVIDER_CONTEXT_CAP, contextCapValueR
 import { gateLimitSettings } from "../providers/gate-limit";
 import { readUsageEntries } from "../usage/log";
 import { getUsageDebugLogEntries } from "../usage/debug";
+import { getConsoleLogEntries } from "../lib/console-log-buffer";
 import { parseRange, summarizeUsage } from "../usage/summary";
 import { stripCodexRuntimeProviderFields } from "../codex/auth-context";
 import { getDebugLogEntries } from "../lib/debug-log-buffer";
@@ -62,6 +63,19 @@ function parseDebugLogQuery(url: URL): { after: number; limit: number } {
     after: Number.isFinite(after) && after > 0 ? after : 0,
     limit: Number.isFinite(limit) && limit > 0 ? Math.min(limit, 2000) : 500,
   };
+}
+
+/**
+ * Query for the console-log mirror.
+ *
+ * `levels` filters to specific console methods (log/info/warn/error/debug) so
+ * the GUI can offer "errors only" without shipping every line.
+ */
+function parseConsoleLogQuery(url: URL): { after: number; limit: number; levels: string[] } {
+  const base = parseDebugLogQuery(url);
+  const raw = url.searchParams.get("levels") ?? "";
+  const levels = raw.split(",").map(part => part.trim().toLowerCase()).filter(Boolean);
+  return { ...base, levels };
 }
 
 export async function handleManagementAPI(req: Request, url: URL, config: OcxConfig, sourceIp: string | null = null): Promise<Response | null> {
@@ -321,6 +335,11 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
   if (url.pathname === "/api/debug/usage-logs" && req.method === "GET") {
     const { after, limit } = parseDebugLogQuery(url);
     return jsonResponse(getUsageDebugLogEntries({ after, limit }));
+  }
+
+  if (url.pathname === "/api/debug/console-logs" && req.method === "GET") {
+    const { after, limit, levels } = parseConsoleLogQuery(url);
+    return jsonResponse(getConsoleLogEntries({ after, limit, levels }));
   }
 
   if (url.pathname === "/api/debug" && req.method === "PUT") {

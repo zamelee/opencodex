@@ -5,6 +5,7 @@ import { mapReasoningEffort } from "../reasoning-effort";
 import { contentPartsToText } from "./image";
 import { neutralizeIdentity } from "./identity";
 import { buildNonOpenAIToolCatalogNudgeForTools, shouldInjectNonOpenAIToolCatalogNudge } from "./tool-catalog-nudge";
+import { debugDroppedFrame } from "../lib/debug";
 
 // Providers may opt into stripping one trailing "[...]" group from the wire model id.
 // Z.AI needs this because its OpenAI path rejects glm-5.2[1m] with 400 code 1211;
@@ -308,6 +309,11 @@ export function createOpenAIChatAdapter(provider: OcxProviderConfig): ProviderAd
         try {
           chunk = JSON.parse(payload) as Record<string, unknown>;
         } catch {
+          // Record the malformed frame's size (not its content) so the debug
+          // page can show that the upstream emitted a frame we could not parse.
+          // The error event below already terminates the turn, so this is
+          // diagnostic depth, not a behavior change.
+          debugDroppedFrame("openai-chat", payload);
           yield { type: "error", message: "malformed upstream SSE data frame" };
           return "terminate";
         }
