@@ -46,6 +46,12 @@ export default function Debug({ apiBase }: { apiBase: string }) {
   const [level, setLevel] = useState<LevelFilter>("all");
   const [lines, setLines] = useState<string[]>([]);
   const [follow, setFollow] = useState(true);
+  // A drag inside the log pane means the operator is reading, not watching.
+  // We detect the GESTURE (wheel / drag / scroll keys) rather than the scroll
+  // event, so a window resize that reflows the text does not switch the
+  // follow off by accident.
+  const dragOrigin = useRef<{ x: number; y: number } | null>(null);
+  const stopFollowing = useCallback(() => setFollow(prev => (prev ? false : prev)), []);
   const [refreshing, setRefreshing] = useState(false);
   const afterRef = useRef(0);
   const logRef = useRef<HTMLPreElement | null>(null);
@@ -163,7 +169,7 @@ export default function Debug({ apiBase }: { apiBase: string }) {
             <IconRefresh /> {t("debug.refresh")}
           </button>
           <label className="muted" style={{ fontSize: 13, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 6 }}>
-            <input type="checkbox" checked={follow} onChange={e => setFollow(e.target.checked)} />
+            <input type="checkbox" checked={follow} title={t("debug.followHint")} onChange={e => setFollow(e.target.checked)} />
             {t("debug.follow")}
           </label>
         </div>
@@ -289,7 +295,24 @@ export default function Debug({ apiBase }: { apiBase: string }) {
           </div>
         </div>
       ) : debug && streamEnabled ? (
-        <pre ref={logRef} className="log-detail-json" style={{ maxHeight: "calc(100vh - 280px)" }}>{lines.join("\n")}</pre>
+        <pre
+          ref={logRef}
+          tabIndex={0}
+          className="log-detail-json"
+          style={{ maxHeight: "calc(100vh - 280px)" }}
+          onWheel={stopFollowing}
+          onPointerDown={e => { dragOrigin.current = { x: e.clientX, y: e.clientY }; }}
+          onPointerMove={e => {
+            const origin = dragOrigin.current;
+            if (!origin) return;
+            if (Math.abs(e.clientX - origin.x) > 6 || Math.abs(e.clientY - origin.y) > 6) stopFollowing();
+          }}
+          onPointerUp={() => { dragOrigin.current = null; }}
+          onPointerCancel={() => { dragOrigin.current = null; }}
+          onKeyDown={e => {
+            if (["PageUp", "PageDown", "ArrowUp", "ArrowDown", "Home", "End", " "].includes(e.key)) stopFollowing();
+          }}
+        >{lines.join("\n")}</pre>
       ) : null}
     </>
   );

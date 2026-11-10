@@ -112,6 +112,28 @@ export default function Logs({ apiBase }: { apiBase: string }) {
   // live edge.
   const [followLatest, setFollowLatest] = useState(true);
   const tableWrapRef = useRef<HTMLDivElement | null>(null);
+  // Same rule as the Debug page: only a real gesture (wheel / drag) that
+  // takes the reader away from the newest row switches the follow off. A
+  // window resize reflows the table but is not "reading", so it does not.
+  const dragOrigin = useRef<{ x: number; y: number } | null>(null);
+  // A manual uncheck must survive: only an automatic cancellation may be
+  // undone by scrolling back to the newest row.
+  const followManual = useRef(false);
+  const stopFollowing = () => {
+    const el = tableWrapRef.current;
+    if (el && el.scrollTop <= 8) return;
+    setFollowLatest(prev => (prev ? false : prev));
+  };
+  // The table is newest-first, so "down" means older history. A wheel that
+  // points away from the top is the reader leaving the live edge -- and it
+  // must count even though scrollTop is still 0 when the event fires.
+  const onWheelGesture = (e: React.WheelEvent<HTMLDivElement>) => {
+    if (e.deltaY > 0) {
+      setFollowLatest(prev => (prev ? false : prev));
+      return;
+    }
+    stopFollowing();
+  };
   const [detail, setDetail] = useState<LogEntry | null>(null);
   const localeTag = LOCALES.find(l => l.code === locale)?.htmlLang;
 
@@ -171,7 +193,15 @@ export default function Logs({ apiBase }: { apiBase: string }) {
           {t("logs.autoRefresh")}
         </label>
         <label className="muted" style={{ fontSize: 13, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 6 }}>
-          <input type="checkbox" checked={followLatest} onChange={e => setFollowLatest(e.target.checked)} />
+          <input
+            type="checkbox"
+            checked={followLatest}
+            title={t("logs.followLatestHint")}
+            onChange={e => {
+              followManual.current = true;
+              setFollowLatest(e.target.checked);
+            }}
+          />
           {t("logs.followLatest")}
         </label>
         <button type="button" className="btn btn-ghost btn-sm" onClick={clearLogs}>
@@ -183,7 +213,23 @@ export default function Logs({ apiBase }: { apiBase: string }) {
       {logs.length === 0 ? (
         <EmptyState title={t("logs.noRequests")} />
       ) : (
-        <div className="tbl-wrap" ref={tableWrapRef}>
+        <div
+          className="tbl-wrap"
+          ref={tableWrapRef}
+          onWheel={onWheelGesture}
+          onPointerDown={e => { dragOrigin.current = { x: e.clientX, y: e.clientY }; }}
+          onPointerMove={e => {
+            const origin = dragOrigin.current;
+            if (!origin) return;
+            if (Math.abs(e.clientX - origin.x) > 6 || Math.abs(e.clientY - origin.y) > 6) stopFollowing();
+          }}
+          onPointerUp={() => { dragOrigin.current = null; }}
+          onPointerCancel={() => { dragOrigin.current = null; }}
+          onScroll={e => {
+            // Scrolling back to the top means the reader wants the live edge again.
+            if (e.currentTarget.scrollTop <= 8 && !followManual.current) setFollowLatest(true);
+          }}
+        >
           <table className="tbl logs-tbl">
             <thead>
              <tr>
