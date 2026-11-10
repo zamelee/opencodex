@@ -4,13 +4,24 @@ from __future__ import annotations
 
 import sys
 import tkinter as tk
+from tkinter import messagebox
 
 from .app import HaApp
+from .singleton import acquire, release
 from .tray import Tray
 from .ui import MainWindow
 
 
 def main() -> int:
+    if not acquire():
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showinfo(
+            "HA Gateway", "HA Gateway 已经在运行了。\n请到系统托盘里查看。"
+        )
+        root.destroy()
+        return 0
+
     app = HaApp()
     app.start()
 
@@ -25,6 +36,7 @@ def main() -> int:
             pass
 
     def quit_all() -> None:
+        release()
         app.stop()
         try:
             win.destroy()
@@ -35,10 +47,12 @@ def main() -> int:
     tray = Tray(app, show, quit_all)
     try:
         tray.start()
+        win.tray_available = True
     except Exception:
-        pass
+        win.tray_available = False
 
     win.mainloop()
+    release()
     return 0
 
 

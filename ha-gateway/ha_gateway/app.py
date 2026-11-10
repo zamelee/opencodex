@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import threading
 import time
@@ -55,6 +56,7 @@ class EventBus:
 
 class HaApp:
     def __init__(self, db_path: str | None = None) -> None:
+        db_path = db_path or os.environ.get("HA_GATEWAY_DB") or None
         self.storage = Storage(db_path)
         self.settings = self.storage.load_settings()
         self.events = EventBus()

@@ -124,6 +124,91 @@ class LogPane(ttk.Frame):
         self.text.configure(state="disabled")
 
 
+class ScrollFrame(ttk.Frame):
+    """可纵向滚动的内容容器。"""
+
+    def __init__(self, master) -> None:
+        super().__init__(master)
+        self.canvas = tk.Canvas(self, highlightthickness=0, background="#ffffff")
+        self.inner = ttk.Frame(self.canvas)
+        self._win = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
+        sb = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.inner.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+        self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(self._win, width=e.width))
+        for w in (self.canvas, self.inner):
+            w.bind("<MouseWheel>", self._wheel)
+
+    def _wheel(self, event) -> None:
+        self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    def scroll_to(self, widget) -> None:
+        self.canvas.update_idletasks()
+        bbox = self.canvas.bbox("all")
+        if not bbox:
+            return
+        y = widget.winfo_rooty() - self.canvas.winfo_rooty() + self.canvas.yview()[0] * bbox[3]
+        self.canvas.yview_moveto(max(0.0, y / max(1, bbox[3])))
+
+
+class Section(ttk.Frame):
+    """抽屉里的一个小节：标题 + 分隔线 + 内容。"""
+
+    def __init__(self, master, title: str, hint: str = "") -> None:
+        super().__init__(master)
+        self.pack(fill="x", padx=14, pady=(10, 2))
+        head = ttk.Frame(self)
+        head.pack(fill="x")
+        ttk.Label(head, text=title, font=("Microsoft YaHei UI", 10, "bold")).pack(
+            side="left"
+        )
+        if hint:
+            ttk.Label(head, text=hint, foreground="#8a9099").pack(side="left", padx=8)
+        ttk.Separator(self).pack(fill="x", pady=(4, 2))
+        self.body = ttk.Frame(self)
+        self.body.pack(fill="x")
+
+
+class ManagePane(ttk.Frame):
+    """右侧抽屉：一页纵向，把上游/下游 Key/规则/设置串成一条长页。"""
+
+    def __init__(self, master, app) -> None:
+        super().__init__(master)
+        self.app = app
+        self.scroll = ScrollFrame(self)
+        self.scroll.pack(fill="both", expand=True)
+        inner = self.scroll.inner
+
+        self.sec_up = Section(inner, "上游通道", "主通道 / 备通道")
+        self.upstream_editor = UpstreamEditor(self.sec_up.body, app)
+        self.upstream_editor.pack(fill="x")
+
+        self.sec_key = Section(inner, "下游 Key", "Codex 用这一把")
+        self.key_pane = KeyPane(self.sec_key.body, app)
+        self.key_pane.pack(fill="x")
+
+        self.sec_rules = Section(inner, "故障转移规则", "勾选 = 参与自动切换")
+        self.rules_pane = RulesPane(self.sec_rules.body, app)
+        self.rules_pane.pack(fill="x")
+
+        self.sec_set = Section(inner, "网关设置")
+        self.settings_pane = SettingsPane(self.sec_set.body, app)
+        self.settings_pane.pack(fill="x")
+
+    def show_section(self, name: str) -> None:
+        mapping = {
+            "upstream": self.sec_up,
+            "key": self.sec_key,
+            "rules": self.sec_rules,
+            "settings": self.sec_set,
+        }
+        sec = mapping.get(name)
+        if sec is not None:
+            self.scroll.scroll_to(sec)
+
+
 class Topology(ttk.Frame):
     """连线式拓扑图：上游在上，网关居中，下游 key 在下。"""
 
@@ -215,7 +300,8 @@ class Topology(ttk.Frame):
             x, y = key_pos[i]
             tag = f"key:{k.id}"
             self._slot_map[tag] = ("key", k.id)
-            self._box(c, x, y, f"{k.label}\n{k.key}", "#5f6368", tag=tag)
+            shown = k.key if len(k.key) <= 18 else k.key[:16] + "…"
+            self._box(c, x, y, f"{k.label}\n{shown}", "#5f6368", tag=tag)
 
         # 下游新增位（夹在画布内）
         gx, gy = key_pos[-1] if key_pos else (gw[0], bot_y)
@@ -390,16 +476,24 @@ class UpstreamEditor(ttk.Frame):
         form.columnconfigure(1, weight=1)
         ttk.Button(form, text="添加上游", command=self._add).grid(row=4, column=1, sticky="w", padx=4)
 
-        self.tree = ttk.Treeview(self, columns=("name", "provider", "url", "health"), show="headings")
+        self.tree = ttk.Treeview(
+            self,
+            columns=("name", "provider", "url", "health"),
+            show="headings",
+            height=6,
+        )
         for col, title, w in (
-            ("name", "名称", 140),
-            ("provider", "Provider", 140),
-            ("url", "Base URL", 260),
-            ("health", "健康", 80),
+            ("name", "名称", 100),
+            ("provider", "Provider", 100),
+            ("url", "Base URL", 190),
+            ("health", "状态", 56),
         ):
             self.tree.heading(col, text=title)
             self.tree.column(col, width=w)
-        self.tree.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+        self.tree.pack(fill="x", padx=6, pady=(0, 6))
+        self.tree.tag_configure("ok", foreground="#2e7d32")
+        self.tree.tag_configure("warn", foreground="#c58a00")
+        self.tree.tag_configure("bad", foreground="#b3261e")
         row = ttk.Frame(self)
         row.pack(fill="x", padx=6, pady=(0, 6))
         ttk.Button(row, text="删除选中", command=self._delete).pack(side="left")
@@ -413,6 +507,8 @@ class UpstreamEditor(ttk.Frame):
     def refresh(self) -> None:
         self.tree.delete(*self.tree.get_children())
         for u in self.app.upstreams():
+            state = self.app.health.health_of(u.id)
+            tag = {Health.HEALTHY: "ok", Health.DEGRADED: "warn", Health.DOWN: "bad"}[state]
             self.tree.insert(
                 "",
                 "end",
@@ -421,8 +517,9 @@ class UpstreamEditor(ttk.Frame):
                     u.name,
                     u.provider,
                     u.base_url,
-                    self.app.health.health_of(u.id).value,
+                    {"healthy": "正常", "degraded": "降级", "down": "不可用"}[state.value],
                 ),
+                tags=(tag,),
             )
 
     def _add(self) -> None:
@@ -526,20 +623,42 @@ class KeyPane(ttk.Frame):
         ttk.Label(bar, text="用途").pack(side="left")
         ttk.Entry(bar, textvariable=self.label, width=18).pack(side="left", padx=6)
         ttk.Button(bar, text="生成下游 Key", command=self._gen).pack(side="left")
-        self.text = tk.Text(self, height=8, wrap="none")
-        self.text.pack(fill="both", expand=True, padx=6, pady=(0, 6))
-        ttk.Button(self, text="复制选中", command=self._copy).pack(anchor="w", padx=6)
+        self.rows = ttk.Frame(self)
+        self.rows.pack(fill="x", padx=6, pady=(0, 6))
+        self.refresh()
+
+    def refresh(self) -> None:
+        for c in self.rows.winfo_children():
+            c.destroy()
+        for k in self.app.storage.list_client_keys():
+            row = ttk.Frame(self.rows)
+            row.pack(fill="x", pady=2)
+            ttk.Label(row, text=k.label, width=10).pack(side="left")
+            ttk.Label(row, text=k.key, foreground="#1a73e8").pack(side="left", padx=6)
+            ttk.Button(
+                row,
+                text="复制",
+                command=lambda kk=k: self._copy_key(kk),
+            ).pack(side="left")
+            ttk.Button(
+                row,
+                text="删除",
+                command=lambda kk=k: self._delete_key(kk),
+            ).pack(side="left", padx=4)
+
+    def _copy_key(self, k) -> None:
+        self.clipboard_clear()
+        self.clipboard_append(k.key)
+
+    def _delete_key(self, k) -> None:
+        self.app.storage.delete_client_key(k.id)
+        self.refresh()
 
     def _gen(self) -> None:
         raw = self.app.new_client_key(self.label.get() or "client")
-        self.text.insert("end", raw + "\n")
-        self.text.see("end")
-
-    def _copy(self) -> None:
-        sel = self.text.get("sel.first", "sel.last")
-        if sel:
-            self.clipboard_clear()
-            self.clipboard_append(sel)
+        self.clipboard_clear()
+        self.clipboard_append(raw)
+        self.refresh()
 
 
 class RulesPane(ttk.Frame):
@@ -639,7 +758,29 @@ class SettingsPane(ttk.Frame):
         for i, (label, widget) in enumerate(rows):
             ttk.Label(form, text=label).grid(row=i, column=0, sticky="w", pady=3)
             widget.grid(row=i, column=1, sticky="w", pady=3)
-        ttk.Button(form, text="保存设置", command=self._save).grid(row=len(rows), column=1, sticky="w", pady=8)
+        btns = ttk.Frame(form)
+        btns.grid(row=len(rows), column=0, columnspan=2, sticky="w", pady=8)
+        ttk.Button(btns, text="保存设置", command=self._save).pack(side="left")
+        ttk.Button(btns, text="复制 Codex 配置", command=self._copy_codex).pack(
+            side="left", padx=8
+        )
+
+    def _copy_codex(self) -> None:
+        """把当前网关地址与协议拼成一段可直接粘进 config.toml 的片段。"""
+        s = self.app.settings
+        wire = {"openai-responses": "responses", "openai-chat": "chat", "anthropic": "anthropic"}[
+            s.protocol
+        ]
+        snippet = (
+            "[model_providers.ha_gateway]\n"
+            'name = "HA Gateway"\n'
+            f'base_url = "http://{s.listen_host}:{s.listen_port}/v1/"\n'
+            'env_key = "HA_GATEWAY_KEY"\n'
+            f'wire_api = "{wire}"\n'
+        )
+        self.clipboard_clear()
+        self.clipboard_append(snippet)
+        messagebox.showinfo("已复制", "配置片段已复制到剪贴板")
 
     def _save(self) -> None:
         s = self.app.settings
@@ -678,16 +819,14 @@ class MainWindow(tk.Tk):
         self.topology = Topology(paned, app)
         paned.add(self.topology, minsize=360, stretch="always")
 
-        right = ttk.Notebook(paned)
+        right = ttk.Frame(paned)
+        self.manage = ManagePane(right, app)
+        self.manage.pack(fill="both", expand=True)
         self.right = right
-        self.upstream_editor = UpstreamEditor(right, app)
-        self.key_pane = KeyPane(right, app)
-        self.rules_pane = RulesPane(right, app)
-        self.settings_pane = SettingsPane(right, app)
-        right.add(self.upstream_editor, text="上游")
-        right.add(self.key_pane, text="下游 Key")
-        right.add(self.rules_pane, text="规则")
-        right.add(self.settings_pane, text="设置")
+        self.upstream_editor = self.manage.upstream_editor
+        self.key_pane = self.manage.key_pane
+        self.rules_pane = self.manage.rules_pane
+        self.settings_pane = self.manage.settings_pane
         self.topology.on_select = self._on_node_select
         self._drawer_open = False
 
@@ -708,12 +847,12 @@ class MainWindow(tk.Tk):
         open_now = (not self._drawer_open) if force is None else bool(force)
         if open_now:
             if not self._drawer_open:
-                self.paned.add(self.right, minsize=320, width=430, stretch="never")
+                self.paned.add(self.right, minsize=360, width=500, stretch="never")
                 self._drawer_open = True
                 self.update_idletasks()
                 total = max(self.paned.winfo_width(), 900)
                 try:
-                    self.paned.sashpos(0, total - 430)
+                    self.paned.sashpos(0, total - 500)
                 except Exception:
                     pass
                 self.after(80, self.topology.redraw)
@@ -733,17 +872,17 @@ class MainWindow(tk.Tk):
             return
         self._toggle_drawer(True)
         if kind == "upstream":
-            self.right.select(self.upstream_editor)
+            self.manage.show_section("upstream")
             self.upstream_editor.select_upstream(ident)
         elif kind == "slot":
-            self.right.select(self.upstream_editor)
+            self.manage.show_section("upstream")
             self.upstream_editor.focus_form()
         elif kind == "key":
-            self.right.select(self.key_pane)
+            self.manage.show_section("key")
         elif kind == "key_add":
-            self.right.select(self.key_pane)
+            self.manage.show_section("key")
         elif kind == "gw":
-            self.right.select(self.rules_pane)
+            self.manage.show_section("rules")
 
     def _on_event(self, ev: dict) -> None:
         if ev.get("kind") == "route_active" and ev.get("detail"):
@@ -759,4 +898,8 @@ class MainWindow(tk.Tk):
         self.upstream_editor.refresh()
 
     def _on_close(self) -> None:
-        self.destroy()
+        # 关窗口不杀网关：有托盘就收进托盘，否则才真退出
+        if getattr(self, "tray_available", False):
+            self.withdraw()
+        else:
+            self.destroy()

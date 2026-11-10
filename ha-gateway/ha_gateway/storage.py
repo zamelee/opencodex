@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS client_keys (
     label TEXT NOT NULL,
     key_hash TEXT NOT NULL UNIQUE,
     key_prefix TEXT NOT NULL,
+    key_enc TEXT NOT NULL DEFAULT '',
     enabled INTEGER NOT NULL DEFAULT 1,
     created_at REAL NOT NULL
 );
@@ -72,7 +73,16 @@ class Storage:
         self._conn.row_factory = sqlite3.Row
         with self._lock:
             self._conn.executescript(_SCHEMA)
+            self._migrate()
             self._conn.commit()
+
+    def _migrate(self) -> None:
+        """老库补列（子项目迭代期间保持向后兼容）。"""
+        cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(client_keys)")}
+        if "key_enc" not in cols:
+            self._conn.execute(
+                "ALTER TABLE client_keys ADD COLUMN key_enc TEXT NOT NULL DEFAULT ''"
+            )
 
     # ---------- settings ----------
 
@@ -227,15 +237,23 @@ class Storage:
         rows = self._conn.execute(
             "SELECT * FROM client_keys ORDER BY created_at"
         ).fetchall()
-        return [
-            ClientKey(
-                id=r["id"],
-                label=r["label"],
-                key=r["key_prefix"],
-                enabled=bool(r["enabled"]),
+        out = []
+        for r in rows:
+            key = r["key_prefix"]
+            if r["key_enc"]:
+                try:
+                    key = crypto.decrypt(r["key_enc"])
+                except Exception:
+                    key = r["key_prefix"]
+            out.append(
+                ClientKey(
+                    id=r["id"],
+                    label=r["label"],
+                    key=key,
+                    enabled=bool(r["enabled"]),
+                )
             )
-            for r in rows
-        ]
+        return out
 
     def add_client_key(self, label: str, key: str) -> ClientKey:
         import hashlib
@@ -244,9 +262,9 @@ class Storage:
         ck = ClientKey(id=uuid.uuid4().hex[:12], label=label, key=key)
         with self._lock:
             self._conn.execute(
-                "INSERT INTO client_keys(id,label,key_hash,key_prefix,enabled,created_at) "
-                "VALUES(?,?,?,?,1,?)",
-                (ck.id, label, h, key[:12], time.time()),
+                "INSERT INTO client_keys(id,label,key_hash,key_prefix,key_enc,enabled,created_at) "
+                "VALUES(?,?,?,?,?,1,?)",
+                (ck.id, label, h, key[:12], crypto.encrypt(key), time.time()),
             )
             self._conn.commit()
         return ck
