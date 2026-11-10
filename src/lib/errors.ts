@@ -48,7 +48,16 @@ export function classifyError(status: number, type: string, message: string): Oc
     text.includes("quota exhausted") ||
     text.includes("account quota exceeded") ||
     text.includes("monthly quota exceeded") ||
-    text.includes("daily quota exceeded")
+    text.includes("daily quota exceeded") ||
+    // The Chinese relays report an empty balance as a 403 with a body like
+    // "预扣费额度失败, 用户剩余额度: ¥0.000000" / "用户额度不足". Classified as
+    // a credential failure this sends the operator hunting for a broken key
+    // while the key is fine and the balance is simply empty.
+    text.includes("剩余额度") ||
+    text.includes("额度不足") ||
+    text.includes("余额不足") ||
+    text.includes("insufficient balance") ||
+    text.includes("not enough balance")
   ) {
     return { message, type: "insufficient_quota", code: "insufficient_quota" };
   }

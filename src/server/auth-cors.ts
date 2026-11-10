@@ -255,6 +255,7 @@ export function safeConfigDTO(config: OcxConfig): unknown {
      "preserveReasoningContentModels",
       "escapeBuiltinToolNames",
       "keySchedule",
+      "quotaRetry",
       "supportsSearchTool",
       "autoCompactRatio",
       "modelAutoCompactRatios",

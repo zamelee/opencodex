@@ -17,11 +17,21 @@ import type { OcxConfig, OcxProviderConfig } from "../types";
 interface KeyCooldown {
   cooldownUntil: number;
   /** Discriminator so callers can tell 429 (server-rejected) from return (locally pinned) apart. */
-  reason: "429" | "return-cooldown";
+  reason: "429" | "quota" | "return-cooldown";
 }
 
 const DEFAULT_COOLDOWN_MS = 60_000;
 const MAX_COOLDOWN_MS = 10 * 60_000; // cap at 10 min for api-key rotation
+
+/**
+ * How long a key that ran out of BALANCE is pinned out.
+ *
+ * Longer than a 429 cooldown on purpose: a rate limit clears in seconds, an
+ * empty balance does not. Pinning it for five minutes stops the pool from
+ * handing the same dead key to the next request (and stops this turn from
+ * rotating straight back into it).
+ */
+export const QUOTA_COOLDOWN_MS = 5 * 60_000;
 
 /** How long a key just rotated from is pinned out of `pickBestKeyId` candidates.
  * Long enough to absorb a few requests without thrashing, short enough that recovery
@@ -89,7 +99,7 @@ export function getKeyCooldownReason(
   providerName: string,
   keyId: string,
   now: number = Date.now(),
-): "429" | "return-cooldown" | null {
+): "429" | "quota" | "return-cooldown" | null {
   const entry = keyCooldowns.get(cooldownKey(providerName, keyId));
   if (!entry) return null;
   if (entry.cooldownUntil <= now) {
@@ -122,6 +132,48 @@ export function rotateKeyOn429(
   now = Date.now(),
   attemptedKey?: string,
 ): OcxProviderConfig | null {
+  const cooldownMs = parseRetryAfterMs(retryAfterHeader, now) ?? DEFAULT_COOLDOWN_MS;
+  return rotateKeyInternal(config, providerName, {
+    cooldownMs,
+    reason: "429",
+    attemptedKey,
+    logMessage: "429 on key",
+  }, now);
+}
+
+/**
+ * Rotate away from a key whose BALANCE is empty.
+ *
+ * Same shape as the 429 failover, with one difference: the cooldown is long
+ * (QUOTA_COOLDOWN_MS), because an empty balance does not recover in seconds
+ * the way a rate limit does.
+ */
+export function rotateKeyOnQuota(
+  config: OcxConfig,
+  providerName: string,
+  now = Date.now(),
+  attemptedKey?: string,
+): OcxProviderConfig | null {
+  return rotateKeyInternal(config, providerName, {
+    cooldownMs: QUOTA_COOLDOWN_MS,
+    reason: "quota",
+    attemptedKey,
+    logMessage: "quota exhausted on key",
+  }, now);
+}
+
+/** Shared body of the key rotations: cool the failed key, then pick the next healthy one. */
+function rotateKeyInternal(
+  config: OcxConfig,
+  providerName: string,
+  opts: {
+    cooldownMs: number;
+    reason: KeyCooldown["reason"];
+    attemptedKey?: string;
+    logMessage: string;
+  },
+  now = Date.now(),
+): OcxProviderConfig | null {
   const provider = config.providers[providerName];
   if (!provider) return null;
   if (provider.authMode === "oauth" || provider.authMode === "forward") return null;
@@ -132,19 +184,18 @@ export function rotateKeyOn429(
   // Cool the key that ACTUALLY failed. Under concurrent 429s another request may already have
   // rotated provider.apiKey — cooling the live key would punish an innocent replacement and can
   // exhaust a 2-key pool from a single bad key. CAS semantics: callers pass the key they used.
-  const failedKey = attemptedKey ?? provider.apiKey;
+  const failedKey = opts.attemptedKey ?? provider.apiKey;
   const currentEntry = pool.find(e => e.key === failedKey);
   if (currentEntry) {
-    const cooldownMs = parseRetryAfterMs(retryAfterHeader, now) ?? DEFAULT_COOLDOWN_MS;
     keyCooldowns.set(cooldownKey(providerName, currentEntry.id), {
-      cooldownUntil: now + cooldownMs,
-      reason: "429",
+      cooldownUntil: now + opts.cooldownMs,
+      reason: opts.reason,
     });
   }
 
   // Lost the race: someone already rotated away from the failed key. If the live key is healthy,
   // retry with it as-is instead of rotating a second time.
-  if (attemptedKey !== undefined && provider.apiKey !== attemptedKey) {
+  if (opts.attemptedKey !== undefined && provider.apiKey !== opts.attemptedKey) {
     const liveEntry = pool.find(e => e.key === provider.apiKey);
     if (liveEntry && !isKeyInCooldown(providerName, liveEntry.id, now)) {
       return { ...provider };
@@ -182,14 +233,14 @@ export function rotateKeyOn429(
       saveConfig(config);
       console.warn(
         // Log ids only — labels are user-supplied free text and could carry secret material.
-        `[key-failover] ${providerName}: 429 on key ${currentEntry?.id ?? "?"}; rotating to key ${candidate.id}`,
+        `[key-failover] ${providerName}: ${opts.logMessage} ${currentEntry?.id ?? "?"}; rotating to key ${candidate.id}`,
       );
       return { ...provider };
     }
   }
 
   // All keys in cooldown
-  console.warn(`[key-failover] ${providerName}: all ${pool.length} keys in cooldown; returning 429 to client`);
+  console.warn(`[key-failover] ${providerName}: all ${pool.length} keys in cooldown; returning the failure to the client`);
   return null;
 }
 

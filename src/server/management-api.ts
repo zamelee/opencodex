@@ -536,6 +536,42 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
         if (candidate.supportsSearchTool) next.supportsSearchTool = true;
         else delete next.supportsSearchTool;
       }
+      // quotaRetry: how the proxy recovers when the upstream says the balance is
+      // empty ("剩余额度: ¥0.000000", HTTP 403). Layer 1 is an instant switch to
+      // another key in the pool; layer 2 waits intervalMs and retries, up to
+      // maxAttempts extra attempts. The wait is bounded server-side.
+      if (candidate.quotaRetry !== undefined) {
+        if (candidate.quotaRetry === null) {
+          delete next.quotaRetry;
+        } else {
+          const raw = candidate.quotaRetry as Record<string, unknown>;
+          if (typeof raw !== "object" || raw === null) {
+            return jsonResponse({ error: "provider.quotaRetry must be an object" }, 400);
+          }
+          const quotaRetry: { enabled?: boolean; intervalMs?: number; maxAttempts?: number } = {};
+          if (raw.enabled !== undefined) {
+            if (typeof raw.enabled !== "boolean") {
+              return jsonResponse({ error: "provider.quotaRetry.enabled must be a boolean" }, 400);
+            }
+            quotaRetry.enabled = raw.enabled;
+          }
+          if (raw.intervalMs !== undefined) {
+            if (typeof raw.intervalMs !== "number" || !Number.isFinite(raw.intervalMs)
+              || raw.intervalMs < 1000 || raw.intervalMs > 30000) {
+              return jsonResponse({ error: "provider.quotaRetry.intervalMs must be between 1000 and 30000" }, 400);
+            }
+            quotaRetry.intervalMs = Math.round(raw.intervalMs);
+          }
+          if (raw.maxAttempts !== undefined) {
+            if (typeof raw.maxAttempts !== "number" || !Number.isFinite(raw.maxAttempts)
+              || raw.maxAttempts < 0 || raw.maxAttempts > 5) {
+              return jsonResponse({ error: "provider.quotaRetry.maxAttempts must be between 0 and 5" }, 400);
+            }
+            quotaRetry.maxAttempts = Math.round(raw.maxAttempts);
+          }
+          next.quotaRetry = quotaRetry;
+        }
+      }
       // contextWindow: the context window we advertise for this provider's models. Set it
       // BELOW the upstream's real ceiling so the client's auto-compact brake fires before the
       // upstream would reject a request (Codex counts the prompt in its own tokenizer, which

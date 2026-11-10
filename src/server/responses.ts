@@ -39,7 +39,8 @@ import { fetchWithResetRetry } from "../lib/upstream-retry";
 import { isUsageDebugEnabled } from "../usage/debug";
 import { readJsonRequestBody, DecompressedBodyTooLargeError, UnsupportedContentEncodingError } from "./request-decompress";
 import { resolveAdapter, resolveWireProtocolOverride } from "./adapter-resolve";
-import { hasKeyPoolFailover, rotateKeyOn429 } from "../providers/key-failover";
+import { hasKeyPoolFailover, rotateKeyOn429, rotateKeyOnQuota } from "../providers/key-failover";
+import { isQuotaExhausted, resolveQuotaRetryPolicy, sleepWithAbort } from "../providers/quota-retry";
 import { resolveImageDownsampleEnabled } from "../providers/image-downsample";
 import { resolveGateLimit } from "../providers/gate-limit";
 import type { WsData } from "./ws-bridge";
@@ -1228,8 +1229,74 @@ export async function handleResponses(
         return formatErrorResponse(502, "upstream_error", msg);
       }
     }
+    // Quota-exhausted recovery ("剩余额度: ¥0.000000", HTTP 403).
+    //
+    // Two layers, cheapest first: switch to another key in the pool (each key
+    // carries its own balance on these relays, so this recovers the turn in
+    // about a second), and only when there is no other key, wait and retry.
+    // The wait is bounded, and the refusal happens BEFORE the upstream runs the
+    // model, so a retry is never billed twice.
+    let capturedErrorText: string | null = null;
+    const quotaPolicy = resolveQuotaRetryPolicy(route.provider);
+    let quotaAttempts = 0;
+    let quotaKeySwitches = 0;
+    let quotaWaits = 0;
+    // Only when the request is STILL failing: the 429 failover above may have
+    // recovered it, and reading the body of a successful response would eat it.
+    if (quotaPolicy.enabled && !upstreamResponse.ok) {
+      while (quotaAttempts < quotaPolicy.maxAttempts) {
+        const text: string = capturedErrorText ?? await upstreamResponse.text().catch(() => "");
+        capturedErrorText = text;
+        if (!isQuotaExhausted(upstreamResponse.status, text)) break;
+        const rotated = hasKeyPoolFailover(route.provider)
+          ? rotateKeyOnQuota(config, route.providerName, Date.now(), route.provider.apiKey)
+          : null;
+        if (rotated) {
+          quotaKeySwitches += 1;
+        } else {
+          // No other key to try: wait for the balance to come back.
+          quotaWaits += 1;
+          const slept = await sleepWithAbort(quotaPolicy.intervalMs, upstream.signal);
+          if (!slept) break; // the client left; stop holding the connection
+        }
+        quotaAttempts += 1;
+        // The failed body was already READ (that is how we recognised the
+        // exhausted balance), so there is nothing to cancel - and cancelling a
+        // locked stream throws.
+        if (rotated) route.provider = rotated;
+        const retryAdapter = resolveAdapter(
+          resolveWireProtocolOverride(route.providerName, route.modelId, route.provider),
+          config.cacheRetention,
+        );
+        const retryRequest = await retryAdapter.buildRequest(parsed, { headers: selectedForwardHeaders });
+        logCtx.promptComposition = summarizeRequestBody(retryRequest.body);
+        try {
+          upstreamResponse = retryAdapter.fetchResponse
+            ? await retryAdapter.fetchResponse(retryRequest, { abortSignal: upstream.signal, timeoutMs: connectMs })
+            : await fetchWithHeaderTimeout(retryRequest.url, {
+                method: retryRequest.method, headers: retryRequest.headers, body: retryRequest.body,
+              }, upstream.signal, connectMs);
+        } catch (err) {
+          cleanupUpstreamAbort();
+          upstream.abort();
+          const msg = err instanceof Error && err.name === "TimeoutError"
+            ? `Provider connect timeout after ${connectMs}ms`
+            : `Provider unreachable: ${err instanceof Error ? err.message : String(err)}`;
+          return formatErrorResponse(502, "upstream_error", msg);
+        }
+      }
+      if (quotaAttempts > 0) {
+        logCtx.quotaRetries = quotaAttempts;
+        logCtx.quotaKeySwitches = quotaKeySwitches;
+        logCtx.quotaWaits = quotaWaits;
+        console.warn(
+          `[${route.providerName}] upstream balance exhausted: retried ${quotaAttempts} time(s) `
+          + `(key switches ${quotaKeySwitches}, waits ${quotaWaits} x ${quotaPolicy.intervalMs}ms)`,
+        );
+      }
+    }
     if (!upstreamResponse.ok) {
-      const errorText = await upstreamResponse.text().catch(() => "unknown error");
+      const errorText = capturedErrorText ?? await upstreamResponse.text().catch(() => "unknown error");
       cleanupUpstreamAbort();
       // Record WHAT the upstream said, not just its status code. A JSON error
       // envelope is parsed for its message; an HTML gateway page or a plain-text
@@ -1325,6 +1392,19 @@ export async function handleResponses(
           400,
           "invalid_request_error",
           `上游内容审核拒绝（content policy rejection），本轮请求内容被上游策略拦截，重试无效。原始信息: ${redactSecretString(String(policyText).slice(0, 300))}`,
+        );
+      }
+      // The balance is still empty after our recovery attempts. Report it as
+      // what it is -- an exhausted balance, not a broken key -- and keep the
+      // status at 4xx so Codex treats it as fatal instead of retrying into
+      // the same wall.
+      if (isQuotaExhausted(upstreamResponse.status, errorText)) {
+        const waited = quotaWaits > 0 ? `，等待 ${quotaWaits} 次 x ${quotaPolicy.intervalMs}ms` : "";
+        return formatErrorResponse(
+          403,
+          "insufficient_quota",
+          `上游额度不足（insufficient_quota）：已重试 ${quotaAttempts} 次（换 key ${quotaKeySwitches} 次${waited}），`
+          + `余额仍未恢复。原始信息: ${redactSecretString(upstreamMessage.slice(0, 300))}`,
         );
       }
       return formatErrorResponse(upstreamResponse.status, "upstream_error", `Provider error ${upstreamResponse.status}: ${redactSecretString(upstreamMessage.slice(0, 500))}`);

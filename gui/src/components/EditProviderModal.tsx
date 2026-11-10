@@ -23,6 +23,8 @@ export interface EditableProvider {
   headersLoaded?: boolean;
   label?: string;
   models?: string[];
+  /** How the proxy recovers when the upstream says the balance is empty. */
+  quotaRetry?: { enabled?: boolean; intervalMs?: number; maxAttempts?: number };
 }
 
 interface EditProviderModalProps {
@@ -32,7 +34,7 @@ interface EditProviderModalProps {
   existingProviderNames?: string[];
   /** True when some provider in the config can act as the web-search sidecar's forward provider. */
   forwardProviderAvailable?: boolean;
-  onSave: (patch: { label?: string; renameTo?: string; adapter?: string; baseUrl?: string; defaultModel?: string; liveModels?: boolean; supportsSearchTool?: boolean; contextWindow?: number; headers?: Record<string, string> }) => Promise<void> | void;
+  onSave: (patch: { label?: string; renameTo?: string; adapter?: string; baseUrl?: string; defaultModel?: string; liveModels?: boolean; supportsSearchTool?: boolean; contextWindow?: number; headers?: Record<string, string>; quotaRetry?: { enabled?: boolean; intervalMs?: number; maxAttempts?: number } }) => Promise<void> | void;
   onClose: () => void;
 }
 
@@ -70,6 +72,10 @@ export default function EditProviderModal({ open, provider, apiBase, existingPro
   // Empty = "use the model's own metadata" (auto).
   const [contextWindow, setContextWindow] = useState("");
   const [headers, setHeaders] = useState<Array<{ key: string; value: string }>>([]);
+  // Quota-exhausted recovery: switch to another key first, then wait and retry.
+  const [quotaRetryEnabled, setQuotaRetryEnabled] = useState(true);
+  const [quotaRetryInterval, setQuotaRetryInterval] = useState("20");
+  const [quotaRetryAttempts, setQuotaRetryAttempts] = useState("3");
   const [showHeaders, setShowHeaders] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | undefined>(undefined);
@@ -93,6 +99,10 @@ export default function EditProviderModal({ open, provider, apiBase, existingPro
     const h = provider.headers || {};
     setHeaders(Object.entries(h).map(([key, value]) => ({ key, value })));
     setShowHeaders(Object.keys(h).length > 0);
+    const qr = provider.quotaRetry;
+    setQuotaRetryEnabled(qr?.enabled !== false);
+    setQuotaRetryInterval(String(Math.round((qr?.intervalMs ?? 20000) / 1000)));
+    setQuotaRetryAttempts(String(qr?.maxAttempts ?? 3));
     setAvailableModels(provider.models ?? []);
     setRenameTo(provider.name);
     setConfirmingRename(false);
@@ -193,6 +203,11 @@ export default function EditProviderModal({ open, provider, apiBase, existingPro
       supportsSearchTool,
       ...(contextWindow.trim() ? { contextWindow: Number(contextWindow.trim()) } : {}),
       ...(headerPatch !== undefined ? { headers: headerPatch } : {}),
+      quotaRetry: {
+        enabled: quotaRetryEnabled,
+        intervalMs: Math.max(1, Math.min(30, Number(quotaRetryInterval) || 20)) * 1000,
+        maxAttempts: Math.max(0, Math.min(5, Number(quotaRetryAttempts) || 0)),
+      },
     });
     } catch (err) {
       setError(String((err as Error)?.message ?? err));
@@ -436,6 +451,61 @@ export default function EditProviderModal({ open, provider, apiBase, existingPro
           <span className="muted" style={{ fontSize: 11 }}>
             {t("prov.editContextWindowHint")}
           </span>
+        </div>
+
+        {/* Quota-exhausted recovery: switch key first, then wait and retry. */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <label
+            style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 13, cursor: "pointer" }}
+            title={t("prov.editQuotaRetryHint")}
+          >
+            <input
+              type="checkbox"
+              checked={quotaRetryEnabled}
+              onChange={(e) => setQuotaRetryEnabled(e.target.checked)}
+              data-testid="edit-quota-retry"
+              style={{ marginTop: 2 }}
+            />
+            <span>
+              {t("prov.editQuotaRetryLabel")}
+              <span className="muted" style={{ display: "block", fontSize: 11 }}>
+                {t("prov.editQuotaRetryHint")}
+              </span>
+            </span>
+          </label>
+          {quotaRetryEnabled ? (
+            <div style={{ display: "flex", gap: 10, alignItems: "center", paddingLeft: 24 }}>
+              <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
+                {t("prov.editQuotaRetryInterval")}
+                <input
+                  className="input"
+                  type="number"
+                  min={1}
+                  max={30}
+                  step={1}
+                  value={quotaRetryInterval}
+                  onChange={(e) => setQuotaRetryInterval(e.target.value)}
+                  style={{ width: 64, fontFamily: "var(--mono)", fontSize: 13 }}
+                  data-testid="edit-quota-retry-interval"
+                />
+                {t("prov.editQuotaRetrySeconds")}
+              </label>
+              <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
+                {t("prov.editQuotaRetryAttempts")}
+                <input
+                  className="input"
+                  type="number"
+                  min={0}
+                  max={5}
+                  step={1}
+                  value={quotaRetryAttempts}
+                  onChange={(e) => setQuotaRetryAttempts(e.target.value)}
+                  style={{ width: 56, fontFamily: "var(--mono)", fontSize: 13 }}
+                  data-testid="edit-quota-retry-attempts"
+                />
+              </label>
+            </div>
+          ) : null}
         </div>
 
         <div>

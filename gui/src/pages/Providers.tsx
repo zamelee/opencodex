@@ -38,6 +38,8 @@ interface Config {
     supportsSearchTool?: boolean;
     /** The context window advertised for this provider's models (provider-wide). */
     contextWindow?: number;
+    /** How the proxy recovers when the upstream says the balance is empty. */
+    quotaRetry?: { enabled?: boolean; intervalMs?: number; maxAttempts?: number };
     /** Auth header strategy locked by the auth matrix, null = auto-detect. */
     modelListAuth?: string | null;
     /** Header VALUES are fetched on demand from /api/providers/headers — they are
@@ -708,6 +710,7 @@ export default function Providers({ apiBase }: { apiBase: string }) {
       liveModels: prov.liveModels !== false,
       supportsSearchTool: prov.supportsSearchTool === true,
       contextWindow: prov.contextWindow,
+      quotaRetry: prov.quotaRetry,
       headers: headerValues,
       headersLoaded,
       models: prov.models ?? [],
@@ -724,6 +727,7 @@ export default function Providers({ apiBase }: { apiBase: string }) {
     liveModels?: boolean;
     supportsSearchTool?: boolean;
     contextWindow?: number;
+    quotaRetry?: { enabled?: boolean; intervalMs?: number; maxAttempts?: number };
     headers?: Record<string, string>;
   }) => {
     if (!editTarget) return;

@@ -6,6 +6,7 @@ import { readCodexCatalogPath } from "../codex/catalog";
 import type { OcxUsage } from "../types";
 import { redactSecretString } from "../lib/redact";
 import { summarizeUpstreamErrorBody } from "../lib/upstream-error-body";
+import { isQuotaExhaustedBody } from "../providers/quota-retry";
 import {
   appendRequestLogEntry,
   clearRequestLogFile,
@@ -71,6 +72,14 @@ export interface RequestLogContext {
    * 2026-11-09 the upstream counted 2,010,775 tokens for a body we estimated at 498,000.
    */
   upstreamTokenGap?: UpstreamTokenGap;
+  /**
+   * How the proxy recovered from an exhausted upstream balance: extra attempts,
+   * how many of them switched to another key, and how many waited.
+   * Zero/absent means the balance never ran out.
+   */
+  quotaRetries?: number;
+  quotaKeySwitches?: number;
+  quotaWaits?: number;
 }
 
 export interface PromptCompositionSummary {
@@ -117,6 +126,12 @@ export interface RequestLogEntry {
   promptComposition?: PromptCompositionSummary;
   /** How far our estimate sat from the upstream's own count of the same body. */
   upstreamTokenGap?: UpstreamTokenGap;
+  /** Extra attempts spent on an exhausted upstream balance (see RequestLogContext). */
+  quotaRetries?: number;
+  /** How many of those attempts switched to another key in the pool. */
+  quotaKeySwitches?: number;
+  /** How many of those attempts waited before retrying. */
+  quotaWaits?: number;
 }
 
 const requestLog: RequestLogEntry[] = [];
@@ -196,9 +211,12 @@ export function nextRequestLogId(timestamp = Date.now()): string {
   return `ocx-${timestamp.toString(36)}-${requestLogSeq.toString(36)}`;
 }
 
-export function requestLogErrorCode(status: number): string | undefined {
+export function requestLogErrorCode(status: number, upstreamError?: string): string | undefined {
   if (status >= 200 && status < 400) return undefined;
   if (status === 400 || status === 409) return "invalid_request_error";
+  // A 403 that names an empty balance is NOT a credential problem. Labelling
+  // it "invalid_api_key" sends the operator hunting for a broken key.
+  if (status === 403 && isQuotaExhaustedBody(upstreamError)) return "insufficient_quota";
   if (status === 401 || status === 403) return "invalid_api_key";
   if (status === 429) return "rate_limit_exceeded";
   if (status === 499) return "client_closed_request";
@@ -467,7 +485,7 @@ export function addFinalRequestLog(
   meta?: Pick<RequestLogEntry, "terminalStatus" | "closeReason">,
   addLog: (entry: RequestLogEntry) => void = addRequestLog,
 ): void {
-  const errorCode = requestLogErrorCode(status);
+  const errorCode = requestLogErrorCode(status, logCtx.upstreamError);
   const finalUsage = usageForFinalLog(logCtx.provider, logCtx.usage);
   const usageFallback = !finalUsage && typeof logCtx.usageLogInputTokens === "number"
     ? { inputTokens: logCtx.usageLogInputTokens, outputTokens: 0, estimated: true }
@@ -502,6 +520,9 @@ export function addFinalRequestLog(
     ...(totalTokens !== undefined ? { totalTokens } : {}),
     ...(logCtx.promptComposition ? { promptComposition: logCtx.promptComposition } : {}),
     ...(logCtx.upstreamTokenGap ? { upstreamTokenGap: logCtx.upstreamTokenGap } : {}),
+    ...(logCtx.quotaRetries ? { quotaRetries: logCtx.quotaRetries } : {}),
+    ...(logCtx.quotaKeySwitches ? { quotaKeySwitches: logCtx.quotaKeySwitches } : {}),
+    ...(logCtx.quotaWaits ? { quotaWaits: logCtx.quotaWaits } : {}),
   });
   if (isUsageDebugEnabled()) {
     appendUsageDebug({

@@ -544,6 +544,19 @@ export interface OcxProviderConfig {
    * failure or absence degrades gracefully to the reactive 429 failover path.
    */
   keySchedule?: { enabled?: boolean; threshold?: number };
+  /**
+   * How the proxy reacts when the upstream says "the balance is empty"
+   * (HTTP 403 with a 剩余额度/额度不足 body).
+   *
+   * The recovery has two layers: first switch to another key in the pool
+   * (each key carries its own balance on these relays), and only when there is
+   * no other key, wait `intervalMs` and retry, up to `maxAttempts` extra
+   * attempts. The wait is bounded so the client is never held longer than
+   * ~90 seconds in total.
+   *
+   * `enabled` defaults to true; `intervalMs` to 20s; `maxAttempts` to 3.
+   */
+  quotaRetry?: { enabled?: boolean; intervalMs?: number; maxAttempts?: number };
   defaultModel?: string;
   /**
    * Model used by the per-key "Test" button (`/api/providers/keys/test`). When unset the

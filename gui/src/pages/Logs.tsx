@@ -49,6 +49,10 @@ interface LogEntry {
     estimatedTokens: number;
     factor: number;
   };
+  /** Extra attempts spent recovering from an exhausted upstream balance. */
+  quotaRetries?: number;
+  quotaKeySwitches?: number;
+  quotaWaits?: number;
 }
 
 function tokensTitle(log: LogEntry): string | undefined {
@@ -319,6 +323,18 @@ export default function Logs({ apiBase }: { apiBase: string }) {
               <span className="muted">{t("logs.col.provider")}</span><span>{detail.provider}</span>
               {detail.errorCode && (<><span className="muted">{t("logs.col.error")}</span><span className="mono">{detail.errorCode}</span></>)}
               {detail.upstreamError && (<><span className="muted">{t("logs.col.upstreamReason")}</span><span className="mono log-detail-break">{detail.upstreamError}</span></>)}
+              {detail.quotaRetries ? (
+                <>
+                  <span className="muted">{t("logs.col.quotaRecovery")}</span>
+                  <span className="mono">
+                    {t("logs.detailQuotaRecovery", {
+                      retries: detail.quotaRetries,
+                      switches: detail.quotaKeySwitches ?? 0,
+                      waits: detail.quotaWaits ?? 0,
+                    })}
+                  </span>
+                </>
+              ) : null}
               <span className="muted">{t("logs.col.duration")}</span><span className="mono">{detail.durationMs}ms</span>
             </div>
             {detail.promptComposition && (
