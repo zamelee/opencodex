@@ -42,7 +42,7 @@ import {
 } from "../lib/debug-settings";
 import type { OcxConfig, OcxProviderConfig } from "../types";
 import { drainAndShutdown } from "./lifecycle";
-import { filterRequestLogs, getRequestLogEntries } from "./request-log";
+import { clearRequestLog, filterRequestLogs, getRequestLogEntries } from "./request-log";
 import { isAllowedRequestOrigin, jsonResponse, providerManagementConfigError, publicProviderBaseUrl, safeConfigDTO } from "./auth-cors";
 
 import { markActivity } from "../lib/sidecar-tracker";
@@ -321,6 +321,11 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
 
   if (url.pathname === "/api/logs" && req.method === "GET") {
     return jsonResponse(filterRequestLogs(getRequestLogEntries(), url.searchParams));
+  }
+
+  if (url.pathname === "/api/logs" && req.method === "DELETE") {
+    clearRequestLog();
+    return jsonResponse({ ok: true });
   }
 
   if (url.pathname === "/api/debug" && req.method === "GET") {

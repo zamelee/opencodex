@@ -33,18 +33,39 @@ export function installLogTimestamps(): void {
   if (globalScope[PATCHED]) return;
   globalScope[PATCHED] = true;
 
+  // Lines printed within the same millisecond belong to the same event
+  // (one request's worth of output), so only the first of a burst carries the
+  // stamp. The rest are printed bare — a column of near-identical timestamps
+  // is noise, and the eye needs the stamp only to place the burst in time.
+  let lastStamp = "";
+
   const methods = ["log", "info", "warn", "error", "debug"] as const;
   for (const method of methods) {
     const original = console[method] as (...args: unknown[]) => void;
     if (typeof original !== "function") continue;
     console[method] = (...args: unknown[]): void => {
-      const stamp = formatLogTimestamp();
+      const { stamp, repeat } = formatLogStampSmart(lastStamp);
+      lastStamp = stamp;
       const [first, ...rest] = args;
-      if (typeof first === "string") {
+      if (repeat) {
+        original.call(console, ...args);
+      } else if (typeof first === "string") {
         original.call(console, `[${stamp}] ${first}`, ...rest);
       } else {
         original.call(console, `[${stamp}]`, ...args);
       }
     };
   }
+}
+
+/**
+ * Decide whether this line needs its own timestamp.
+ *
+ * Lines printed within the same millisecond belong to the same event, so only
+ * the first carries the stamp. Pure, so it can be tested without touching the
+ * global console.
+ */
+export function formatLogStampSmart(lastStamp: string, now: Date = new Date()): { stamp: string; repeat: boolean } {
+  const stamp = formatLogTimestamp(now);
+  return { stamp, repeat: stamp === lastStamp };
 }

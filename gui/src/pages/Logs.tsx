@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { useI18n, LOCALES } from "../i18n";
 import { formatTokens } from "../format-tokens";
 import { statusCodeInfo } from "../status-codes";
@@ -107,6 +107,11 @@ export default function Logs({ apiBase }: { apiBase: string }) {
   // card wears on the Providers page. The logs endpoint only knows the name.
   const [providerAdapters, setProviderAdapters] = useState<Record<string, string>>({});
   const [autoRefresh, setAutoRefresh] = useState(true);
+  // The table is newest-first, so "following" means staying pinned at the top
+  // where new rows land. Scroll away and you are reading history, not the
+  // live edge.
+  const [followLatest, setFollowLatest] = useState(true);
+  const tableWrapRef = useRef<HTMLDivElement | null>(null);
   const [detail, setDetail] = useState<LogEntry | null>(null);
   const localeTag = LOCALES.find(l => l.code === locale)?.htmlLang;
 
@@ -138,6 +143,19 @@ export default function Logs({ apiBase }: { apiBase: string }) {
 
   const statusColor = (s: number) => s >= 200 && s < 300 ? "var(--green)" : s >= 400 ? "var(--red)" : "var(--amber)";
 
+  useEffect(() => {
+    if (!followLatest) return;
+    tableWrapRef.current?.scrollTo({ top: 0 });
+  }, [logs, followLatest]);
+
+  const clearLogs = async () => {
+    if (!confirm(t("logs.clearConfirm"))) return;
+    try {
+      await fetch(`${apiBase}/api/logs`, { method: "DELETE" });
+      setLogs([]);
+    } catch { /* ignore */ }
+  };
+
   const detailInfo = detail ? statusCodeInfo(detail.status, locale) : null;
 
   /** The accent of the provider that served this row (name -> adapter -> color). */
@@ -152,13 +170,20 @@ export default function Logs({ apiBase }: { apiBase: string }) {
           <input type="checkbox" checked={autoRefresh} onChange={e => setAutoRefresh(e.target.checked)} />
           {t("logs.autoRefresh")}
         </label>
+        <label className="muted" style={{ fontSize: 13, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 6 }}>
+          <input type="checkbox" checked={followLatest} onChange={e => setFollowLatest(e.target.checked)} />
+          {t("logs.followLatest")}
+        </label>
+        <button type="button" className="btn btn-ghost btn-sm" onClick={clearLogs}>
+          {t("logs.clear")}
+        </button>
       </div>
       <p className="page-sub">{t("logs.subtitle")}</p>
 
       {logs.length === 0 ? (
         <EmptyState title={t("logs.noRequests")} />
       ) : (
-        <div className="tbl-wrap">
+        <div className="tbl-wrap" ref={tableWrapRef}>
           <table className="tbl logs-tbl">
             <thead>
              <tr>

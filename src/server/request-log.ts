@@ -7,6 +7,11 @@ import type { OcxUsage } from "../types";
 import { redactSecretString } from "../lib/redact";
 import { summarizeUpstreamErrorBody } from "../lib/upstream-error-body";
 import {
+  appendRequestLogEntry,
+  clearRequestLogFile,
+  readRequestLogEntries,
+} from "./request-log-store";
+import {
   appendUsageEntry,
   usageForFinalLog,
   usageStatusForFinalLog,
@@ -115,12 +120,18 @@ export interface RequestLogEntry {
 }
 
 const requestLog: RequestLogEntry[] = [];
-const MAX_LOG_SIZE = 200;
+/**
+ * In-memory cap. The DURABLE copy lives in request-log.jsonl and is capped by
+ * SIZE (see request-log-store.ts); this is only the working set the GUI
+ * serves from, so it is generous enough to cover a busy day.
+ */
+const MAX_LOG_SIZE = 2_000;
 let requestLogSeq = 0;
 
 export function addRequestLog(entry: RequestLogEntry) {
   requestLog.push(entry);
   if (requestLog.length > MAX_LOG_SIZE) requestLog.shift();
+  persistRequestLogEntry(entry);
   try {
     appendUsageEntry({
       requestId: entry.requestId,
@@ -137,6 +148,47 @@ export function addRequestLog(entry: RequestLogEntry) {
   } catch {
     /* request logging must never fail a user request */
   }
+}
+
+/**
+ * Append the entry to the durable log. Skipped under `bun test` so a test
+ * suite never writes into the operator's real config directory.
+ */
+function persistRequestLogEntry(entry: RequestLogEntry): void {
+  if (process.env["NODE_ENV"] === "test") return;
+  try {
+    appendRequestLogEntry(entry);
+  } catch {
+    /* request logging must never fail a user request */
+  }
+}
+
+/**
+ * Load the persisted log back into memory at startup, so a restart does not
+ * erase the Logs page. Entries are plain metadata; malformed lines are
+ * dropped by the store.
+ */
+export function hydrateRequestLog(): number {
+  if (process.env["NODE_ENV"] === "test") return 0;
+  let restored = 0;
+  try {
+    for (const raw of readRequestLogEntries()) {
+      const entry = raw as RequestLogEntry;
+      if (!entry || typeof entry.requestId !== "string" || typeof entry.timestamp !== "number") continue;
+      requestLog.push(entry);
+      restored++;
+    }
+    while (requestLog.length > MAX_LOG_SIZE) requestLog.shift();
+  } catch {
+    /* a broken file must not stop the proxy */
+  }
+  return restored;
+}
+
+/** Clear both the in-memory list and the durable file (GUI "clear" button). */
+export function clearRequestLog(): void {
+  requestLog.length = 0;
+  clearRequestLogFile();
 }
 
 export function nextRequestLogId(timestamp = Date.now()): string {

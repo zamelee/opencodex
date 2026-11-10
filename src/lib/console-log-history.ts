@@ -84,12 +84,21 @@ function readTailLines(path: string, maxLines: number): string[] {
 
 /** Read one log file into history entries. */
 export function readConsoleLogHistoryFile(path: string, level: string, maxLines = MAX_LINES_PER_FILE): ConsoleHistoryEntry[] {
-  return readTailLines(path, maxLines).map(raw => {
+  const entries = readTailLines(path, maxLines).map(raw => {
     // Keep the raw line (timestamp prefix included): live lines in the buffer also
     // carry their prefix, so the browser shows one uniform format for old and new.
     const { at } = parseLogTimestamp(raw);
     return { at, level, line: raw };
   });
+  // A line printed in the same millisecond as the one before it carries no
+  // stamp of its own (see log-timestamp.ts). Inherit the previous line's time
+  // so sorting stays truthful.
+  let lastAt = 0;
+  for (const entry of entries) {
+    if (entry.at > 0) lastAt = entry.at;
+    else entry.at = lastAt;
+  }
+  return entries;
 }
 
 /**

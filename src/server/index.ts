@@ -27,6 +27,7 @@ import { loadGateCircuit } from "../lib/upstream-gate-circuit";
 import { installConsoleLogCapture } from "../lib/console-log-capture";
 import { collectConsoleLogHistory, resolveConsoleLogPaths } from "../lib/console-log-history";
 import { seedConsoleLogHistory } from "../lib/console-log-buffer";
+import { hydrateRequestLog } from "./request-log";
 import {
   CodexAccountCooldownError,
   CodexAuthContextError,
@@ -167,6 +168,9 @@ export function startServer(port?: number) {
   } catch {
     /* history is a nicety; never block startup on it */
   }
+  // Bring back the persisted request log so the Logs page is not empty after
+  // a restart.
+  hydrateRequestLog();
   const config = loadConfig();
   applyProxyEnv(config);
   assertServerAuthConfig(config);

@@ -259,7 +259,13 @@ export default function Debug({ apiBase }: { apiBase: string }) {
                 ))}
               </div>
             )}
-            <button type="button" className="btn btn-ghost btn-sm" disabled={debugBusy} onClick={() => void resetDebug()}>
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              disabled={debugBusy}
+              title={t("debug.resetHint")}
+              onClick={() => void resetDebug()}
+            >
               {t("debug.reset")}
             </button>
           </div>
