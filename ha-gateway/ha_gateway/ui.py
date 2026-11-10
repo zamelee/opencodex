@@ -177,6 +177,12 @@ class ManagePane(ttk.Frame):
     def __init__(self, master, app) -> None:
         super().__init__(master)
         self.app = app
+        self.on_collapse = None
+        head = ttk.Frame(self)
+        head.pack(fill="x", padx=10, pady=(8, 0))
+        ttk.Label(head, text="管理", font=("Microsoft YaHei UI", 9, "bold")).pack(side="left")
+        ttk.Button(head, text="◀", width=3, command=self._collapse).pack(side="right")
+        ttk.Separator(self).pack(fill="x", padx=10, pady=(6, 0))
         self.scroll = ScrollFrame(self)
         self.scroll.pack(fill="both", expand=True)
         inner = self.scroll.inner
@@ -196,6 +202,10 @@ class ManagePane(ttk.Frame):
         self.sec_set = Section(inner, "网关设置")
         self.settings_pane = SettingsPane(self.sec_set.body, app)
         self.settings_pane.pack(fill="x")
+
+    def _collapse(self) -> None:
+        if self.on_collapse:
+            self.on_collapse()
 
     def show_section(self, name: str) -> None:
         mapping = {
@@ -226,13 +236,23 @@ class Topology(ttk.Frame):
         self._edges: list[dict] = []
         self._active_edge: str | None = None
         self._slot_map: dict[str, object] = {}
+        self._node_pos: dict[str, tuple] = {}
         self._phase = 0
         self.on_select = None
+        self._editing: dict | None = None
+        self._editor_frame: ttk.Frame | None = None
+        self._editor_item = None
+        self.on_changed = None
         self.bind("<Configure>", lambda e: self.redraw())
         self.canvas.bind("<Button-1>", self._on_click)
         self.after(60, self._animate)
 
     def redraw(self) -> None:
+        if self._editing is not None:
+            return  # 正在编辑时不重绘，避免抢走输入焦点
+        self._redraw_core()
+
+    def _redraw_core(self) -> None:
         c = self.canvas
         c.delete("all")
         self._nodes = []
@@ -243,6 +263,7 @@ class Topology(ttk.Frame):
 
         ups = self.app.upstreams()
         keys = self.app.storage.list_client_keys()
+        self._node_pos = {}
 
         gw = (w // 2, h // 2)
         slot_count = max(self.MIN_SLOTS, len(ups))
@@ -256,9 +277,11 @@ class Topology(ttk.Frame):
             x, y = up_pos[i]
             u = ups[i] if i < len(ups) else None
             owner = u.id if u is not None else f"slot{i}"
+            self._node_pos[owner] = (x, y)
             self._edge(c, (x, y + self.NODE_H // 2), gw, "up", owner, u is not None)
         for i, k in enumerate(keys):
             x, y = key_pos[i]
+            self._node_pos[k.id] = (x, y)
             self._edge(c, gw, (x, y - self.NODE_H // 2), "down", k.id, True)
 
         for i in range(slot_count):
@@ -312,6 +335,218 @@ class Topology(ttk.Frame):
         self._slot_map["key:add"] = ("key_add", None)
 
         self._legend(c, w, h)
+        if self._editing:
+            self._build_editor()
+
+    # ---------- 编辑卡 ----------
+
+    def _build_editor(self) -> None:
+        kind = self._editing.get("kind")
+        ident = self._editing.get("id")
+        pos = self._node_pos.get(ident if kind != "gw" else "gw", (self.canvas.winfo_width() // 2, 80))
+        frame = ttk.LabelFrame(self.canvas, text=self._editor_title(kind), padding=8)
+        self._editor_vars = {}
+        if kind in ("upstream", "slot"):
+            u = next((x for x in self.app.upstreams() if x.id == ident), None) if kind == "upstream" else None
+            self._form_fields(frame, u)
+            btns = ttk.Frame(frame)
+            btns.pack(fill="x", pady=(6, 0))
+            if kind == "upstream":
+                ttk.Button(btns, text="保存", command=self._save_editor).pack(side="left")
+                ttk.Button(btns, text="探测", command=self._probe_editor).pack(side="left", padx=4)
+                ttk.Button(btns, text="删除", command=self._delete_editor).pack(side="left")
+            else:
+                ttk.Button(btns, text="添加", command=self._save_editor).pack(side="left")
+            ttk.Button(btns, text="取消", command=self.close_editor).pack(side="right")
+        elif kind == "key":
+            k = next((x for x in self.app.storage.list_client_keys() if x.id == ident), None)
+            body = ttk.Frame(frame)
+            body.pack(fill="x")
+            ttk.Label(body, text=k.label if k else "?").pack(anchor="w")
+            ttk.Label(body, text=(k.key if k else ""), foreground="#1a73e8").pack(anchor="w")
+            btns = ttk.Frame(frame)
+            btns.pack(fill="x", pady=(6, 0))
+            ttk.Button(btns, text="复制", command=lambda: self._copy_key(k)).pack(side="left")
+            ttk.Button(btns, text="删除", command=self._delete_editor).pack(side="left", padx=4)
+            ttk.Button(btns, text="取消", command=self.close_editor).pack(side="right")
+        elif kind == "gw":
+            s = self.app.settings
+            body = ttk.Frame(frame)
+            body.pack(fill="x")
+            ttk.Label(body, text=f"协议　{s.protocol}").pack(anchor="w")
+            ttk.Label(body, text=f"监听　{s.listen_host}:{s.listen_port}").pack(anchor="w")
+            ttk.Label(body, text=f"上游　{len(self.app.upstreams())} 条").pack(anchor="w")
+            btns = ttk.Frame(frame)
+            btns.pack(fill="x", pady=(6, 0))
+            ttk.Button(btns, text="打开管理", command=self._open_manage).pack(side="left")
+            ttk.Button(btns, text="取消", command=self.close_editor).pack(side="right")
+
+        # 下半区的节点把卡片放到上方，避免出画布；上半区放下方并右偏避开连线
+        ch = self.canvas.winfo_height()
+        below = pos[1] < ch / 2
+        if below:
+            x = max(8, min(pos[0] + 30, self.canvas.winfo_width() - 276))
+            y = pos[1] + self.NODE_H // 2 + 26
+            anchor = "nw"
+        else:
+            x = max(8, min(pos[0] + 30, self.canvas.winfo_width() - 276))
+            y = pos[1] - self.NODE_H // 2 - 8
+            anchor = "sw"
+        self._editor_item = self.canvas.create_window(
+            x, y, window=frame, anchor=anchor
+        )
+        self._editor_frame = frame
+
+    def _editor_title(self, kind: str) -> str:
+        return {
+            "upstream": "编辑上游",
+            "slot": "新增上游",
+            "key": "下游 Key",
+            "gw": "HA Gateway",
+        }.get(kind, "")
+
+    def _form_fields(self, frame, u) -> None:
+        form = ttk.Frame(frame)
+        form.pack(fill="x")
+        specs = [
+            ("name", "名称", getattr(u, "name", "")),
+            ("provider", "Provider", getattr(u, "provider", "")),
+            ("base_url", "Base URL", getattr(u, "base_url", "")),
+            ("api_key", "API Key", getattr(u, "api_key", "")),
+        ]
+        for i, (key, label, val) in enumerate(specs):
+            ttk.Label(form, text=label).grid(row=i, column=0, sticky="w", pady=2)
+            var = tk.StringVar(value=val or "")
+            self._editor_vars[key] = var
+            entry = ttk.Entry(form, textvariable=var, width=26, show="•" if key == "api_key" else "")
+            entry.grid(row=i, column=1, sticky="ew", pady=2)
+        form.columnconfigure(1, weight=1)
+
+    # ---------- 编辑动作 ----------
+
+    def _save_editor(self) -> None:
+        from .models import Upstream
+
+        v = self._editor_vars
+        kind = self._editing.get("kind")
+        ident = self._editing.get("id")
+        if kind == "slot":
+            if not v["name"].get() or not v["base_url"].get():
+                messagebox.showwarning("缺少参数", "名称与 Base URL 必填")
+                return
+            self.app.storage.add_upstream(
+                Upstream(
+                    id="",
+                    name=v["name"].get(),
+                    provider=v["provider"].get() or "unknown",
+                    base_url=v["base_url"].get(),
+                    api_key=v["api_key"].get(),
+                    protocol=self.app.settings.protocol,
+                )
+            )
+        else:
+            u = next((x for x in self.app.upstreams() if x.id == ident), None)
+            if u is None:
+                self.close_editor()
+                return
+            u.name = v["name"].get() or u.name
+            u.provider = v["provider"].get() or u.provider
+            u.base_url = v["base_url"].get() or u.base_url
+            if v["api_key"].get():
+                u.api_key = v["api_key"].get()
+            self.app.storage.update_upstream(u)
+        self._editing = None
+        self._destroy_editor()
+        if self.on_changed:
+            self.on_changed()
+        self.redraw_now()
+
+    def _probe_editor(self) -> None:
+        ident = self._editing.get("id")
+
+        def worker():
+            res = self.app.probe_upstream(ident)
+            self.after(0, lambda: messagebox.showinfo(
+                "探测结果",
+                f"HTTP {res.get('status')}\n耗时 {res.get('ms')}ms\n\n{res.get('body', '')}",
+            ))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _delete_editor(self) -> None:
+        ident = self._editing.get("id")
+        kind = self._editing.get("kind")
+        if kind == "upstream":
+            self.app.storage.delete_upstream(ident)
+        elif kind == "key":
+            self.app.storage.delete_client_key(ident)
+        self._editing = None
+        self._destroy_editor()
+        if self.on_changed:
+            self.on_changed()
+        self.redraw_now()
+
+    def _copy_key(self, k) -> None:
+        if k is None:
+            return
+        self.clipboard_clear()
+        self.clipboard_append(k.key)
+        self.update()
+
+    def _open_manage(self) -> None:
+        self.close_editor()
+        if self.on_select:
+            self.on_select("gw", None)
+
+    # ---------- 节点就地编辑 ----------
+
+    def open_editor(self, kind: str, ident) -> None:
+        self._editing = {"kind": kind, "id": ident}
+        self.redraw_now()
+
+    def close_editor(self) -> None:
+        self._editing = None
+        self._destroy_editor()
+        self.redraw_now()
+
+    def redraw_now(self) -> None:
+        """强制重绘（编辑中也会重建编辑卡，但保留输入内容）。"""
+        saved = self._editor_values() if self._editing else None
+        self._destroy_editor()
+        self._redraw_core()
+        if saved:
+            self._fill_editor(saved)
+
+    def _editor_values(self) -> dict | None:
+        if self._editor_frame is None:
+            return None
+        vals = {}
+        for name, var in getattr(self, "_editor_vars", {}).items():
+            try:
+                vals[name] = var.get()
+            except Exception:
+                pass
+        return vals
+
+    def _fill_editor(self, vals: dict) -> None:
+        for name, var in getattr(self, "_editor_vars", {}).items():
+            if name in vals:
+                try:
+                    var.set(vals[name])
+                except Exception:
+                    pass
+
+    def _destroy_editor(self) -> None:
+        if self._editor_frame is not None:
+            self._editor_frame.destroy()
+            self._editor_frame = None
+        if self._editor_item is not None:
+            try:
+                self.canvas.delete(self._editor_item)
+            except tk.TclError:
+                pass
+            self._editor_item = None
+        self._editor_vars = {}
 
     def _layout(self, n: int, w: int, y: int) -> list[tuple[int, int]]:
         if n == 0:
@@ -440,9 +675,14 @@ class Topology(ttk.Frame):
             for tag in self.canvas.gettags(item):
                 if tag in self._slot_map:
                     kind, ident = self._slot_map[tag]
-                    self.on_node_click(kind, ident)
+                    if kind in ("upstream", "slot", "key"):
+                        self.open_editor(kind, ident)
+                    elif kind == "gw":
+                        self.open_editor("gw", None)
+                    elif kind == "key_add":
+                        self.on_node_click(kind, ident)
                     return
-        self.on_node_click("blank", None)
+        self.close_editor()
 
     def on_node_click(self, kind: str, ident) -> None:
         """节点点击回调，由 MainWindow 接管（打开抽屉并定位）。"""
@@ -804,8 +1044,11 @@ class MainWindow(tk.Tk):
 
         top = ttk.Frame(self)
         top.pack(fill="x", padx=8, pady=(8, 0))
-        self.status = tk.StringVar(value="运行中")
-        ttk.Label(top, textvariable=self.status).pack(side="left")
+        self.dot = tk.Label(top, text="●", foreground="#2e7d32", font=("Segoe UI", 11))
+        self.dot.pack(side="left")
+        self.status = tk.StringVar(value="")
+        ttk.Label(top, textvariable=self.status).pack(side="left", padx=(4, 8))
+        ttk.Button(top, text="复制地址", command=self._copy_addr).pack(side="left")
         ttk.Button(top, text="刷新拓扑", command=self._refresh_topology).pack(side="right")
         self.manage_btn = ttk.Button(top, text="管理", command=self._toggle_drawer)
         self.manage_btn.pack(side="right", padx=6)
@@ -828,6 +1071,8 @@ class MainWindow(tk.Tk):
         self.rules_pane = self.manage.rules_pane
         self.settings_pane = self.manage.settings_pane
         self.topology.on_select = self._on_node_select
+        self.topology.on_changed = self._on_data_changed
+        self.manage.on_collapse = lambda: self._toggle_drawer(False)
         self._drawer_open = False
 
         self.log_pane = LogPane(self, app)
@@ -840,6 +1085,27 @@ class MainWindow(tk.Tk):
         self.upstream_editor.refresh()
         self.topology.redraw()
         self.after(1500, self._tick)
+
+    def _on_data_changed(self) -> None:
+        """拓扑上改了数据，刷新抽屉里的列表。"""
+        self.upstream_editor.refresh()
+        self.key_pane.refresh()
+
+    def _copy_addr(self) -> None:
+        s = self.app.settings
+        url = f"http://{s.listen_host}:{s.listen_port}/v1/"
+        self.clipboard_clear()
+        self.clipboard_append(url)
+        self.status.set(f"{url}　已复制")
+
+    def _refresh_status(self) -> None:
+        s = self.app.settings
+        running = self.app._started.is_set()
+        self.dot.configure(foreground="#2e7d32" if running else "#b3261e")
+        self.status.set(
+            f"{s.listen_host}:{s.listen_port}　{s.protocol}"
+            + ("" if running else "　未监听")
+        )
 
     # ---------- 右侧抽屉 ----------
 
@@ -856,7 +1122,8 @@ class MainWindow(tk.Tk):
                 except Exception:
                     pass
                 self.after(80, self.topology.redraw)
-            self.manage_btn.configure(text="收起管理")
+                self.after(120, self.topology.redraw_now)
+            self.manage_btn.configure(text="◀")
         else:
             if self._drawer_open:
                 try:
@@ -865,7 +1132,12 @@ class MainWindow(tk.Tk):
                     pass
                 self._drawer_open = False
                 self.after(80, self.topology.redraw)
-            self.manage_btn.configure(text="管理")
+                self.after(120, self.topology.redraw_now)
+            self.manage_btn.configure(text="管理 ▶")
+
+    def _toggle_arrow(self, open_now: bool) -> None:
+        """抽屉开着时，顶部按钮变成收缩箭头。"""
+        self.manage_btn.configure(text="◀" if open_now else "管理 ▶")
 
     def _on_node_select(self, kind: str, ident) -> None:
         if kind == "blank":
@@ -891,6 +1163,7 @@ class MainWindow(tk.Tk):
     def _tick(self) -> None:
         self.topology.redraw()
         self.upstream_editor.refresh()
+        self._refresh_status()
         self.after(2000, self._tick)
 
     def _refresh_topology(self) -> None:
