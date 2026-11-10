@@ -36,6 +36,10 @@ import {
   type CodexUpstreamOutcome,
 } from "../codex/routing";
 import { fetchWithResetRetry } from "../lib/upstream-retry";
+import {
+  isMalformedBodyRefusal,
+  MALFORMED_BODY_MAX_ATTEMPTS,
+} from "../lib/upstream-malformed-body";
 import { isUsageDebugEnabled } from "../usage/debug";
 import { readJsonRequestBody, DecompressedBodyTooLargeError, UnsupportedContentEncodingError } from "./request-decompress";
 import { resolveAdapter, resolveWireProtocolOverride } from "./adapter-resolve";
@@ -1237,6 +1241,18 @@ export async function handleResponses(
     // The wait is bounded, and the refusal happens BEFORE the upstream runs the
     // model, so a retry is never billed twice.
     let capturedErrorText: string | null = null;
+    // The response whose body `capturedErrorText` came from. A retry installs a
+    // NEW response, and that response's body must be read again - otherwise we
+    // would keep testing the previous attempt's text (and report a stale
+    // reason to the client).
+    let capturedFrom: Response | null = null;
+    const readErrorText = async (res: Response): Promise<string> => {
+      if (capturedFrom === res) return capturedErrorText ?? "";
+      const text = await res.text().catch(() => "");
+      capturedErrorText = text;
+      capturedFrom = res;
+      return text;
+    };
     const quotaPolicy = resolveQuotaRetryPolicy(route.provider);
     let quotaAttempts = 0;
     let quotaKeySwitches = 0;
@@ -1245,8 +1261,9 @@ export async function handleResponses(
     // recovered it, and reading the body of a successful response would eat it.
     if (quotaPolicy.enabled && !upstreamResponse.ok) {
       while (quotaAttempts < quotaPolicy.maxAttempts) {
-        const text: string = capturedErrorText ?? await upstreamResponse.text().catch(() => "");
-        capturedErrorText = text;
+        // Only a failing response has an error body to read; reading a
+        // successful one would consume the stream the client is waiting for.
+        const text: string = upstreamResponse.ok ? "" : await readErrorText(upstreamResponse);
         if (!isQuotaExhausted(upstreamResponse.status, text)) break;
         const rotated = hasKeyPoolFailover(route.provider)
           ? rotateKeyOnQuota(config, route.providerName, Date.now(), route.provider.apiKey)
@@ -1295,8 +1312,52 @@ export async function handleResponses(
         );
       }
     }
+    // Malformed-body refusal: the upstream's own gateway says it received a
+    // body that was not valid JSON.
+    //
+    // OUR body is built by `JSON.stringify`, so it is syntactically valid JSON
+    // by construction - the mangling happened on the way out (a relay that
+    // truncated or corrupted the body). That makes this refusal TRANSIENT:
+    // the very same conversation succeeds seconds later with the same shape.
+    // Passed through as a 400 it is fatal to the turn (Codex kills the
+    // conversation), so retry a couple of times on a fresh connection first.
+    let malformedBodyRetries = 0;
+    while (!upstreamResponse.ok && malformedBodyRetries < MALFORMED_BODY_MAX_ATTEMPTS) {
+      const text = await readErrorText(upstreamResponse);
+      if (!isMalformedBodyRefusal(upstreamResponse.status, text)) break;
+      malformedBodyRetries += 1;
+      console.warn(
+        `[${route.providerName}] upstream received a malformed request body `
+        + `(attempt ${malformedBodyRetries}/${MALFORMED_BODY_MAX_ATTEMPTS}); retrying`,
+      );
+      const retryAdapter = resolveAdapter(
+        resolveWireProtocolOverride(route.providerName, route.modelId, route.provider),
+        config.cacheRetention,
+      );
+      const retryRequest = await retryAdapter.buildRequest(parsed, { headers: selectedForwardHeaders });
+      logCtx.promptComposition = summarizeRequestBody(retryRequest.body);
+      try {
+        upstreamResponse = retryAdapter.fetchResponse
+          ? await retryAdapter.fetchResponse(retryRequest, { abortSignal: upstream.signal, timeoutMs: connectMs })
+          : await fetchWithHeaderTimeout(retryRequest.url, {
+              method: retryRequest.method, headers: retryRequest.headers, body: retryRequest.body,
+            }, upstream.signal, connectMs);
+      } catch (err) {
+        cleanupUpstreamAbort();
+        upstream.abort();
+        const msg = err instanceof Error && err.name === "TimeoutError"
+          ? `Provider connect timeout after ${connectMs}ms`
+          : `Provider unreachable: ${err instanceof Error ? err.message : String(err)}`;
+        return formatErrorResponse(502, "upstream_error", msg);
+      }
+    }
+    if (malformedBodyRetries > 0) {
+      logCtx.malformedBodyRetries = malformedBodyRetries;
+    }
     if (!upstreamResponse.ok) {
-      const errorText = capturedErrorText ?? await upstreamResponse.text().catch(() => "unknown error");
+      const errorText = capturedFrom === upstreamResponse
+        ? capturedErrorText ?? "unknown error"
+        : await upstreamResponse.text().catch(() => "unknown error");
       cleanupUpstreamAbort();
       // Record WHAT the upstream said, not just its status code. A JSON error
       // envelope is parsed for its message; an HTML gateway page or a plain-text
@@ -1405,6 +1466,19 @@ export async function handleResponses(
           "insufficient_quota",
           `上游额度不足（insufficient_quota）：已重试 ${quotaAttempts} 次（换 key ${quotaKeySwitches} 次${waited}），`
           + `余额仍未恢复。原始信息: ${redactSecretString(upstreamMessage.slice(0, 300))}`,
+        );
+      }
+      // The upstream's gateway kept refusing bodies it could not parse, even
+      // after we retried on fresh connections. This is a transport fault on
+      // their side, not a verdict on the request, so report it as a server
+      // fault (5xx) rather than a 400: a 400 is fatal to the turn and Codex
+      // would drop the conversation on a failure it could have retried.
+      if (malformedBodyRetries > 0 && isMalformedBodyRefusal(upstreamResponse.status, errorText)) {
+        return formatErrorResponse(
+          502,
+          "upstream_error",
+          `上游转发时请求体损坏（upstream received a malformed request body）：`
+          + `已重试 ${malformedBodyRetries} 次仍未成功。原始信息: ${redactSecretString(upstreamMessage.slice(0, 300))}`,
         );
       }
       return formatErrorResponse(upstreamResponse.status, "upstream_error", `Provider error ${upstreamResponse.status}: ${redactSecretString(upstreamMessage.slice(0, 500))}`);

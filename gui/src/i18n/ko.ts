@@ -522,6 +522,8 @@ export const ko: Record<TKey, string> = {
   "logs.col.upstreamReason": "업스트림 원인",
   "logs.col.quotaRecovery": "잔액 복구",
   "logs.detailQuotaRecovery": "{retries}회 재시도 (키 전환 {switches}회, 대기 {waits}회)",
+  "logs.col.malformedBodyRecovery": "본문 재전송",
+  "logs.detailMalformedBodyRecovery": "업스트림이 잘못된 본문을 받음, {retries}회 재전송",
   "logs.col.duration": "소요 시간",
   "logs.tokens.reported": "측정됨",
   "logs.tokens.unreported": "미보고",

@@ -522,6 +522,8 @@ export const en = {
   "logs.col.upstreamReason": "Upstream reason",
   "logs.col.quotaRecovery": "Quota recovery",
   "logs.detailQuotaRecovery": "{retries} retries ({switches} key switches, {waits} waits)",
+  "logs.col.malformedBodyRecovery": "Body resent",
+  "logs.detailMalformedBodyRecovery": "Upstream received a malformed body; resent {retries} times",
   "logs.col.duration": "Duration",
   "logs.tokens.reported": "reported",
   "logs.tokens.unreported": "unreported",

@@ -510,6 +510,8 @@ export const de = {
   "logs.col.upstreamReason": "Upstream-Grund",
   "logs.col.quotaRecovery": "Guthaben-Erholung",
   "logs.detailQuotaRecovery": "{retries} Versuche ({switches} Key-Wechsel, {waits} Wartezeiten)",
+  "logs.col.malformedBodyRecovery": "Body erneut gesendet",
+  "logs.detailMalformedBodyRecovery": "Der Upstream erhielt einen beschädigten Body; {retries}-mal erneut gesendet",
   "logs.col.duration": "Dauer",
   "logs.tokens.reported": "gemeldet",
   "logs.tokens.unreported": "nicht gemeldet",

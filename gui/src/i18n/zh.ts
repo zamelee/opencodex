@@ -522,6 +522,8 @@ export const zh: Record<TKey, string> = {
   "logs.col.upstreamReason": "上游原因",
   "logs.col.quotaRecovery": "额度恢复",
   "logs.detailQuotaRecovery": "重试 {retries} 次（换 key {switches} 次，等待 {waits} 次）",
+  "logs.col.malformedBodyRecovery": "请求体重发",
+  "logs.detailMalformedBodyRecovery": "上游转发时请求体损坏，已重发 {retries} 次",
   "logs.col.duration": "耗时",
   "logs.tokens.reported": "已上报",
   "logs.tokens.unreported": "未上报",

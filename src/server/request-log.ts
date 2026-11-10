@@ -80,6 +80,12 @@ export interface RequestLogContext {
   quotaRetries?: number;
   quotaKeySwitches?: number;
   quotaWaits?: number;
+  /**
+   * Extra attempts spent because the upstream's gateway refused a body it
+   * could not parse as JSON (a mangled relay, not a verdict on the request).
+   * Zero/absent means the body was accepted as-is.
+   */
+  malformedBodyRetries?: number;
 }
 
 export interface PromptCompositionSummary {
@@ -132,6 +138,8 @@ export interface RequestLogEntry {
   quotaKeySwitches?: number;
   /** How many of those attempts waited before retrying. */
   quotaWaits?: number;
+  /** Extra attempts spent on an upstream "body is not valid JSON" refusal. */
+  malformedBodyRetries?: number;
 }
 
 const requestLog: RequestLogEntry[] = [];
@@ -523,6 +531,7 @@ export function addFinalRequestLog(
     ...(logCtx.quotaRetries ? { quotaRetries: logCtx.quotaRetries } : {}),
     ...(logCtx.quotaKeySwitches ? { quotaKeySwitches: logCtx.quotaKeySwitches } : {}),
     ...(logCtx.quotaWaits ? { quotaWaits: logCtx.quotaWaits } : {}),
+    ...(logCtx.malformedBodyRetries ? { malformedBodyRetries: logCtx.malformedBodyRetries } : {}),
   });
   if (isUsageDebugEnabled()) {
     appendUsageDebug({

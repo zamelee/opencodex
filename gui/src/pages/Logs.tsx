@@ -51,6 +51,7 @@ interface LogEntry {
   };
   /** Extra attempts spent recovering from an exhausted upstream balance. */
   quotaRetries?: number;
+  malformedBodyRetries?: number;
   quotaKeySwitches?: number;
   quotaWaits?: number;
 }
@@ -331,6 +332,16 @@ export default function Logs({ apiBase }: { apiBase: string }) {
                       retries: detail.quotaRetries,
                       switches: detail.quotaKeySwitches ?? 0,
                       waits: detail.quotaWaits ?? 0,
+                    })}
+                  </span>
+                </>
+              ) : null}
+              {detail.malformedBodyRetries ? (
+                <>
+                  <span className="muted">{t("logs.col.malformedBodyRecovery")}</span>
+                  <span className="mono">
+                    {t("logs.detailMalformedBodyRecovery", {
+                      retries: detail.malformedBodyRetries,
                     })}
                   </span>
                 </>
