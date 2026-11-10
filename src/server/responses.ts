@@ -45,6 +45,7 @@ import { resolveGateLimit } from "../providers/gate-limit";
 import type { WsData } from "./ws-bridge";
 import { registerTurn, trackStreamLifetime, unregisterTurn } from "./lifecycle";
 import { redactSecretString } from "../lib/redact";
+import { isContentPolicyRejection } from "../lib/errors";
 import { summarizeRequestBody } from "../lib/token-composition";
 import {
   COMPACTION_BUDGET_FACTOR,
@@ -1313,6 +1314,19 @@ export async function handleResponses(
       const upstreamMessage = parseUpstreamRejection(errorText).rejected
         ? errorText
         : summarizeUpstreamErrorBody(errorText, upstreamResponse.status, upstreamResponse.headers.get("content-type")).summary;
+      // A content-policy refusal arrives as HTTP 500 from some upstreams, but it
+      // is a verdict on the CONTENT, not a transient server fault. Reporting it
+      // as 500 makes Codex retry the same turn five times and then blame "high
+      // demand". Downgrade it to 400 so the turn fails once, with the reason
+      // the upstream actually gave.
+      const policyText = logCtx.upstreamError ?? upstreamMessage;
+      if (upstreamResponse.status >= 500 && isContentPolicyRejection(policyText)) {
+        return formatErrorResponse(
+          400,
+          "invalid_request_error",
+          `上游内容审核拒绝（content policy rejection），本轮请求内容被上游策略拦截，重试无效。原始信息: ${redactSecretString(String(policyText).slice(0, 300))}`,
+        );
+      }
       return formatErrorResponse(upstreamResponse.status, "upstream_error", `Provider error ${upstreamResponse.status}: ${redactSecretString(upstreamMessage.slice(0, 500))}`);
     }
   }

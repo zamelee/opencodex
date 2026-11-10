@@ -4,6 +4,25 @@ export interface OcxErrorPayload {
   code: string | null;
 }
 
+/**
+ * Upstreams that answer a CONTENT-POLICY refusal with a 5xx status.
+ *
+ * The MiniMax-family relays reply `HTTP 500` with a body like
+ * `input new_sensitive (1026)`. Codex reads every 5xx as a transient fault:
+ * it retries the same turn five times and finally says "We're currently
+ * experiencing high demand" -- which hides the real reason and spends quota
+ * on every round. The refusal is a decision about the CONTENT, not about the
+ * server, so it must not be reported as a server fault.
+ */
+const CONTENT_POLICY_REJECTION =
+  /new_sensitive|input_sensitive|sensitive[\s_-]*(content|input|text)|content[\s_-]*(filter|moderation|policy)|safety[\s_-]*(filter|violation|system)|内容审核|审核不通过|违规内容|风控/i;
+
+/** Whether an upstream error body describes a content-policy refusal. */
+export function isContentPolicyRejection(message: string | null | undefined): boolean {
+  if (!message) return false;
+  return CONTENT_POLICY_REJECTION.test(message);
+}
+
 export function classifyError(status: number, type: string, message: string): OcxErrorPayload {
   const text = message.toLowerCase();
   if (
@@ -32,6 +51,9 @@ export function classifyError(status: number, type: string, message: string): Oc
     text.includes("daily quota exceeded")
   ) {
     return { message, type: "insufficient_quota", code: "insufficient_quota" };
+  }
+  if (isContentPolicyRejection(message)) {
+    return { message, type: "invalid_request_error", code: "content_policy_violation" };
   }
   if (
     status === 429 ||
@@ -185,6 +207,7 @@ export function httpStatusFromTerminalError(error: {
   if (error.type === "rate_limit_error" || error.code === "rate_limit_exceeded") return 429;
   if (error.type === "authentication_error" || error.code === "invalid_api_key") return 401;
   if (error.type === "insufficient_quota" || error.code === "insufficient_quota") return 429;
+  if (error.code === "content_policy_violation") return 400;
   if (error.type === "server_error" && error.code === "server_is_overloaded") return 503;
   if (error.type === "invalid_request_error") return 400;
   if (error.type === "proxy_error") return 500;
