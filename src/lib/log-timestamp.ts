@@ -6,22 +6,19 @@
  * different incidents reads as one. The timestamp goes FIRST so it can be grepped and so a
  * line's position in the file sorts chronologically.
  *
- * The clock is LOCAL time with an explicit offset: the operator reading the file is at that
- * machine, and "21:45:35" means the time they see on the wall. The offset is printed so a
- * reader in another zone can still place the line.
+ * The clock is LOCAL time: the operator reading the file is at that machine, and "21:45:35"
+ * means the time they see on the wall. The offset is deliberately NOT printed — it made every
+ * line 6 characters longer and nobody ever read it; the file lives on the machine whose clock
+ * it shows.
  */
 
 const PATCHED = Symbol.for("opencodex.logTimestampPatched");
 
-/** Format one instant as `YYYY-MM-DDTHH:MM:SS.mmm+HH:MM`. */
+/** Format one instant as `YYYY-MM-DD HH:MM:SS.mmm` (local time, no offset). */
 export function formatLogTimestamp(now: Date = new Date()): string {
   const pad = (value: number, width = 2): string => String(Math.floor(Math.abs(value))).padStart(width, "0");
-  const offsetMinutes = -now.getTimezoneOffset();
-  const sign = offsetMinutes >= 0 ? "+" : "-";
-  const absOffset = Math.abs(offsetMinutes);
   return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
-    + `T${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}.${pad(now.getMilliseconds(), 3)}`
-    + `${sign}${pad(Math.floor(absOffset / 60))}:${pad(absOffset % 60)}`;
+    + ` ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}.${pad(now.getMilliseconds(), 3)}`;
 }
 
 /**

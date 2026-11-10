@@ -534,7 +534,7 @@ export const ko: Record<TKey, string> = {
   "debug.hintDebug": "이상 징후만 기록합니다: 버려진 잘못된 업스트림 프레임이나 전송 계층 실패. 각각 마스킹된 한 줄(바이트 수, 오류 코드)이며 프레임 내용은 절대 담지 않습니다. 메모리에만 있고 디스크에 쓰지 않습니다.",
   "debug.hintUsage": "응답 본문 앞 2KB를 usage-debug.jsonl에 기록해 토큰 수가 왜 안 맞는지 확인합니다. 실측 비용: 요청당 약 2KB, 약 0.5밀리초, 롤링 상한 약 400KB. 평문이며 대화 내용이 포함됩니다.",
   "debug.hintInjection": "프록시가 Codex에 주입한 내용과 추론 강도 제한 결정을 기록합니다 - 모델명과 문자 수만, 내용은 없습니다. injectionModel이나 effortCap이 설정된 경우에만 의미가 있습니다.",
-  "debug.hintConsole": "프록시의 콘솔 출력(ocx.out.log / ocx.err.log에 남는 것과 동일한 줄)을 메모리에 미러링합니다. 원격 머신의 로그 파일을 열지 않고 여기서 바로 읽을 수 있습니다. 항상 켜져 있으며 별도 스위치가 필요 없습니다.",
+  "debug.hintConsole": "프록시의 콘솔 출력(ocx.out.log / ocx.err.log에 남는 것과 동일한 줄)을 메모리에 미러링합니다. 원격 머신의 로그 파일을 열지 않고 여기서 바로 읽을 수 있습니다. 재시작 후에는 직전 실행의 로그를 다시 읽어오므로 맥락이 사라지지 않습니다. 항상 켜져 있으며 별도 스위치가 필요 없습니다.",
   "debug.sensitivity": "민감도",
   "debug.sensitivityHigh": "높음",
   "debug.sensitivityMedium": "중간",

@@ -25,6 +25,8 @@ import { loadLearnedLimits } from "../lib/upstream-prompt-budget";
 import { loadLearnedScales } from "../lib/upstream-token-scale";
 import { loadGateCircuit } from "../lib/upstream-gate-circuit";
 import { installConsoleLogCapture } from "../lib/console-log-capture";
+import { collectConsoleLogHistory, resolveConsoleLogPaths } from "../lib/console-log-history";
+import { seedConsoleLogHistory } from "../lib/console-log-buffer";
 import {
   CodexAccountCooldownError,
   CodexAuthContextError,
@@ -158,6 +160,13 @@ export function startServer(port?: number) {
   // it. Installed FIRST, before anything logs, so the earliest startup lines
   // are captured too. The original console still runs — this only mirrors.
   installConsoleLogCapture();
+  // Restore the previous run's console output from the launcher's rotated log files so
+  // a restart does not erase the story the operator was reading.
+  try {
+    seedConsoleLogHistory(collectConsoleLogHistory(resolveConsoleLogPaths()));
+  } catch {
+    /* history is a nicety; never block startup on it */
+  }
   const config = loadConfig();
   applyProxyEnv(config);
   assertServerAuthConfig(config);

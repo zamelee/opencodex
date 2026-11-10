@@ -535,7 +535,7 @@ export const en = {
   "debug.hintDebug": "Records only the oddities: a malformed upstream frame we had to drop, or a transport-layer failure. One redacted line each (byte count, error code) - never the frame content. Memory only, never written to disk.",
   "debug.hintUsage": "Records the first 2 KB of every response body to usage-debug.jsonl so you can see why the token counts disagree. Measured cost: ~2 KB and ~0.5 ms per request, rolling cap ~400 KB. It is PLAINTEXT and contains conversation content.",
   "debug.hintInjection": "Records what the proxy injects into Codex and the reasoning-effort cap decisions - model name and character count only, no content. Only says something when injectionModel or effortCap is configured; otherwise it is one noise line per request.",
-  "debug.hintConsole": "Mirrors the proxy's own console output (the same lines that land in ocx.out.log / ocx.err.log) into memory so you can read them here instead of opening the log file on the remote machine. Always on, no toggle needed.",
+  "debug.hintConsole": "Mirrors the proxy's own console output (the same lines that land in ocx.out.log / ocx.err.log) into memory so you can read them here instead of opening the log file on the remote machine. After a restart the previous run's log is read back, so the context is not lost. Always on, no toggle needed.",
   "debug.sensitivity": "Sensitivity",
   "debug.sensitivityHigh": "High",
   "debug.sensitivityMedium": "Medium",

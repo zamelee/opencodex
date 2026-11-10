@@ -1010,6 +1010,39 @@ def run_init() -> int:
     return run_cli("init")
 
 
+# A rotated log may be kept whole up to this size; beyond it only the tail is kept.
+LOG_ROTATE_MAX_BYTES = 2 * 1024 * 1024
+LOG_ROTATE_KEEP_BYTES = 1 * 1024 * 1024
+
+
+def rotate_log(path: Path) -> None:
+    """Move the current log aside as "<name>.1" so the next run starts clean.
+
+    The proxy reads "<name>.1" on startup to restore the previous run's console
+    output into its Debug page, so the old log has to survive the restart — but not
+    without bound: an oversized log is trimmed down to its last
+    LOG_ROTATE_KEEP_BYTES.
+    """
+    if not path.exists():
+        return
+    prev = path.with_name(path.name + ".1")
+    try:
+        size = path.stat().st_size
+        if size <= LOG_ROTATE_MAX_BYTES:
+            if prev.exists():
+                prev.unlink()
+            path.replace(prev)
+        else:
+            with path.open("rb") as f:
+                f.seek(size - LOG_ROTATE_KEEP_BYTES)
+                tail = f.read()
+            with prev.open("wb") as f:
+                f.write(tail)
+            path.unlink()
+    except OSError as exc:
+        print(f"[bg] 日志轮转失败（{path.name}）：{exc}", file=sys.stderr)
+
+
 def run_start(port: int, cli_overrides: dict | None = None, no_bootstrap: bool = False) -> int:
     print("[start] 前台启动（Ctrl+C 停）。", file=sys.stderr)
     cfg = load_opencodex_config()
@@ -1039,9 +1072,10 @@ def run_background(port: int, cli_overrides: dict | None = None, no_bootstrap: b
 
     out_log = ROOT / "ocx.out.log"
     err_log = ROOT / "ocx.err.log"
-    for f in (out_log, err_log):
-        if f.exists():
-            f.unlink()
+    # Rotate instead of delete: the proxy restores the previous run's console output
+    # from "<file>.1" at startup, so a restart no longer erases the story.
+    rotate_log(out_log)
+    rotate_log(err_log)
 
     out_fp = open(out_log, "wb")
     err_fp = open(err_log, "wb")
@@ -1054,6 +1088,10 @@ def run_background(port: int, cli_overrides: dict | None = None, no_bootstrap: b
 
     env = dict(**subprocess.os.environ)
     env.update(launcher_env_vars)
+    # Tell the proxy where the launcher put the logs, so it can read back the
+    # previous run's output at startup.
+    env["OCX_LOG_OUT"] = str(out_log)
+    env["OCX_LOG_ERR"] = str(err_log)
 
     try:
         bun_exe = find_bun_exe()

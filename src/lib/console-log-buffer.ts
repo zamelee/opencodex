@@ -61,6 +61,26 @@ export function getConsoleLogEntries(options?: { after?: number; limit?: number;
   return filtered.slice(-limit);
 }
 
+/**
+ * Replay history (read back from the launcher's rotated log files) into the buffer.
+ *
+ * Called once at startup, before any live line is captured, so the history keeps the
+ * lower sequence numbers and the browser sees one continuous stream: old lines first,
+ * then the live ones.
+ */
+export function seedConsoleLogHistory(entries: Array<{ at: number; level: string; line: string }>): void {
+  if (entries.length === 0) return;
+  const seeded: ConsoleLogEntry[] = entries.map((entry, index) => ({
+    seq: index + 1,
+    at: entry.at,
+    level: entry.level,
+    line: entry.line,
+  }));
+  buffer.unshift(...seeded);
+  nextSeq = seeded.length + 1;
+  if (buffer.length > MAX_LINES) buffer.splice(0, buffer.length - MAX_LINES);
+}
+
 /** Test isolation. */
 export function resetConsoleLogBufferForTests(): void {
   buffer.length = 0;

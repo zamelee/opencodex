@@ -521,7 +521,7 @@ export const de = {
   "debug.hintDebug": "Zeichnet nur die Ausnahmen auf: einen verworfenen fehlerhaften Upstream-Frame oder einen Transportfehler. Pro Fall eine maskierte Zeile (Byte-Anzahl, Fehlercode), nie der Frame-Inhalt. Nur im Speicher, nie auf der Platte.",
   "debug.hintUsage": "Schreibt die ersten 2 KB jedes Antwort-Bodys in usage-debug.jsonl, um zu sehen, warum die Token-Zahlen auseinanderlaufen. Gemessene Kosten: ~2 KB und ~0,5 ms pro Anfrage, rollende Grenze ~400 KB. Klartext, enthält Gesprächsinhalt.",
   "debug.hintInjection": "Zeichnet auf, was der Proxy in Codex injiziert und welche Entscheidungen zur Reasoning-Effort-Begrenzung fallen - nur Modellname und Zeichenzahl, kein Inhalt. Sagt nur etwas, wenn injectionModel oder effortCap gesetzt ist.",
-  "debug.hintConsole": "Spiegelt die Konsolenausgabe des Proxys (dieselben Zeilen wie in ocx.out.log / ocx.err.log) in den Speicher, damit du sie hier liest statt die Logdatei auf der fernen Maschine zu öffnen. Immer aktiv, kein Schalter nötig.",
+  "debug.hintConsole": "Spiegelt die Konsolenausgabe des Proxys (dieselben Zeilen wie in ocx.out.log / ocx.err.log) in den Speicher, damit du sie hier liest statt die Logdatei auf der fernen Maschine zu öffnen. Nach einem Neustart wird das Log des letzten Laufs zurückgelesen, der Kontext geht nicht verloren. Immer aktiv, kein Schalter nötig.",
   "debug.sensitivity": "Vertraulichkeit",
   "debug.sensitivityHigh": "Hoch",
   "debug.sensitivityMedium": "Mittel",

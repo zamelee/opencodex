@@ -534,7 +534,7 @@ export const zh: Record<TKey, string> = {
   "debug.hintDebug": "只记异常：上游吐了我们丢弃的畸形帧，或传输层失败。每次一行脱敏摘要（字节数、错误码），不含帧内容。只在内存，不落盘。",
   "debug.hintUsage": "把每次响应 body 的前 2KB 记进 usage-debug.jsonl，用来查 token 数为何对不上。实测代价：每请求约 2KB、约 0.5 毫秒，滚动上限约 400KB。它是明文，含对话内容。",
   "debug.hintInjection": "记录代理向 Codex 注入内容、以及推理强度限幅的决策——只有模型名和字符数，不含内容。仅在配置了 injectionModel 或 effortCap 时才有话说，否则每请求一行噪声。",
-  "debug.hintConsole": "把代理自己的控制台输出（也就是落在 ocx.out.log / ocx.err.log 的那些行）镜像到内存，你在这里直接读，不必再去远端机器上翻日志文件。始终开启，无需开关。",
+  "debug.hintConsole": "把代理自己的控制台输出（也就是落在 ocx.out.log / ocx.err.log 的那些行）镜像到内存，你在这里直接读，不必再去远端机器上翻日志文件。重启后会自动回读上一轮的日志，上下文不丢。始终开启，无需开关。",
   "debug.sensitivity": "敏感度",
   "debug.sensitivityHigh": "高",
   "debug.sensitivityMedium": "中",
