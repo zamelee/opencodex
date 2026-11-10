@@ -93,11 +93,13 @@ class Storage:
         for name in (
             "protocol",
             "listen_host",
+            "web_host",
         ):
             if name in raw:
                 setattr(s, name, raw[name])
         for name in (
             "listen_port",
+            "web_port",
             "max_switches_per_request",
             "fail_threshold",
             "recover_threshold",
@@ -137,6 +139,8 @@ class Storage:
             "protocol": s.protocol,
             "listen_host": s.listen_host,
             "listen_port": str(s.listen_port),
+            "web_host": s.web_host,
+            "web_port": str(s.web_port),
             "precommit_budget_s": str(s.precommit_budget_s),
             "upstream_read_timeout_s": str(s.upstream_read_timeout_s),
             "upstream_connect_timeout_s": str(s.upstream_connect_timeout_s),

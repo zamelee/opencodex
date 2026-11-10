@@ -78,6 +78,9 @@ class HaApp:
         self._probe_stop: asyncio.Event | None = None
         self._probe_tasks: dict[str, asyncio.Task] = {}
         self._probe_supervisor: asyncio.Task | None = None
+        self._web_runner = None
+        self._web_host = "127.0.0.1"
+        self._web_port = 10111
 
     # ---------- 日志 ----------
 
@@ -117,6 +120,7 @@ class HaApp:
             reuse_address=True,
         )
         await site.start()
+        await self._start_web()
         self._started.set()
         self._probe_stop = asyncio.Event()
         self._probe_tasks: dict[str, asyncio.Task] = {}
@@ -135,7 +139,33 @@ class HaApp:
             for t in list(self._probe_tasks.values()):
                 t.cancel()
             self._probe_tasks.clear()
+            if getattr(self, "_web_runner", None) is not None:
+                await self._web_runner.cleanup()
             await self.gateway.close()
+
+    async def _start_web(self) -> None:
+        """网页管理界面：独立端口，只监听本机。"""
+        try:
+            from aiohttp import web as aio_web
+
+            from .webui import build_web_app
+
+            self._web_runner = aio_web.AppRunner(build_web_app(self))
+            await self._web_runner.setup()
+            site = aio_web.TCPSite(
+                self._web_runner,
+                self.settings.web_host,
+                self.settings.web_port,
+                reuse_address=True,
+            )
+            await site.start()
+        except Exception as exc:  # noqa: BLE001
+            self._log("warn", "web", f"网页管理界面启动失败: {exc}")
+            self._web_runner = None
+            return
+        self._web_host = self.settings.web_host
+        self._web_port = self.settings.web_port
+        self._log("info", "web", f"网页管理界面 http://{self._web_host}:{self._web_port}")
 
     async def _supervise_probes(self) -> None:
         """按上游列表启停主动探活任务。"""

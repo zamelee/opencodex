@@ -76,6 +76,8 @@ class Settings:
     protocol: str = "openai-responses"
     listen_host: str = "127.0.0.1"
     listen_port: int = 10110
+    web_host: str = "127.0.0.1"
+    web_port: int = 10111
     precommit_budget_s: float = 15.0
     upstream_read_timeout_s: float = 300.0
     upstream_connect_timeout_s: float = 10.0

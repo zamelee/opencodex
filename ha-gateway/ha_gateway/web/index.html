@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HA Gateway — 高可用 LLM 网关</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <span class="dot" id="dot" title="监听状态"></span>
+    <span class="addr" id="addr">—</span>
+    <span class="proto" id="proto"></span>
+    <button class="btn ghost" id="copyAddr">复制地址</button>
+    <span class="spacer"></span>
+    <button class="btn ghost" id="refresh">刷新</button>
+    <button class="btn" id="toggleDrawer">管理 ▶</button>
+  </header>
+
+  <main id="main">
+    <section class="stage" id="stage">
+      <svg id="wires" xmlns="http://www.w3.org/2000/svg"></svg>
+      <div id="nodes"></div>
+      <div class="legend">
+        <span><i class="l-active"></i>当前通道</span>
+        <span><i class="l-ready"></i>可切换</span>
+        <span><i class="l-ghost"></i>未配置</span>
+      </div>
+      <div class="empty hidden" id="emptyHint">
+        还没有上游通道 —— 点上面「管理 ▶」添加一条，或直接点虚线槽位。
+      </div>
+    </section>
+
+    <aside class="drawer hidden" id="drawer">
+      <div class="drawer-head">
+        <span>管理</span>
+        <button class="btn icon" id="closeDrawer" title="收起">◀</button>
+      </div>
+      <div class="drawer-body">
+        <section class="sec">
+          <h3>上游通道 <small>主通道 / 备通道</small></h3>
+          <div class="form">
+            <label>名称<input id="u_name" placeholder="主通道 .1" /></label>
+            <label>Provider<input id="u_provider" placeholder="m.aiio.chat" /></label>
+            <label>Base URL<input id="u_base" placeholder="http://127.0.0.1:10100" /></label>
+            <label>API Key<input id="u_key" type="password" placeholder="sk-…" /></label>
+            <div class="row">
+              <button class="btn primary" id="u_add">添加上游</button>
+              <button class="btn" id="u_update">更新选中</button>
+              <button class="btn danger" id="u_delete">删除</button>
+              <button class="btn ghost" id="u_probe">探测</button>
+            </div>
+          </div>
+          <table class="tbl" id="upTable">
+            <thead>
+              <tr><th>名称</th><th>Provider</th><th>Base URL</th><th>状态</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </section>
+
+        <section class="sec">
+          <h3>下游 Key <small>Codex 用这一把</small></h3>
+          <div class="row">
+            <input id="k_label" placeholder="用途，如 codex" />
+            <button class="btn primary" id="k_add">生成</button>
+          </div>
+          <div id="keyList" class="keylist"></div>
+        </section>
+
+        <section class="sec">
+          <h3>故障转移规则 <small>勾选 = 参与自动切换</small></h3>
+          <div id="ruleList" class="rules"></div>
+          <label class="danger-zone">
+            <input type="checkbox" id="r_retry" />
+            <span>已提交后重试<span class="hint">（需在弹窗输入 OK 确认）</span></span>
+          </label>
+          <button class="btn" id="r_save">保存规则</button>
+        </section>
+
+        <section class="sec">
+          <h3>网关设置</h3>
+          <div class="form">
+            <label>协议
+              <select id="s_protocol">
+                <option value="openai-responses">openai-responses</option>
+                <option value="openai-chat">openai-chat</option>
+                <option value="anthropic">anthropic</option>
+              </select>
+            </label>
+            <label>监听地址<input id="s_host" /></label>
+            <label>监听端口<input id="s_port" type="number" /></label>
+            <label>每请求最大切换<input id="s_switch" type="number" /></label>
+            <label>最小驻留（秒）<input id="s_residency" type="number" step="1" /></label>
+            <label>预提交预算（秒）<input id="s_budget" type="number" step="1" /></label>
+            <div class="row">
+              <button class="btn primary" id="s_save">保存设置</button>
+              <button class="btn ghost" id="s_copy">复制 Codex 配置</button>
+            </div>
+          </div>
+        </section>
+      </div>
+    </aside>
+  </main>
+
+  <footer class="logpane">
+    <div class="log-head">
+      <label class="follow"><input type="checkbox" id="logFollow" checked /> 自动跟随滚动</label>
+      <span class="spacer"></span>
+      <button class="btn ghost" id="logClear">清空</button>
+    </div>
+    <div class="log-body" id="logBody"></div>
+  </footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>
