@@ -36,7 +36,7 @@ const HINTS = {
   budget: "请求已发出、上游尚未响应时，允许在多少秒内换上游重试。",
   up_name: "这条上游在拓扑图里的显示名。",
   up_provider: "上游服务商标识（例如 m.aiio.chat），用于分组与展示。",
-  up_base: "上游的 OpenAI 兼容接口根地址。",
+  up_base: "上游的 OpenAI 兼容接口根地址，例如 http://127.0.0.1:10100。只填到端口，不要带 /v1/responses 这类路径——网关会在其后自己拼协议路径。",
   up_key: "调用上游的密钥；留空表示不修改已保存的密钥。",
 };
 
@@ -128,14 +128,26 @@ function renderRouteMode() {
   if (!box) return;
   const s = STATE.settings || {};
   const forced = s.forced_upstream_id || "";
+  const excluded = s.excluded_upstream_ids || [];
+  box.classList.remove("locked", "excluded");
   if (forced) {
     const u = STATE.upstreams.find((x) => x.id === forced);
     box.textContent = "路由：锁定 " + (u ? u.name : forced);
     box.classList.add("locked");
     box.title = "已手动锁定到「" + (u ? u.name : forced) + "」。点一下恢复自动路由。";
+  } else if (excluded.length) {
+    const names = excluded
+      .map((id) => {
+        const u = STATE.upstreams.find((x) => x.id === id);
+        return u ? u.name : id;
+      })
+      .join("、");
+    box.textContent = "路由：排除 " + excluded.length + " 条";
+    box.classList.add("excluded");
+    box.title =
+      "已排除「" + names + "」，不参与自动路由（仍会探测健康）。点一下恢复全部。";
   } else {
     box.textContent = "路由：自动";
-    box.classList.remove("locked");
     box.title = "自动路由：健康优先 + 会话粘性 + 故障转移。点一下打开网关设置。";
   }
 }
@@ -383,6 +395,10 @@ function wireClass(e) {
     } else if (e.owner === activeUpstream) {
       cls += " wire-flow-active";
     }
+    if (isExcluded(e.owner)) {
+      // 被排除的通道：灰蓝细虚线，静止不流动 —— "不在候选池里"
+      cls += " wire-flow-excluded";
+    }
   }
   return cls;
 }
@@ -397,10 +413,21 @@ function buildUpstreamNode(u, i) {
     lock.title = "已手动锁定到这条通道";
     n.appendChild(lock);
   }
+  if (isExcluded(u.id)) {
+    const ex = el("div", "node-excluded", "排");
+    ex.title = "已排除：不参与自动路由（仍会探测健康，也可手动锁定）";
+    n.appendChild(ex);
+  }
   const missing = missingFields(u);
   if (missing.length) {
     const badge = el("div", "node-badge", "!");
     badge.title = "信息未填完：" + missing.join("、");
+    n.appendChild(badge);
+  }
+  const badUrl = baseUrlProblem(u);
+  if (badUrl) {
+    const badge = el("div", "node-badge warn", "!");
+    badge.title = badUrl;
     n.appendChild(badge);
   }
   n.onclick = (ev) => {
@@ -417,6 +444,88 @@ function missingFields(u) {
   if (!u.base_url || !u.base_url.trim()) miss.push("Base URL");
   if (u.has_key === false) miss.push("API Key");
   return miss;
+}
+
+// Base URL 只填根地址：网关会在其后拼接协议路径（/v1/responses 等）。
+// 填了完整路径会导致路径重复，请求必然 404。
+function baseUrlProblem(u) {
+  const b = (u.base_url || "").trim();
+  if (!b) return "";
+  const path = b.replace(/^https?:\/\/[^/]+/, "");
+  if (!path || path === "/") return "";
+  return "Base URL 只填根地址（" + path + " 会被网关再拼一次协议路径）";
+}
+
+// 与后端 ha_gateway/urlnorm.py 保持一致：按协议归一化 Base URL
+const PROTOCOL_SUFFIXES = {
+  "openai-responses": ["/v1/responses", "/responses", "/v1/responses/compact"],
+  "openai-chat": ["/v1/chat/completions", "/chat/completions"],
+  anthropic: ["/v1/messages", "/messages", "/v1/messages/count_tokens", "/v1/messages/batches"],
+};
+
+function normalizeBaseUrl(raw, protocol) {
+  let s = (raw || "").trim();
+  if (!s) return { url: "", note: "" };
+  let note = "";
+  if (s.indexOf("://") < 0) {
+    s = "http://" + s;
+    note = "已补全 http://";
+  }
+  const m = /^([a-z0-9+.-]+:\/\/[^/?#]+)([^?#]*)/i.exec(s);
+  if (!m) return { url: s, note };
+  const schemeHost = m[1];
+  let path = (m[2] || "").replace(/\/+$/, "");
+  const lower = path.toLowerCase();
+  const sufs = PROTOCOL_SUFFIXES[protocol] || [];
+  for (const suf of sufs) {
+    if (lower.endsWith(suf.toLowerCase())) {
+      path = path.slice(0, path.length - suf.length);
+      note = (note ? note + "，" : "") + "已去掉 " + suf;
+      break;
+    }
+  }
+  if (path && !note) {
+    for (const suf of ["/v1/responses", "/v1/chat/completions", "/v1/messages"]) {
+      if (lower.endsWith(suf)) {
+        path = path.slice(0, path.length - suf.length);
+        note = "已去掉 " + suf;
+        break;
+      }
+    }
+  }
+  return { url: (schemeHost + path).replace(/\/+$/, ""), note };
+}
+
+// Provider 缺省值：Base URL 的域名+端口
+function providerFromBaseUrl(baseUrl) {
+  const s = (baseUrl || "").trim();
+  if (!s) return "";
+  const m = /^[a-z0-9+.-]+:\/\/([^/?#]+)/i.exec(s.indexOf("://") < 0 ? "http://" + s : s);
+  return m ? m[1] : "";
+}
+
+// Provider 留空时，随 Base URL 实时补成"域名+端口"（用户不用手填）
+function autoFillProvider(formEl, provBlock, draft) {
+  const baseInput = formEl.querySelector('input[data-field="base_url"]');
+  const provInput = provBlock.querySelector('input[data-field="provider"]');
+  if (!baseInput || !provInput) return;
+  const hint = el("div", "f-hint", "留空则自动取 Base URL 的域名+端口。");
+  provBlock.appendChild(hint);
+  const sync = () => {
+    const cur = (provInput.value || "").trim();
+    const auto = providerFromBaseUrl(baseInput.value);
+    if (cur && cur !== auto) {
+      provInput.dataset.manual = "1";
+      return;
+    }
+    provInput.value = auto;
+    if (draft) draft.fields.provider = auto;
+  };
+  baseInput.addEventListener("input", sync);
+  provInput.addEventListener("input", () => {
+    if (draft) draft.fields.provider = provInput.value;
+  });
+  sync();
 }
 
 function buildGhostSlot(tag) {
@@ -1025,8 +1134,10 @@ function renderInline() {
   );
   const f = el("div", "form");
   f.appendChild(nameField(draft, "tooltip"));
-  f.appendChild(fieldBlock("Provider", "provider", draft.fields.provider, { hint: HINTS.up_provider, mode: "tooltip" }));
+  const provBlock = fieldBlock("Provider", "provider", draft.fields.provider, { hint: HINTS.up_provider, mode: "tooltip" });
+  f.appendChild(provBlock);
   f.appendChild(fieldBlock("Base URL", "base_url", draft.fields.base_url, { hint: HINTS.up_base, mode: "tooltip" }));
+  autoFillProvider(f, provBlock, draft);
   f.appendChild(
     fieldBlock("API Key", "api_key", draft.fields.api_key, {
       type: "password",
@@ -1047,12 +1158,23 @@ function renderInline() {
     probe.onclick = () => probeUpstream(draft.id);
     row.appendChild(probe);
     const forced = (STATE.settings || {}).forced_upstream_id === draft.id;
-    const forceBtn = el("button", "btn" + (forced ? " primary" : ""), forced ? "恢复自动" : "切到此通道");
+    const forceBtn = el("button", "btn" + (forced ? " primary" : ""), forced ? "恢复自动" : "锁定此通道");
     forceBtn.title = forced
       ? "取消手动锁定，回到自动路由（健康优先 + 会话粘性）"
-      : "手动把路由锁到这条通道；它不可用时仍会自动切走";
+      : "手动把路由锁到这条通道；它不可用时仍会自动切走。锁定优先于「排除」。";
     forceBtn.onclick = () => setForcedUpstream(forced ? "" : draft.id);
     row.appendChild(forceBtn);
+    const exc = isExcluded(draft.id);
+    const excBtn = el("button", "btn" + (exc ? " primary" : ""), exc ? "取消排除" : "排除此通道");
+    excBtn.title = exc
+      ? "这条通道目前不参与自动路由。点一下把它放回候选池。"
+      : "把这条通道移出自动路由候选池（仍会探测健康，也可再手动锁定）。";
+    excBtn.onclick = async () => {
+      const cur = ((STATE.settings || {}).excluded_upstream_ids || []).slice();
+      const next = exc ? cur.filter((x) => x !== draft.id) : cur.concat([draft.id]);
+      await setExcluded(next);
+    };
+    row.appendChild(excBtn);
     const del = el("button", "btn danger", "删除");
     del.title = "移除这条上游通道";
     del.onclick = () => deleteUpstream(draft.id);
@@ -1070,6 +1192,20 @@ async function setForcedUpstream(id) {
   } catch (e) {
     toast("切换失败：" + (e.message || e), "warn");
   }
+}
+
+async function setExcluded(ids) {
+  try {
+    await api("/api/exclude", { method: "POST", headers: jsonH(), body: JSON.stringify({ ids }) });
+    await loadState();
+    toast(ids && ids.length ? "已排除 " + ids.length + " 条通道" : "已恢复全部通道参与路由");
+  } catch (e) {
+    toast("设置失败：" + (e.message || e), "warn");
+  }
+}
+
+function isExcluded(id) {
+  return ((STATE.settings || {}).excluded_upstream_ids || []).includes(id);
 }
 
 function healthColor(u) {
@@ -1383,6 +1519,15 @@ function renderDock() {
       row.appendChild(el("div", "po-line", `Base URL　${u.base_url || "—"}`));
       row.appendChild(el("div", "po-line", `API Key　${u.has_key === false ? "未填写" : "已填写"}`));
       row.appendChild(el("div", "po-line", `状态　${healthText(u)}`));
+      const ex = isExcluded(u.id);
+      const forced = (STATE.settings || {}).forced_upstream_id === u.id;
+      row.appendChild(
+        el(
+          "div",
+          "po-line",
+          "路由　" + (forced ? "已锁定此通道" : ex ? "已排除（不参与自动路由）" : "参与自动路由")
+        )
+      );
       up.appendChild(row);
     });
     body.appendChild(up);
@@ -1417,8 +1562,10 @@ function renderDock() {
     );
     const f = el("div", "form");
     f.appendChild(nameField(draft, "inline"));
-    f.appendChild(fieldBlock("Provider", "provider", draft.fields.provider, { hint: HINTS.up_provider, mode: "inline" }));
+    const provBlock = fieldBlock("Provider", "provider", draft.fields.provider, { hint: HINTS.up_provider, mode: "inline" });
+    f.appendChild(provBlock);
     f.appendChild(fieldBlock("Base URL", "base_url", draft.fields.base_url, { hint: HINTS.up_base, mode: "inline" }));
+    autoFillProvider(f, provBlock, draft);
     f.appendChild(
       fieldBlock("API Key", "api_key", draft.fields.api_key, {
         type: "password",
@@ -1514,11 +1661,14 @@ function renderDock() {
 async function saveDraft() {
   if (!draft) return true;
   if (draft.kind === "upstream") {
+    const proto = (STATE.settings || {}).protocol || "openai-responses";
+    const norm = normalizeBaseUrl(draft.fields.base_url, proto);
     const body = {
       name: (draft.fields.name || "").trim() || draft.defaultName || "",
-      provider: draft.fields.provider,
-      base_url: draft.fields.base_url,
+      provider: (draft.fields.provider || "").trim() || providerFromBaseUrl(norm.url),
+      base_url: norm.url,
     };
+    if (norm.note) toast("Base URL 已自动纠正：" + norm.note, "warn");
     if (draft.fields.api_key) body.api_key = draft.fields.api_key;
     if (!body.name || !body.base_url) {
       toast("名称与 Base URL 必填", "warn");
@@ -1670,6 +1820,8 @@ $("#routeMode").onclick = () => {
   const s = STATE.settings || {};
   if (s.forced_upstream_id) {
     setForcedUpstream("");
+  } else if ((s.excluded_upstream_ids || []).length) {
+    setExcluded([]);
   } else {
     selectObject("gw", "gw");
   }

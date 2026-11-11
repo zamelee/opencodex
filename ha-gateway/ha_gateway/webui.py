@@ -9,6 +9,7 @@ import socket
 from aiohttp import web
 
 from .models import Rule
+from .urlnorm import normalize_base_url, provider_from_base_url
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 
@@ -74,6 +75,7 @@ def _state(app) -> dict:
             "precommit_budget_s": s.precommit_budget_s,
             "retry_after_commit": s.retry_after_commit,
             "forced_upstream_id": s.forced_upstream_id,
+            "excluded_upstream_ids": list(s.excluded_upstream_ids),
             "rules": {r.value: bool(v) for r, v in s.rules.items()},
         },
         "running": app._started.is_set(),
@@ -107,18 +109,24 @@ def build_web_app(app) -> web.Application:
         data = await request.json()
         if not data.get("name") or not data.get("base_url"):
             raise web.HTTPBadRequest(reason="name and base_url required")
+        base_url, note = normalize_base_url(
+            data["base_url"], app.settings.protocol
+        )
+        provider = (data.get("provider") or "").strip() or provider_from_base_url(base_url)
         u = app.storage.add_upstream(
             Upstream(
                 id="",
                 name=data["name"],
-                provider=data.get("provider") or "unknown",
-                base_url=data["base_url"],
+                provider=provider,
+                base_url=base_url,
                 api_key=data.get("api_key") or "",
                 protocol=app.settings.protocol,
             )
         )
         app.storage.migrate_routes({x.id for x in app.upstreams()})
-        return web.json_response({"ok": True, "id": u.id})
+        return web.json_response(
+            {"ok": True, "id": u.id, "base_url": base_url, "provider": provider, "note": note}
+        )
 
     async def update_upstream(request):
         uid = request.match_info["id"]
@@ -131,13 +139,23 @@ def build_web_app(app) -> web.Application:
         if "provider" in data:
             u.provider = data["provider"]
         if "base_url" in data:
-            u.base_url = data["base_url"]
+            base_url, note = normalize_base_url(data["base_url"], app.settings.protocol)
+            u.base_url = base_url
+            if not (u.provider or "").strip():
+                u.provider = provider_from_base_url(base_url)
         if data.get("api_key"):
             u.api_key = data["api_key"]
         if "enabled" in data:
             u.enabled = bool(data["enabled"])
         app.storage.update_upstream(u)
-        return web.json_response({"ok": True})
+        return web.json_response(
+            {
+                "ok": True,
+                "base_url": u.base_url,
+                "provider": u.provider,
+                "note": note if "base_url" in data else "",
+            }
+        )
 
     async def delete_upstream(request):
         app.storage.delete_upstream(request.match_info["id"])
@@ -202,6 +220,32 @@ def build_web_app(app) -> web.Application:
         )
         return web.json_response({"ok": True, "forced_upstream_id": uid})
 
+    async def set_excluded(request):
+        """排除模式：把指定通道移出自动路由候选池。"""
+        data = await request.json()
+        ids = data.get("ids")
+        if ids is None:
+            uid = (data.get("id") or "").strip()
+            s0 = app.settings
+            cur = list(getattr(s0, "excluded_upstream_ids", []) or [])
+            if uid:
+                ids = [x for x in cur if x != uid] + ([uid] if uid not in cur else [])
+            else:
+                ids = []
+        ids = [str(x) for x in ids if x]
+        known = {u.id for u in app.upstreams()}
+        ids = [x for x in ids if x in known]
+        s = app.settings
+        s.excluded_upstream_ids = ids
+        app.save_settings(s)
+        names = [u.name for u in app.upstreams() if u.id in ids]
+        app._log(
+            "info",
+            "route",
+            f"排除通道：{'、'.join(names)}" if names else "清除排除，恢复全部通道参与路由",
+        )
+        return web.json_response({"ok": True, "excluded_upstream_ids": ids})
+
     async def put_rules(request):
         data = await request.json()
         s = app.settings
@@ -228,6 +272,7 @@ def build_web_app(app) -> web.Application:
     routes.delete("/api/keys/{id}")(delete_key)
     routes.put("/api/settings")(put_settings)
     routes.post("/api/force")(set_forced)
+    routes.post("/api/exclude")(set_excluded)
     routes.put("/api/rules")(put_rules)
 
     web_app = web.Application()

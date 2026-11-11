@@ -69,7 +69,9 @@ class UpstreamSelector:
         self._cool_until[upstream_id] = time.monotonic() + self.settings.min_residency_s
 
     def plan(self, upstreams: list[Upstream], session_key: str | None) -> RequestPlan:
-        alive = [u for u in upstreams if u.enabled]
+        excluded = set(getattr(self.settings, "excluded_upstream_ids", []) or [])
+        alive = [u for u in upstreams if u.enabled and u.id not in excluded]
+        enabled_all = [u for u in upstreams if u.enabled]
         now = time.monotonic()
         cooled = {uid for uid, until in self._cool_until.items() if until > now}
         if len(alive) > len(cooled & {u.id for u in alive}):
@@ -82,9 +84,10 @@ class UpstreamSelector:
 
         ordered: list[Upstream] = []
         # 手动锁定的通道优先（健康可用时）
+        # 手动锁定是明确指令，覆盖"排除"设置
         forced_id = getattr(self.settings, "forced_upstream_id", "") or ""
         if forced_id:
-            for u in fresh:
+            for u in enabled_all:
                 if u.id == forced_id and self.health.usable(u.id):
                     ordered.append(u)
                     break

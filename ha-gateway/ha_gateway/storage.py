@@ -127,6 +127,13 @@ class Storage:
                     pass
         if "retry_after_commit" in raw:
             s.retry_after_commit = raw["retry_after_commit"] == "1"
+        if "excluded_upstream_ids" in raw:
+            try:
+                s.excluded_upstream_ids = [
+                    x for x in json.loads(raw["excluded_upstream_ids"]) if isinstance(x, str)
+                ]
+            except (ValueError, TypeError):
+                s.excluded_upstream_ids = []
         rules = dict(DEFAULT_RULES)
         for r in self._conn.execute("SELECT rule_key, enabled FROM rules"):
             try:
@@ -156,6 +163,7 @@ class Storage:
             "sticky_ttl_s": str(s.sticky_ttl_s),
             "retry_after_commit": "1" if s.retry_after_commit else "0",
             "forced_upstream_id": s.forced_upstream_id,
+            "excluded_upstream_ids": json.dumps(s.excluded_upstream_ids),
         }
         with self._lock:
             self._conn.executemany(

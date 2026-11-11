@@ -179,6 +179,13 @@ main {
   cursor: help;
 }
 
+/* Base URL 填法有误（带了路径）的提示徽标 */
+.node-badge.warn {
+  background: var(--red);
+  top: -8px;
+  right: 14px;
+}
+
 /* 手动锁定通道的角标 */
 .node-lock {
   position: absolute;
@@ -262,6 +269,27 @@ main {
   color: var(--blue);
   font-weight: 600;
 }
+.route-mode.excluded {
+  border-color: var(--amber);
+  background: #fdf4e3;
+  color: #8a6100;
+  font-weight: 600;
+}
+
+/* 被排除通道的角标 */
+.node-excluded {
+  position: absolute;
+  top: 12px;
+  left: -8px;
+  z-index: 2;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--amber);
+  border: 2px solid #fff;
+  color: #fff;
+  font-size: 11px;
+  line-height: 1;
+}
 
 .wire-flow {
   fill: none;
@@ -330,6 +358,21 @@ main {
   animation: none;
   stroke-dashoffset: 0;
   opacity: 0.75;
+}
+
+/* 被排除的通道：灰蓝细虚线、静止 —— 不在自动路由候选池里 */
+.wire-flow-excluded {
+  stroke: #b6bcc6;
+  stroke-width: 1.5;
+  stroke-dasharray: 4 5;
+  animation: none;
+  stroke-dashoffset: 0;
+  opacity: 0.7;
+}
+.wire-flow-excluded.wire-hot,
+.wire-flow-excluded.wire-hot2 {
+  stroke: #b6bcc6;
+  stroke-width: 1.5;
 }
 /* 旁路即使有残留流量，也保持"没在用"的淡红，不跟着变亮 */
 .wire-flow-dim.wire-hot,

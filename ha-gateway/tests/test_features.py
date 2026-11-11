@@ -96,3 +96,28 @@ def test_forced_upstream_is_preferred():
                     await fu.stop()
 
     asyncio.run(run())
+
+
+def test_excluded_upstream_is_not_in_auto_candidates():
+    async def run():
+        with tempfile.TemporaryDirectory() as d:
+            a = FakeUpstream("a")
+            b = FakeUpstream("b")
+            for fu in (a, b):
+                await fu.start()
+            try:
+                app = await _make_app(d, [a, b], 10933)
+                # 排除第一条：自动路由不应再选它
+                app.settings.excluded_upstream_ids = ["u0"]
+                app.gateway.selector.settings = app.settings
+                plan = app.gateway.selector.plan(app.upstreams(), "sess-x")
+                assert all(c.id != "u0" for c in plan.candidates), "被排除的通道不应进入候选"
+                assert any(c.id == "u1" for c in plan.candidates)
+                # 但手动锁定可以覆盖排除
+                app.settings.forced_upstream_id = "u0"
+                plan2 = app.gateway.selector.plan(app.upstreams(), "sess-x")
+                assert plan2.candidates[0].id == "u0", "手动锁定优先于排除"
+            finally:
+                app.storage.close()
+
+    asyncio.run(run())

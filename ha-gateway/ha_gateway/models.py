@@ -91,6 +91,7 @@ class Settings:
     sticky_ttl_s: float = 24 * 3600
     retry_after_commit: bool = False
     forced_upstream_id: str = ""  # 手动锁定通道；空 = 自动路由
+    excluded_upstream_ids: list[str] = field(default_factory=list)
     rules: dict[Rule, bool] = field(default_factory=lambda: dict(DEFAULT_RULES))
 
 
