@@ -15,6 +15,7 @@ let logSeen = 0;
 let nodePos = {};             // 节点 id -> {x,y}
 let lastStateSig = "";        // 上一次 /api/state 的指纹，用于跳过无谓重绘
 let pendingPanel = false;     // 编辑中状态变了，等用户松手后再刷新右侧面板
+let gwExpanded = false;       // 画布上的网关控制台是否展开完整配置
 
 const RULE_LABELS = {
   connect_fail: "连接失败 / DNS 失败",
@@ -752,9 +753,42 @@ function renderGwConsole() {
   box.classList.remove("hidden");
   const stage = $("#stage");
   box.classList.toggle("compact", stage.clientWidth < 760);
+  box.classList.toggle("expanded", gwExpanded);
   box.appendChild(el("div", "po-title", "网关控制台"));
-  box.appendChild(el("div", "hint", "网关与故障转移的核心设置，改动后点「保存应用」。"));
-  box.appendChild(gwControls("tooltip"));
+  if (!gwExpanded) {
+    // 精简版：只读三行核心信息，不堆控件、不出滚动条
+    const s = STATE.settings;
+    const info = el("div", "gw-quick");
+    info.appendChild(el("div", "po-line", `协议　${s.protocol}`));
+    info.appendChild(el("div", "po-line", `监听 IP　${s.listen_host}`));
+    info.appendChild(el("div", "po-line", `端口　${s.listen_port}`));
+    box.appendChild(info);
+    const row = el("div", "row");
+    const more = el("button", "btn", "更多…");
+    more.title = "展开完整网关配置：切换预算、故障转移规则等";
+    more.onclick = (ev) => {
+      // 重绘会摘掉当前按钮，必须阻止冒泡，否则画布会当成"点空白"取消选中
+      ev.stopPropagation();
+      gwExpanded = true;
+      renderPanels();
+      renderTopology();
+    };
+    row.appendChild(more);
+    box.appendChild(row);
+  } else {
+    const row = el("div", "row");
+    const less = el("button", "btn ghost", "收起");
+    less.title = "收起，只显示协议、IP 和端口";
+    less.onclick = (ev) => {
+      ev.stopPropagation();
+      gwExpanded = false;
+      renderPanels();
+      renderTopology();
+    };
+    row.appendChild(less);
+    box.appendChild(row);
+    box.appendChild(gwControls("tooltip"));
+  }
   renderLinks();
 }
 
@@ -818,12 +852,21 @@ function gwControls(mode) {
   save.onclick = () => saveDraft();
   row.appendChild(save);
   const copy = el("button", "btn", "复制 Codex 配置");
-  copy.title = "生成可直接贴进 ~/.codex/config.toml 的 model_providers 配置片段";
-  copy.onclick = () => copyCodexSnippet();
+  copy.title =
+    "生成一段 model_providers 配置片段，贴进 ~/.codex/config.toml，Codex 就会通过本网关转发";
+  copy.onclick = () => copyCodexSnippet(copy);
   row.appendChild(copy);
   wrap.appendChild(row);
   if (mode === "inline") {
-    wrap.appendChild(el("div", "f-hint", "「保存应用」写入协议、监听、切换预算与故障转移规则；「复制 Codex 配置」生成可贴进 config.toml 的片段。"));
+    wrap.appendChild(
+      el(
+        "div",
+        "f-hint",
+        "「保存应用」写入协议、监听、切换预算与故障转移规则。" +
+          "「复制 Codex 配置」生成一段 config.toml 片段，把 Codex 指向本网关；" +
+          "片段里的 env_key = HA_GATEWAY_KEY，需要你把下游 Key 放进这个同名环境变量。"
+      )
+    );
   }
   return wrap;
 }
@@ -1161,13 +1204,17 @@ async function newKey() {
   await loadState();
 }
 
-function copyCodexSnippet() {
+function copyCodexSnippet(btn) {
   const s = STATE.settings;
   const wire = { "openai-responses": "responses", "openai-chat": "chat", anthropic: "anthropic" }[s.protocol];
   const snippet =
     `[model_providers.ha_gateway]\nname = "HA Gateway"\nbase_url = "http://${s.listen_host}:${s.listen_port}/v1/"\nenv_key = "HA_GATEWAY_KEY"\nwire_api = "${wire}"\n`;
   navigator.clipboard.writeText(snippet);
-  alert("配置片段已复制");
+  if (btn) {
+    const old = btn.textContent;
+    btn.textContent = "已复制";
+    setTimeout(() => (btn.textContent = old), 1400);
+  }
 }
 
 // ---------- 抽屉 ----------
@@ -1241,6 +1288,8 @@ $("#logBody").addEventListener("scroll", (e) => {
 
 $("#stage").addEventListener("click", (ev) => {
   const ignore = [".node", ".inline-card", ".gw-console", ".dirty-bar", ".drawer-toggle"];
+  // 目标已被重绘摘掉时不要当成"点空白"（否则点某个会重绘自己的控件就误触取消选中）
+  if (ev.target && !ev.target.isConnected) return;
   if (ignore.some((s) => ev.target.closest(s))) return;
   deselect();
 });

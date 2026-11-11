@@ -408,8 +408,6 @@ input:focus, select:focus { outline: 2px solid rgba(26, 115, 232, 0.35); border-
   transform: translateY(-50%);
   z-index: 26;
   width: 330px;
-  max-height: calc(100% - 32px);
-  overflow: auto;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -417,6 +415,12 @@ input:focus, select:focus { outline: 2px solid rgba(26, 115, 232, 0.35); border-
   padding: 12px 14px;
   border: 2px solid var(--blue);
 }
+.gw-console.expanded {
+  max-height: calc(100% - 32px);
+  overflow: auto;
+}
+.gw-console .gw-quick { margin: 6px 0 2px; }
+.gw-console .gw-quick .po-line { margin: 3px 0; }
 .gw-console.right { left: auto; right: 14px; transform: none; }
 .gw-console .sub-title { font-weight: 600; margin: 10px 0 4px; }
 .gw-console.compact {
@@ -430,6 +434,7 @@ input:focus, select:focus { outline: 2px solid rgba(26, 115, 232, 0.35); border-
   backdrop-filter: blur(3px);
 }
 .gw-console.compact.right { right: 12px; }
+.gw-console.compact:not(.expanded) { max-height: none; }
 
 /* 节点内小按钮（复制 / 删除） */
 .node-actions {
