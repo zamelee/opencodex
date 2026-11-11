@@ -37,6 +37,18 @@ body {
 
 .topbar .spacer, .log-head .spacer { flex: 1; }
 
+/* 标题下的一行说明：这是什么、怎么工作 */
+.topbar-desc {
+  padding: 6px 14px 7px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+.topbar-desc b { color: var(--text); font-weight: 600; }
+.topbar-desc span { display: block; }
+
 .brand {
   font-weight: 700;
   font-size: 15px;

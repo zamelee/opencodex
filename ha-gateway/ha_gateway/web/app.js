@@ -282,6 +282,8 @@ async function selectObject(kind, id) {
   renderTopology();
   renderPanels();
   if (kind === "gw") focusGwConsole();
+  // 下游 Key 的编辑面板在右侧抽屉里，点了就把抽屉拉出来
+  if (kind === "key" && $("#drawer").classList.contains("hidden")) openDrawer();
 }
 
 // 放弃当前草稿，恢复到已保存的值

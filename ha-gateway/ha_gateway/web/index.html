@@ -19,6 +19,10 @@
     <label class="follow" title="连线流动与请求数据球"><input type="checkbox" id="animToggle" checked /> 动画</label>
     <button class="btn ghost" id="refresh">刷新</button>
   </header>
+  <div class="topbar-desc">
+    <b>双路高可用网关</b>：下游（Codex 等客户端）只连本机这一个地址。
+    <span>网关在多条上游之间自动探活、择优路由；上游失联、报错或额度耗尽时，自动改走另一条，让对话不中断。</span>
+  </div>
 
   <main id="main">
     <section class="stage" id="stage">
