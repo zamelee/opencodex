@@ -1,4 +1,5 @@
 const $ = (s) => document.querySelector(s);
+const $$ = (s) => Array.from(document.querySelectorAll(s));
 const el = (tag, cls, text) => {
   const n = document.createElement(tag);
   if (cls) n.className = cls;
@@ -7,10 +8,11 @@ const el = (tag, cls, text) => {
 };
 
 let STATE = { upstreams: [], keys: [], settings: {}, running: false };
-let activeUpstream = null;   // 拓扑里当前活跃的上游 id
-let selectedRow = null;       // 抽屉表格里选中的上游 id
-let popover = null;           // 就地编辑卡
+let activeUpstream = null;    // 拓扑里当前活跃的上游 id
+let selected = null;          // {kind:"upstream"|"key"|"gw", id}
+let draft = null;             // 当前对象的草稿
 let logSeen = 0;
+let nodePos = {};             // 节点 id -> {x,y}
 
 const RULE_LABELS = {
   connect_fail: "连接失败 / DNS 失败",
@@ -20,11 +22,15 @@ const RULE_LABELS = {
   post_commit_break: "已提交后断流",
 };
 const SLOT_NAMES = ["主通道", "备通道", "通道 3", "通道 4"];
+const PROTOCOLS = ["openai-responses", "openai-chat", "anthropic"];
 
 async function api(path, opts) {
   const r = await fetch(path, opts);
   if (!r.ok) throw new Error(await r.text());
   return r.json();
+}
+function jsonH() {
+  return { "Content-Type": "application/json" };
 }
 
 // ---------- 状态 ----------
@@ -33,10 +39,18 @@ async function loadState() {
   STATE = await api("/api/state");
   renderTop();
   renderTopology();
-  renderTable();
-  renderKeys();
-  renderRules();
-  renderSettings();
+  if (!isEditing()) {
+    rebuildDraft();
+    renderPanels();
+  }
+}
+
+function isEditing() {
+  const a = document.activeElement;
+  if (a && (a.tagName === "INPUT" || a.tagName === "SELECT")) {
+    if (a.closest("#inline") || a.closest("#gwConsole") || a.closest("#dockBody")) return true;
+  }
+  return !!(draft && draft.dirty);
 }
 
 function renderTop() {
@@ -44,6 +58,123 @@ function renderTop() {
   $("#dot").className = "dot" + (STATE.running ? "" : " off");
   $("#addr").textContent = `${s.listen_host}:${s.listen_port}`;
   $("#proto").textContent = s.protocol;
+}
+
+// ---------- 草稿 ----------
+
+function rebuildDraft() {
+  if (!selected) {
+    draft = null;
+    return;
+  }
+  if (selected.kind === "upstream") {
+    const u = STATE.upstreams.find((x) => x.id === selected.id);
+    if (!u) return;
+    draft = {
+      kind: "upstream",
+      id: u.id,
+      isNew: false,
+      fields: { name: u.name, provider: u.provider, base_url: u.base_url, api_key: "" },
+      dirty: false,
+    };
+  } else if (selected.kind === "key") {
+    draft = { kind: "key", id: selected.id, fields: {}, dirty: false };
+  } else if (selected.kind === "gw") {
+    const s = STATE.settings;
+    draft = {
+      kind: "gw",
+      id: "gw",
+      fields: {
+        protocol: s.protocol,
+        listen_host: s.listen_host,
+        listen_port: s.listen_port,
+        max_switches_per_request: s.max_switches_per_request,
+        min_residency_s: s.min_residency_s,
+        precommit_budget_s: s.precommit_budget_s,
+      },
+      rules: Object.assign({}, s.rules || {}),
+      retry: !!s.retry_after_commit,
+      dirty: false,
+    };
+  }
+}
+
+function setField(name, value) {
+  if (!draft) return;
+  draft.fields[name] = value;
+  draft.dirty = true;
+  syncField(name, value);
+}
+
+function syncField(name, value) {
+  $$(`[data-field="${name}"]`).forEach((i) => {
+    if (i === document.activeElement) return;
+    if (i.type === "checkbox") i.checked = !!value;
+    else i.value = value;
+  });
+}
+
+function syncRule(name, value) {
+  if (!draft) return;
+  draft.rules[name] = value;
+  draft.dirty = true;
+  $$(`[data-rule="${name}"]`).forEach((i) => {
+    if (i !== document.activeElement) i.checked = !!value;
+  });
+}
+
+// ---------- 脏数据拦截 ----------
+
+function askSaveCancel() {
+  return new Promise((resolve) => {
+    const bar = el("div", "dirty-bar");
+    bar.appendChild(el("span", null, "当前对象有未保存的修改"));
+    const save = el("button", "btn primary", "保存并继续");
+    save.onclick = async () => {
+      bar.remove();
+      resolve(await saveDraft());
+    };
+    const cancel = el("button", "btn", "取消");
+    cancel.onclick = () => {
+      bar.remove();
+      rebuildDraft();
+      renderPanels();
+      resolve(false);
+    };
+    const discard = el("button", "btn ghost", "放弃并切换");
+    discard.onclick = () => {
+      bar.remove();
+      rebuildDraft();
+      resolve(true);
+    };
+    bar.appendChild(save);
+    bar.appendChild(cancel);
+    bar.appendChild(discard);
+    $("#stage").appendChild(bar);
+  });
+}
+
+async function guard() {
+  if (!draft || !draft.dirty) return true;
+  return await askSaveCancel();
+}
+
+async function selectObject(kind, id) {
+  if (selected && selected.kind === kind && selected.id === id) return;
+  if (!(await guard())) return;
+  selected = { kind, id };
+  rebuildDraft();
+  renderTopology();
+  renderPanels();
+  if (kind === "gw") focusGwConsole();
+}
+
+async function deselect() {
+  if (!(await guard())) return;
+  selected = null;
+  draft = null;
+  renderTopology();
+  renderPanels();
 }
 
 // ---------- 拓扑 ----------
@@ -64,7 +195,7 @@ function layout() {
   };
 
   const upX = spread(slotCount, w);
-  const keyX = spread(keys.length, w);
+  const keyX = spread(keys.length + 1, w);
   const gw = { x: w / 2, y: h / 2 };
   const topY = 64;
   const botY = h - 76;
@@ -83,20 +214,22 @@ function renderTopology() {
   const svg = $("#wires");
   nodes.innerHTML = "";
   svg.innerHTML = "";
+  nodePos = {};
   $("#emptyHint").classList.toggle("hidden", L.ups.length > 0);
 
   const edges = [];
   for (let i = 0; i < L.slotCount; i++) {
     const u = L.ups[i];
-    const x = L.upX[i];
-    if (u) {
-      edges.push({ kind: "up", owner: u.id, x1: x, y1: L.topY + 26, x2: L.gw.x, y2: L.gw.y });
-    } else {
-      edges.push({ kind: "ghost", owner: `slot${i}`, x1: x, y1: L.topY + 26, x2: L.gw.x, y2: L.gw.y });
-    }
+    edges.push({
+      kind: u ? "up" : "ghost",
+      x1: L.upX[i],
+      y1: L.topY + 26,
+      x2: L.gw.x,
+      y2: L.gw.y,
+    });
   }
   L.keys.forEach((k, i) => {
-    edges.push({ kind: "down", owner: k.id, x1: L.gw.x, y1: L.gw.y, x2: L.keyX[i], y2: L.botY - 26 });
+    edges.push({ kind: "down", x1: L.gw.x, y1: L.gw.y, x2: L.keyX[i], y2: L.botY - 26 });
   });
 
   edges.forEach((e) => {
@@ -110,7 +243,6 @@ function renderTopology() {
     line.setAttribute("stroke-width", "2");
     if (e.kind === "ghost") line.setAttribute("stroke-dasharray", "4 4");
     svg.appendChild(line);
-    e.line = line;
   });
 
   // 上游节点（含空槽位）
@@ -120,38 +252,56 @@ function renderTopology() {
     const n = el("div", "node");
     n.style.left = x + "px";
     n.style.top = L.topY + "px";
-    const tag = el("div", "slot-tag", SLOT_NAMES[i] || `通道 ${i + 1}`);
-    n.appendChild(tag);
     if (u) {
+      nodePos[u.id] = { x, y: L.topY };
+      if (selected && selected.kind === "upstream" && selected.id === u.id) n.classList.add("sel");
       const hc = healthClass(u);
       if (hc) n.classList.add(hc);
+      n.appendChild(el("div", "slot-tag", SLOT_NAMES[i] || `通道 ${i + 1}`));
       n.appendChild(el("div", "n-title", u.name));
       n.appendChild(el("div", "n-sub", u.health === "down" ? u.provider + " · 不可用" : u.provider));
       n.onclick = (ev) => {
         ev.stopPropagation();
-        openPopover("upstream", u, ev.clientX, ev.clientY);
+        selectObject("upstream", u.id);
       };
     } else {
       n.classList.add("ghost");
+      n.appendChild(el("div", "slot-tag", SLOT_NAMES[i] || `通道 ${i + 1}`));
       n.appendChild(el("div", "n-title", "未配置"));
       n.appendChild(el("div", "n-sub", "点击添加上游"));
       n.onclick = (ev) => {
         ev.stopPropagation();
-        openPopover("slot", { slot: i }, ev.clientX, ev.clientY);
+        newUpstream();
       };
     }
     nodes.appendChild(n);
   }
 
+  // 右侧：新增上游通道的虚线方块
+  const addX = Math.min((L.upX[L.slotCount - 1] || L.gw.x) + 195, L.w - 92);
+  nodePos.__new__ = { x: addX, y: L.topY };
+  const addU = el("div", "node ghost");
+  addU.style.left = addX + "px";
+  addU.style.top = L.topY + "px";
+  addU.appendChild(el("div", "slot-tag", "新增"));
+  addU.appendChild(el("div", "n-title", "＋"));
+  addU.appendChild(el("div", "n-sub", "新增上游通道"));
+  addU.onclick = (ev) => {
+    ev.stopPropagation();
+    newUpstream();
+  };
+  nodes.appendChild(addU);
+
   // 网关
   const gw = el("div", "node gateway");
   gw.style.left = L.gw.x + "px";
   gw.style.top = L.gw.y + "px";
+  if (selected && selected.kind === "gw") gw.classList.add("sel");
   gw.appendChild(el("div", "n-title", "HA Gateway"));
   gw.appendChild(el("div", "n-sub", "HA 高可用网关"));
   gw.onclick = (ev) => {
     ev.stopPropagation();
-    openPopover("gw", null, ev.clientX, ev.clientY);
+    selectObject("gw", "gw");
   };
   nodes.appendChild(gw);
 
@@ -160,229 +310,408 @@ function renderTopology() {
     const n = el("div", "node down");
     n.style.left = L.keyX[i] + "px";
     n.style.top = L.botY + "px";
+    if (selected && selected.kind === "key" && selected.id === k.id) n.classList.add("sel");
     n.appendChild(el("div", "n-title", k.label));
-    n.appendChild(el("div", "n-sub", k.key.slice(0, 16) + "…"));
+    n.appendChild(el("div", "n-sub mono", k.key.slice(0, 16) + "…"));
+    const acts = el("div", "node-actions");
+    const cp = el("button", null, "复制");
+    cp.title = "复制 Key";
+    cp.onclick = (ev) => {
+      ev.stopPropagation();
+      navigator.clipboard.writeText(k.key);
+      cp.textContent = "已复制";
+      setTimeout(() => (cp.textContent = "复制"), 1200);
+    };
+    const del = el("button", "danger", "删除");
+    del.title = "删除该 Key";
+    del.onclick = (ev) => {
+      ev.stopPropagation();
+      deleteKey(k);
+    };
+    acts.appendChild(cp);
+    acts.appendChild(del);
+    n.appendChild(acts);
     n.onclick = (ev) => {
       ev.stopPropagation();
-      openPopover("key", k, ev.clientX, ev.clientY);
+      selectObject("key", k.id);
     };
     nodes.appendChild(n);
   });
   const addK = el("div", "node ghost");
-  addK.style.left = Math.min((L.keyX[L.keyX.length - 1] || L.gw.x) + 185, L.w - 96) + "px";
+  addK.style.left = L.keyX[L.keyX.length - 1] + "px";
   addK.style.top = L.botY + "px";
   addK.appendChild(el("div", "n-title", "＋"));
   addK.appendChild(el("div", "n-sub", "新增下游 Key"));
-  addK.onclick = () => openDrawer("key");
+  addK.onclick = (ev) => {
+    ev.stopPropagation();
+    newKey();
+  };
   nodes.appendChild(addK);
 }
 
-// ---------- 就地编辑卡 ----------
+// ---------- 面板渲染 ----------
 
-function closePopover() {
-  if (popover) popover.remove();
-  popover = null;
+function renderPanels() {
+  renderInline();
+  renderGwConsole();
+  renderDock();
 }
 
-function openPopover(kind, obj, cx, cy) {
-  closePopover();
-  const p = el("div", "popover");
-  p.style.left = cx + 14 + "px";
-  p.style.top = cy + 12 + "px";
+function field(label, name, value, type, placeholder) {
+  const l = el("label");
+  l.appendChild(el("span", null, label));
+  const i = el("input");
+  i.type = type || "text";
+  i.value = value === undefined || value === null ? "" : value;
+  i.dataset.field = name;
+  if (placeholder) i.placeholder = placeholder;
+  i.oninput = () => setField(name, i.type === "number" ? Number(i.value) : i.value);
+  l.appendChild(i);
+  return l;
+}
+
+function selectField(label, name, value, options) {
+  const l = el("label");
+  l.appendChild(el("span", null, label));
+  const s = el("select");
+  s.dataset.field = name;
+  options.forEach((o) => {
+    const opt = el("option", null, o);
+    opt.value = o;
+    if (o === value) opt.selected = true;
+    s.appendChild(opt);
+  });
+  s.onchange = () => setField(name, s.value);
+  l.appendChild(s);
+  return l;
+}
+
+function renderInline() {
+  const box = $("#inline");
+  box.innerHTML = "";
+  if (!draft || draft.kind !== "upstream") {
+    box.classList.add("hidden");
+    return;
+  }
+  const pos = nodePos[draft.id];
+  const stage = $("#stage");
+  const w = stage.clientWidth;
+  box.classList.remove("hidden");
+  if (pos) {
+    const left = Math.min(Math.max(8, pos.x - 90), w - 296);
+    box.style.left = left + "px";
+    box.style.top = Math.max(8, pos.y + 32) + "px";
+  }
+  box.appendChild(el("div", "po-title", draft.isNew ? "新增上游通道" : "上游通道"));
+  const f = el("div", "form");
+  f.appendChild(field("名称", "name", draft.fields.name));
+  f.appendChild(field("Provider", "provider", draft.fields.provider));
+  f.appendChild(field("Base URL", "base_url", draft.fields.base_url));
+  f.appendChild(field("API Key", "api_key", draft.fields.api_key, "password", "留空则不修改"));
+  box.appendChild(f);
+  const row = el("div", "row");
+  const save = el("button", "btn primary", draft.isNew ? "添加" : "保存");
+  save.onclick = () => saveDraft();
+  row.appendChild(save);
+  if (!draft.isNew) {
+    const probe = el("button", "btn", "探测");
+    probe.onclick = () => probeUpstream(draft.id);
+    row.appendChild(probe);
+    const del = el("button", "btn danger", "删除");
+    del.onclick = () => deleteUpstream(draft.id);
+    row.appendChild(del);
+  }
+  box.appendChild(row);
+}
+
+function renderGwConsole() {
+  const box = $("#gwConsole");
+  box.innerHTML = "";
+  if (!draft || draft.kind !== "gw") {
+    box.classList.add("hidden");
+    return;
+  }
+  box.classList.remove("hidden");
+  box.appendChild(el("div", "po-title", "网关控制台"));
+  box.appendChild(el("div", "hint", "网关与故障转移的核心设置，改动后点「保存应用」。"));
 
   const f = el("div", "form");
-  const mk = (label, value, id, type) => {
-    const l = el("label", null, label);
-    const i = el("input");
-    i.id = id;
-    i.value = value || "";
-    if (type) i.type = type;
-    l.appendChild(i);
-    f.appendChild(l);
-    return i;
-  };
+  f.appendChild(selectField("协议", "protocol", draft.fields.protocol, PROTOCOLS));
+  f.appendChild(field("监听主机", "listen_host", draft.fields.listen_host));
+  f.appendChild(field("监听端口", "listen_port", draft.fields.listen_port, "number"));
+  f.appendChild(field("单请求最大切换", "max_switches_per_request", draft.fields.max_switches_per_request, "number"));
+  f.appendChild(field("最小驻留(秒)", "min_residency_s", draft.fields.min_residency_s, "number"));
+  f.appendChild(field("提交前预算(秒)", "precommit_budget_s", draft.fields.precommit_budget_s, "number"));
+  box.appendChild(f);
 
-  if (kind === "upstream" || kind === "slot") {
-    p.appendChild(el("div", "po-title", kind === "slot" ? "新增上游" : "编辑上游"));
-    mk("名称", obj.name, "p_name");
-    mk("Provider", obj.provider, "p_provider");
-    mk("Base URL", obj.base_url, "p_base");
-    mk("API Key", "", "p_key", "password");
-    const row = el("div", "row");
-    const save = el("button", "btn primary", kind === "slot" ? "添加" : "保存");
-    save.onclick = async () => {
-      const body = {
-        name: $("#p_name").value,
-        provider: $("#p_provider").value,
-        base_url: $("#p_base").value,
-        api_key: $("#p_key").value,
-      };
-      if (!body.name || !body.base_url) return alert("名称与 Base URL 必填");
-      if (kind === "slot") await api("/api/upstreams", { method: "POST", headers: jsonH(), body: JSON.stringify(body) });
-      else await api("/api/upstreams/" + obj.id, { method: "PUT", headers: jsonH(), body: JSON.stringify(body) });
-      closePopover();
-      loadState();
-    };
-    row.appendChild(save);
-    if (kind === "upstream") {
-      const probe = el("button", "btn", "探测");
-      probe.onclick = async () => {
-        const res = await api("/api/upstreams/" + obj.id + "/probe", { method: "POST" });
-        alert(`HTTP ${res.status}\n耗时 ${res.ms}ms\n\n${res.body || ""}`);
-      };
-      row.appendChild(probe);
-      const del = el("button", "btn danger", "删除");
-      del.onclick = async () => {
-        await api("/api/upstreams/" + obj.id, { method: "DELETE" });
-        closePopover();
-        loadState();
-      };
-      row.appendChild(del);
-    }
-    const cancel = el("button", "btn ghost", "取消");
-    cancel.onclick = closePopover;
-    row.appendChild(cancel);
-    f.appendChild(row);
-    p.appendChild(f);
-  } else if (kind === "key") {
-    p.appendChild(el("div", "po-title", "下游 Key"));
-    p.appendChild(el("div", "po-key", obj.key));
-    const row = el("div", "row");
-    const cp = el("button", "btn primary", "复制");
-    cp.onclick = () => {
-      navigator.clipboard.writeText(obj.key);
-      cp.textContent = "已复制";
-    };
-    row.appendChild(cp);
-    const del = el("button", "btn danger", "删除");
-    del.onclick = async () => {
-      await api("/api/keys/" + obj.id, { method: "DELETE" });
-      closePopover();
-      loadState();
-    };
-    row.appendChild(del);
-    const cancel = el("button", "btn ghost", "取消");
-    cancel.onclick = closePopover;
-    row.appendChild(cancel);
-    p.appendChild(row);
-  } else if (kind === "gw") {
-    const s = STATE.settings;
-    p.appendChild(el("div", "po-title", "HA Gateway"));
-    p.appendChild(el("div", "po-line", `协议　${s.protocol}`));
-    p.appendChild(el("div", "po-line", `监听　${s.listen_host}:${s.listen_port}`));
-    p.appendChild(el("div", "po-line", `上游　${STATE.upstreams.length} 条`));
-    const row = el("div", "row");
-    const open = el("button", "btn primary", "打开管理");
-    open.onclick = () => {
-      closePopover();
-      openDrawer("settings");
-    };
-    row.appendChild(open);
-    const cancel = el("button", "btn ghost", "取消");
-    cancel.onclick = closePopover;
-    row.appendChild(cancel);
-    p.appendChild(row);
-  }
-
-  document.body.appendChild(p);
-  popover = p;
-}
-
-function jsonH() {
-  return { "Content-Type": "application/json" };
-}
-
-// ---------- 抽屉 ----------
-
-function openDrawer(section) {
-  $("#drawer").classList.remove("hidden");
-  $("#toggleDrawer").textContent = "◀";
-  if (section) {
-    const target = { upstream: ".sec:nth-of-type(1)", key: ".sec:nth-of-type(2)", rules: ".sec:nth-of-type(3)", settings: ".sec:nth-of-type(4)" }[section];
-    const node = document.querySelector(target);
-    if (node) node.scrollIntoView({ behavior: "smooth", block: "start" });
-  }
-}
-
-function closeDrawer() {
-  $("#drawer").classList.add("hidden");
-  $("#toggleDrawer").textContent = "管理 ▶";
-}
-
-function renderTable() {
-  const tb = $("#upTable tbody");
-  tb.innerHTML = "";
-  STATE.upstreams.forEach((u) => {
-    const tr = el("tr");
-    if (u.id === selectedRow) tr.className = "sel";
-    const st = { healthy: "正常", degraded: "降级", down: "不可用" }[u.health];
-    const cls = { healthy: "ok", degraded: "warn", down: "bad" }[u.health];
-    tr.appendChild(el("td", null, u.name));
-    tr.appendChild(el("td", null, u.provider));
-    tr.appendChild(el("td", null, u.base_url));
-    tr.appendChild(el("td", cls, st));
-    tr.onclick = () => {
-      selectedRow = u.id;
-      $("#u_name").value = u.name;
-      $("#u_provider").value = u.provider;
-      $("#u_base").value = u.base_url;
-      $("#u_key").value = "";
-      renderTable();
-    };
-    tb.appendChild(tr);
-  });
-}
-
-function renderKeys() {
-  const box = $("#keyList");
-  box.innerHTML = "";
-  STATE.keys.forEach((k) => {
-    const row = el("div", "krow");
-    row.appendChild(el("span", "kname", k.label));
-    row.appendChild(el("span", "kval", k.key));
-    const cp = el("button", "btn ghost", "复制");
-    cp.onclick = () => {
-      navigator.clipboard.writeText(k.key);
-      cp.textContent = "已复制";
-    };
-    const del = el("button", "btn danger", "删除");
-    del.onclick = async () => {
-      await api("/api/keys/" + k.id, { method: "DELETE" });
-      loadState();
-    };
-    row.appendChild(cp);
-    row.appendChild(del);
-    box.appendChild(row);
-  });
-}
-
-function renderRules() {
-  const box = $("#ruleList");
-  box.innerHTML = "";
-  const rules = STATE.settings.rules || {};
+  box.appendChild(el("div", "sub-title", "触发自动切换的状态"));
+  const rules = el("div", "rules");
   Object.keys(RULE_LABELS).forEach((k) => {
     const l = el("label");
     const i = el("input");
     i.type = "checkbox";
-    i.checked = !!rules[k];
     i.dataset.rule = k;
+    i.checked = !!draft.rules[k];
+    i.onchange = () => syncRule(k, i.checked);
     l.appendChild(i);
     l.appendChild(el("span", null, RULE_LABELS[k]));
-    box.appendChild(l);
+    rules.appendChild(l);
   });
-  const retry = $("#r_retry");
-  retry.checked = !!STATE.settings.retry_after_commit;
-  retry.parentElement.classList.toggle("on", retry.checked);
+  box.appendChild(rules);
+
+  const dz = el("div", "danger-zone");
+  const rl = el("label");
+  const ri = el("input");
+  ri.type = "checkbox";
+  ri.dataset.retry = "1";
+  ri.checked = draft.retry;
+  ri.onchange = () => {
+    if (ri.checked) {
+      const ans = prompt("开启后，已提交给下游的请求仍可能重放，可能重复内容或重复计费。\n确认请输入 OK：");
+      if (ans !== "OK") {
+        ri.checked = false;
+        return;
+      }
+    }
+    draft.retry = ri.checked;
+    draft.dirty = true;
+    dz.classList.toggle("on", ri.checked);
+  };
+  rl.appendChild(ri);
+  rl.appendChild(el("span", null, "已提交后仍重试（危险）"));
+  dz.appendChild(rl);
+  dz.classList.toggle("on", draft.retry);
+  box.appendChild(dz);
+
+  const row = el("div", "row");
+  const save = el("button", "btn primary", "保存应用");
+  save.onclick = () => saveDraft();
+  row.appendChild(save);
+  const copy = el("button", "btn", "复制 Codex 配置");
+  copy.onclick = () => copyCodexSnippet();
+  row.appendChild(copy);
+  box.appendChild(row);
 }
 
-function renderSettings() {
+function focusGwConsole() {
+  const box = $("#gwConsole");
+  box.classList.remove("hidden");
+}
+
+function renderDock() {
+  const body = $("#dockBody");
+  const title = $("#dockTitle");
+  body.innerHTML = "";
+  if (!draft) {
+    title.textContent = "管理";
+    const t = el("div", "sec");
+    const h = el("h3", null, "对象属性面板");
+    t.appendChild(h);
+    t.appendChild(
+      el(
+        "p",
+        "hint",
+        "在左侧拓扑图里点任意对象（上游通道 / 网关 / 下游 Key），这里会显示它的编辑；点画布空白处取消选中。"
+      )
+    );
+    body.appendChild(t);
+    const list = el("div", "sec");
+    list.appendChild(el("h3", null, "概览"));
+    const s = STATE.settings;
+    list.appendChild(el("div", "po-line", `协议　${s.protocol}`));
+    list.appendChild(el("div", "po-line", `监听　${s.listen_host}:${s.listen_port}`));
+    list.appendChild(el("div", "po-line", `上游　${STATE.upstreams.length} 条`));
+    list.appendChild(el("div", "po-line", `下游 Key　${STATE.keys.length} 把`));
+    body.appendChild(list);
+    return;
+  }
+  if (draft.kind === "upstream") {
+    title.textContent = draft.isNew ? "新增上游" : "上游通道";
+    const sec = el("div", "sec");
+    const h = el("h3", null, "上游通道");
+    if (draft.dirty) h.appendChild(el("small", null, "（未保存）"));
+    sec.appendChild(h);
+    const f = el("div", "form");
+    f.appendChild(field("名称", "name", draft.fields.name));
+    f.appendChild(field("Provider", "provider", draft.fields.provider));
+    f.appendChild(field("Base URL", "base_url", draft.fields.base_url));
+    f.appendChild(field("API Key", "api_key", draft.fields.api_key, "password", "留空则不修改"));
+    sec.appendChild(f);
+    const row = el("div", "row");
+    const save = el("button", "btn primary", draft.isNew ? "添加" : "保存");
+    save.onclick = () => saveDraft();
+    row.appendChild(save);
+    if (!draft.isNew) {
+      const probe = el("button", "btn", "探测");
+      probe.onclick = () => probeUpstream(draft.id);
+      row.appendChild(probe);
+      const del = el("button", "btn danger", "删除");
+      del.onclick = () => deleteUpstream(draft.id);
+      row.appendChild(del);
+    }
+    sec.appendChild(row);
+    body.appendChild(sec);
+    return;
+  }
+  if (draft.kind === "key") {
+    title.textContent = "下游 Key";
+    const k = STATE.keys.find((x) => x.id === draft.id);
+    const sec = el("div", "sec");
+    sec.appendChild(el("h3", null, "下游 Key"));
+    if (k) {
+      sec.appendChild(el("div", "po-line", `名称　${k.label}`));
+      sec.appendChild(el("div", "po-key", k.key));
+    }
+    const row = el("div", "row");
+    const cp = el("button", "btn primary", "复制");
+    cp.onclick = () => {
+      if (!k) return;
+      navigator.clipboard.writeText(k.key);
+      cp.textContent = "已复制";
+      setTimeout(() => (cp.textContent = "复制"), 1200);
+    };
+    row.appendChild(cp);
+    const del = el("button", "btn danger", "删除");
+    del.onclick = () => deleteKey(k);
+    row.appendChild(del);
+    sec.appendChild(row);
+    body.appendChild(sec);
+    return;
+  }
+  if (draft.kind === "gw") {
+    title.textContent = "网关";
+    const s = STATE.settings;
+    const sec = el("div", "sec");
+    const h = el("h3", null, "网关");
+    if (draft.dirty) h.appendChild(el("small", null, "（未保存）"));
+    sec.appendChild(h);
+    sec.appendChild(el("div", "po-line", `协议　${s.protocol}`));
+    sec.appendChild(el("div", "po-line", `监听　${s.listen_host}:${s.listen_port}`));
+    sec.appendChild(el("div", "po-line", `上游　${STATE.upstreams.length} 条`));
+    const row = el("div", "row");
+    const open = el("button", "btn primary", "在画布中打开网关控制台");
+    open.onclick = () => focusGwConsole();
+    row.appendChild(open);
+    sec.appendChild(row);
+    body.appendChild(sec);
+  }
+}
+
+// ---------- 动作 ----------
+
+async function saveDraft() {
+  if (!draft) return true;
+  if (draft.kind === "upstream") {
+    const body = {
+      name: draft.fields.name,
+      provider: draft.fields.provider,
+      base_url: draft.fields.base_url,
+    };
+    if (draft.fields.api_key) body.api_key = draft.fields.api_key;
+    if (!body.name || !body.base_url) {
+      alert("名称与 Base URL 必填");
+      return false;
+    }
+    if (draft.isNew) {
+      await api("/api/upstreams", { method: "POST", headers: jsonH(), body: JSON.stringify(body) });
+      selected = null;
+      draft = null;
+    } else {
+      await api("/api/upstreams/" + draft.id, { method: "PUT", headers: jsonH(), body: JSON.stringify(body) });
+      draft.dirty = false;
+    }
+  } else if (draft.kind === "gw") {
+    await api("/api/settings", {
+      method: "PUT",
+      headers: jsonH(),
+      body: JSON.stringify({
+        protocol: draft.fields.protocol,
+        listen_host: draft.fields.listen_host,
+        listen_port: Number(draft.fields.listen_port),
+        max_switches_per_request: Number(draft.fields.max_switches_per_request),
+        min_residency_s: Number(draft.fields.min_residency_s),
+        precommit_budget_s: Number(draft.fields.precommit_budget_s),
+      }),
+    });
+    await api("/api/rules", {
+      method: "PUT",
+      headers: jsonH(),
+      body: JSON.stringify({ rules: draft.rules, retry_after_commit: draft.retry }),
+    });
+    draft.dirty = false;
+  }
+  await loadState();
+  return true;
+}
+
+async function newUpstream() {
+  if (!(await guard())) return;
+  selected = { kind: "upstream", id: "__new__" };
+  draft = {
+    kind: "upstream",
+    id: "__new__",
+    isNew: true,
+    fields: { name: "", provider: "", base_url: "", api_key: "" },
+    dirty: false,
+  };
+  renderTopology();
+  renderPanels();
+}
+
+async function deleteUpstream(id) {
+  if (!id || id === "__new__") return;
+  await api("/api/upstreams/" + id, { method: "DELETE" });
+  selected = null;
+  draft = null;
+  await loadState();
+  renderPanels();
+}
+
+async function probeUpstream(id) {
+  const res = await api("/api/upstreams/" + id + "/probe", { method: "POST" });
+  alert(`HTTP ${res.status}\n耗时 ${res.ms}ms\n\n${res.body || ""}`);
+}
+
+async function deleteKey(k) {
+  if (!k) return;
+  await api("/api/keys/" + k.id, { method: "DELETE" });
+  selected = null;
+  draft = null;
+  await loadState();
+  renderPanels();
+}
+
+async function newKey() {
+  if (!(await guard())) return;
+  const res = await api("/api/keys", { method: "POST", headers: jsonH(), body: JSON.stringify({ label: "client" }) });
+  try {
+    await navigator.clipboard.writeText(res.key);
+  } catch (e) {}
+  alert("已生成并复制：\n" + res.key);
+  await loadState();
+}
+
+function copyCodexSnippet() {
   const s = STATE.settings;
-  $("#s_protocol").value = s.protocol;
-  $("#s_host").value = s.listen_host;
-  $("#s_port").value = s.listen_port;
-  $("#s_switch").value = s.max_switches_per_request;
-  $("#s_residency").value = s.min_residency_s;
-  $("#s_budget").value = s.precommit_budget_s;
+  const wire = { "openai-responses": "responses", "openai-chat": "chat", anthropic: "anthropic" }[s.protocol];
+  const snippet =
+    `[model_providers.ha_gateway]\nname = "HA Gateway"\nbase_url = "http://${s.listen_host}:${s.listen_port}/v1/"\nenv_key = "HA_GATEWAY_KEY"\nwire_api = "${wire}"\n`;
+  navigator.clipboard.writeText(snippet);
+  alert("配置片段已复制");
+}
+
+// ---------- 抽屉 ----------
+
+function openDrawer() {
+  $("#drawer").classList.remove("hidden");
+  $("#toggleDrawer").textContent = "◀";
+  $("#toggleDrawer").title = "收起管理面板";
+}
+
+function closeDrawer() {
+  $("#drawer").classList.add("hidden");
+  $("#toggleDrawer").textContent = "▶";
+  $("#toggleDrawer").title = "管理面板";
 }
 
 // ---------- 日志 ----------
@@ -394,14 +723,11 @@ async function loadEvents() {
     if (e.ts * 1000 <= logSeen) return;
     logSeen = e.ts * 1000;
     const line = el("div");
-    const ts = el("span", "ts", "[" + fmtTs(e.ts) + "] ");
-    line.appendChild(ts);
-    const body2 = el("span", e.level, e.level.toUpperCase().padEnd(5) + " " + e.message);
-    line.appendChild(body2);
+    line.appendChild(el("span", "ts", "[" + fmtTs(e.ts) + "] "));
+    line.appendChild(el("span", e.level, e.level.toUpperCase().padEnd(5) + " " + e.message));
     body.appendChild(line);
   });
-  const box = $("#logBody");
-  if ($("#logFollow").checked) box.scrollTop = box.scrollHeight;
+  if ($("#logFollow").checked) body.scrollTop = body.scrollHeight;
 }
 
 function fmtTs(ts) {
@@ -412,11 +738,18 @@ function fmtTs(ts) {
 
 // ---------- 事件绑定 ----------
 
-$("#toggleDrawer").onclick = () => {
+$("#toggleDrawer").onclick = async () => {
   const d = $("#drawer");
-  d.classList.contains("hidden") ? openDrawer() : closeDrawer();
+  if (d.classList.contains("hidden")) openDrawer();
+  else {
+    if (!(await guard())) return;
+    closeDrawer();
+  }
 };
-$("#closeDrawer").onclick = closeDrawer;
+$("#closeDrawer").onclick = async () => {
+  if (!(await guard())) return;
+  closeDrawer();
+};
 $("#refresh").onclick = loadState;
 $("#copyAddr").onclick = () => {
   const s = STATE.settings;
@@ -426,114 +759,29 @@ $("#copyAddr").onclick = () => {
   setTimeout(() => ($("#copyAddr").textContent = "复制地址"), 1200);
 };
 
-$("#u_add").onclick = async () => {
-  const body = {
-    name: $("#u_name").value,
-    provider: $("#u_provider").value,
-    base_url: $("#u_base").value,
-    api_key: $("#u_key").value,
-  };
-  if (!body.name || !body.base_url) return alert("名称与 Base URL 必填");
-  await api("/api/upstreams", { method: "POST", headers: jsonH(), body: JSON.stringify(body) });
-  ["u_name", "u_provider", "u_base", "u_key"].forEach((i) => ($("#" + i).value = ""));
-  loadState();
-};
-
-$("#u_update").onclick = async () => {
-  if (!selectedRow) return alert("请先在表格里选中一行");
-  const body = {
-    name: $("#u_name").value,
-    provider: $("#u_provider").value,
-    base_url: $("#u_base").value,
-  };
-  if ($("#u_key").value) body.api_key = $("#u_key").value;
-  await api("/api/upstreams/" + selectedRow, { method: "PUT", headers: jsonH(), body: JSON.stringify(body) });
-  loadState();
-};
-
-$("#u_delete").onclick = async () => {
-  if (!selectedRow) return alert("请先在表格里选中一行");
-  await api("/api/upstreams/" + selectedRow, { method: "DELETE" });
-  selectedRow = null;
-  loadState();
-};
-
-$("#u_probe").onclick = async () => {
-  if (!selectedRow) return alert("请先在表格里选中一行");
-  const res = await api("/api/upstreams/" + selectedRow + "/probe", { method: "POST" });
-  alert(`HTTP ${res.status}\n耗时 ${res.ms}ms\n\n${res.body || ""}`);
-};
-
-$("#k_add").onclick = async () => {
-  const res = await api("/api/keys", { method: "POST", headers: jsonH(), body: JSON.stringify({ label: $("#k_label").value || "client" }) });
-  navigator.clipboard.writeText(res.key);
-  alert("已生成并复制：\n" + res.key);
-  loadState();
-};
-
-$("#r_retry").onchange = async (ev) => {
-  const on = ev.target.checked;
-  if (on) {
-    const ans = prompt("开启后，已提交给下游的请求仍可能重放，可能重复内容或重复计费。\n确认请输入 OK：");
-    if (ans !== "OK") {
-      ev.target.checked = false;
-      ev.target.parentElement.classList.remove("on");
-      return;
-    }
-    ev.target.parentElement.classList.add("on");
-  } else {
-    ev.target.parentElement.classList.remove("on");
-  }
-};
-
-$("#r_save").onclick = async () => {
-  const rules = {};
-  document.querySelectorAll("#ruleList input").forEach((i) => (rules[i.dataset.rule] = i.checked));
-  await api("/api/rules", {
-    method: "PUT",
-    headers: jsonH(),
-    body: JSON.stringify({ rules, retry_after_commit: $("#r_retry").checked }),
-  });
-  loadState();
-};
-
-$("#s_save").onclick = async () => {
-  const body = {
-    protocol: $("#s_protocol").value,
-    listen_host: $("#s_host").value,
-    listen_port: Number($("#s_port").value),
-    max_switches_per_request: Number($("#s_switch").value),
-    min_residency_s: Number($("#s_residency").value),
-    precommit_budget_s: Number($("#s_budget").value),
-  };
-  await api("/api/settings", { method: "PUT", headers: jsonH(), body: JSON.stringify(body) });
-  loadState();
-};
-
-$("#s_copy").onclick = () => {
-  const s = STATE.settings;
-  const wire = { "openai-responses": "responses", "openai-chat": "chat", anthropic: "anthropic" }[s.protocol];
-  const snippet =
-    `[model_providers.ha_gateway]\nname = "HA Gateway"\nbase_url = "http://${s.listen_host}:${s.listen_port}/v1/"\nenv_key = "HA_GATEWAY_KEY"\nwire_api = "${wire}"\n`;
-  navigator.clipboard.writeText(snippet);
-  alert("配置片段已复制");
-};
-
 $("#logClear").onclick = () => ($("#logBody").innerHTML = "");
 $("#logBody").addEventListener("scroll", (e) => {
   const b = e.target;
   if (b.scrollTop + b.clientHeight < b.scrollHeight - 8) $("#logFollow").checked = false;
 });
 
-document.addEventListener("click", (ev) => {
-  if (popover && !popover.contains(ev.target)) closePopover();
+$("#stage").addEventListener("click", (ev) => {
+  const ignore = [".node", ".inline-card", ".gw-console", ".dirty-bar"];
+  if (ignore.some((s) => ev.target.closest(s))) return;
+  deselect();
 });
-window.addEventListener("resize", renderTopology);
-window.addEventListener("keydown", (ev) => {
-  if (ev.key === "Escape") {
-    closePopover();
-    closeDrawer();
-  }
+
+window.addEventListener("resize", () => {
+  renderTopology();
+  renderPanels();
+});
+window.addEventListener("keydown", async (ev) => {
+  if (ev.key !== "Escape") return;
+  if (!(await guard())) return;
+  selected = null;
+  draft = null;
+  renderTopology();
+  renderPanels();
 });
 
 // ---------- 启动 ----------

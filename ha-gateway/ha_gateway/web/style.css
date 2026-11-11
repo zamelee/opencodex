@@ -287,3 +287,94 @@ input:focus, select:focus { outline: 2px solid rgba(26, 115, 232, 0.35); border-
 .po-title { font-weight: 700; margin-bottom: 8px; }
 .po-line { color: var(--muted); margin-bottom: 2px; }
 .po-key { font-family: Consolas, monospace; color: var(--blue); word-break: break-all; margin-bottom: 6px; }
+
+/* 画布内的管理面板开关：蓝色实心圆钮，只留箭头 */
+.drawer-toggle {
+  position: absolute;
+  right: 12px;
+  top: 12px;
+  z-index: 30;
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: 50%;
+  background: var(--blue);
+  color: #fff;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: 0 2px 10px rgba(26, 115, 232, 0.45);
+}
+.drawer-toggle:hover { background: #1667d6; }
+
+/* 上游节点旁的就地编辑卡 */
+.inline-card {
+  position: absolute;
+  z-index: 25;
+  width: 288px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.14);
+  padding: 10px 12px;
+}
+.inline-card .form label { grid-template-columns: 78px 1fr; margin-bottom: 3px; }
+.inline-card input { padding: 3px 8px; }
+.inline-card .row { margin: 6px 0 0; }
+
+/* 网关控制台：画布左侧空白区域 */
+.gw-console {
+  position: absolute;
+  left: 14px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 26;
+  width: 330px;
+  max-height: calc(100% - 32px);
+  overflow: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.14);
+  padding: 12px 14px;
+}
+.gw-console .sub-title { font-weight: 600; margin: 10px 0 4px; }
+
+/* 节点内小按钮（复制 / 删除） */
+.node-actions {
+  display: flex;
+  gap: 5px;
+  justify-content: center;
+  margin-top: 6px;
+}
+.node-actions button {
+  font: inherit;
+  font-size: 11px;
+  padding: 1px 7px;
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--text);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.node-actions button:hover { background: #f0f2f5; }
+.node-actions button.danger { color: var(--red); }
+.node.sel { box-shadow: 0 0 0 3px rgba(26, 115, 232, 0.35); }
+.node .n-sub.mono { font-family: Consolas, monospace; }
+
+/* 未保存拦截条 */
+.dirty-bar {
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  z-index: 35;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #fff;
+  border: 1px solid var(--amber);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.16);
+}
