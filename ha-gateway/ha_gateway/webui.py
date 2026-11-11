@@ -136,13 +136,14 @@ def build_web_app(app) -> web.Application:
             raise web.HTTPNotFound()
         if "name" in data:
             u.name = data["name"]
-        if "provider" in data:
-            u.provider = data["provider"]
         if "base_url" in data:
             base_url, note = normalize_base_url(data["base_url"], app.settings.protocol)
             u.base_url = base_url
-            if not (u.provider or "").strip():
-                u.provider = provider_from_base_url(base_url)
+        if "provider" in data:
+            # Provider 留空表示"用默认"，按 Base URL 的域名+端口补
+            u.provider = (data["provider"] or "").strip()
+        if not (u.provider or "").strip():
+            u.provider = provider_from_base_url(u.base_url)
         if data.get("api_key"):
             u.api_key = data["api_key"]
         if "enabled" in data:
