@@ -14,6 +14,7 @@
     <span class="proto" id="proto"></span>
     <button class="btn ghost" id="copyAddr">复制地址</button>
     <span class="spacer"></span>
+    <label class="follow" title="连线流动与请求数据球"><input type="checkbox" id="animToggle" checked /> 动画</label>
     <button class="btn ghost" id="refresh">刷新</button>
   </header>
 
@@ -29,7 +30,9 @@
       <div class="gw-console hidden" id="gwConsole"></div>
       <div class="legend">
         <span><i class="l-active"></i>当前通道</span>
-        <span><i class="l-ready"></i>可切换</span>
+        <span><i class="l-ready"></i>正常</span>
+        <span><i class="l-degraded"></i>降级</span>
+        <span><i class="l-down"></i>不可用</span>
         <span><i class="l-ghost"></i>未配置</span>
       </div>
       <div class="empty hidden" id="emptyHint">

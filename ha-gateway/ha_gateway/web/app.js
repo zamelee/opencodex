@@ -320,6 +320,7 @@ function healthText(u) {
 const SVG_NS = "http://www.w3.org/2000/svg";
 const nodeEls = new Map(); // key -> 元素
 let wirePool = []; // 连线 path 池
+let wireEdges = []; // 当前这一帧的连线（含 id / 健康态 / 对应的 path 元素）
 
 function renderWires(svg, edges) {
   while (wirePool.length < edges.length) {
@@ -332,15 +333,21 @@ function renderWires(svg, edges) {
       "d",
       `M ${e.x1} ${e.y1} C ${e.x1} ${e.y1 + dy}, ${e.x2} ${e.y2 - dy}, ${e.x2} ${e.y2}`
     );
-    const isActive = e.kind === "up" && e.owner === activeUpstream;
-    p.setAttribute("stroke", isActive ? "#1a73e8" : e.kind === "ghost" ? "#dfe3e8" : "#d5d9e0");
-    p.setAttribute("stroke-width", "2");
-    p.setAttribute("fill", "none");
-    if (e.kind === "ghost") p.setAttribute("stroke-dasharray", "4 4");
-    else p.removeAttribute("stroke-dasharray");
+    // 颜色只表达健康态，"当前活跃"用线宽强调，
+    // 免得把降级通道画成一条健康的蓝线。
+    p.setAttribute("class", wireClass(e));
     svg.appendChild(p); // 已存在的子节点只是移动，不重建
   });
   for (let i = edges.length; i < wirePool.length; i++) wirePool[i].remove();
+  wireEdges = edges.map((e, i) => ({ ...e, path: wirePool[i] }));
+  flowSystem.setPaths(wireEdges, svg);
+}
+
+function wireClass(e) {
+  if (e.kind === "ghost") return "wire-flow wire-flow-ghost";
+  const h = e.health === "down" ? "down" : e.health === "degraded" ? "degraded" : "up";
+  const active = e.kind === "up" && e.owner === activeUpstream ? " wire-flow-active" : "";
+  return "wire-flow wire-flow-" + h + active;
 }
 
 function buildUpstreamNode(u, i) {
@@ -551,8 +558,10 @@ function renderTopology() {
   for (let i = 0; i < L.slotCount; i++) {
     const u = L.ups[i];
     edges.push({
+      id: u ? "up:" + u.id : "ghost:" + i,
       kind: u ? "up" : "ghost",
       owner: u ? u.id : null,
+      health: u ? u.health : null,
       x1: L.upX[i],
       y1: L.topY + 26,
       x2: L.gw.x,
@@ -560,7 +569,16 @@ function renderTopology() {
     });
   }
   L.keys.forEach((k, i) => {
-    edges.push({ kind: "down", x1: L.gw.x, y1: L.gw.y, x2: L.keyX[i], y2: L.botY - 26 });
+    edges.push({
+      id: "down:" + k.id,
+      kind: "down",
+      owner: k.id,
+      health: null,
+      x1: L.gw.x,
+      y1: L.gw.y,
+      x2: L.keyX[i],
+      y2: L.botY - 26,
+    });
   });
   renderWires(svg, edges);
 
@@ -1597,7 +1615,323 @@ window.addEventListener("keydown", async (ev) => {
 
 // ---------- 启动 ----------
 
+// ---------- 连线动画（流动虚线 + 请求数据球） ----------
+//
+// 两套独立机制：
+//   1) 链路流动 —— CSS stroke-dashoffset，颜色表达健康态（up/degraded/down/ghost）
+//   2) 请求数据球 —— JS rAF + path.getPointAtLength()，沿连线跑的小球
+//
+// 关键约束：数据球不参与 lastStateSig 的拓扑签名。
+// 请求数一变就整图重绘会抵消已有的增量渲染优势，所以这里独立同步。
+
+const flowSystem = (() => {
+  const MAX_BALLS = 24;      // 全局上限
+  const MAX_PER_EDGE = 4;    // 单条连线上限
+  const MIN_SPACING = 36;    // 同一条线上两个球的最小间距（px）
+  const RADIUS = 3.5;
+  const SPEED = 110;         // px/s
+  const FADE_MS = 300;
+  const MAX_DELTA = 50;      // 帧间隔截断，避免从后台切回来时球突然跳一大段
+
+  let svg = null;
+  let layer = null;
+  const balls = [];
+  let rafId = 0;
+  let lastTime = null;
+  let enabled = true;        // 用户开关（顶栏「动画」）
+  let destroyed = false;
+
+  const motionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+
+  function ensureLayer(targetSvg) {
+    if (targetSvg) svg = targetSvg;
+    if (!svg) return null;
+    if (!layer) {
+      layer = document.createElementNS(SVG_NS, "g");
+      layer.setAttribute("class", "flow-layer");
+      layer.setAttribute("aria-hidden", "true");
+    }
+    if (layer.parentNode !== svg || svg.lastElementChild !== layer) {
+      svg.appendChild(layer);
+    }
+    return layer;
+  }
+
+  function createBall() {
+    if (balls.length >= MAX_BALLS) return null;
+    const node = document.createElementNS(SVG_NS, "circle");
+    node.setAttribute("r", String(RADIUS));
+    node.setAttribute("cx", "0");
+    node.setAttribute("cy", "0");
+    node.setAttribute("opacity", "0");
+    node.setAttribute("class", "flow-ball");
+    ensureLayer().appendChild(node);
+    const ball = {
+      node,
+      state: "pooled", // pooled -> active -> fading -> pooled
+      edgeId: null,
+      path: null,
+      pathLength: 0,
+      distance: 0,
+      dir: 1,
+      fadeElapsed: 0,
+      onComplete: null,
+    };
+    balls.push(ball);
+    return ball;
+  }
+
+  function resetBall(ball) {
+    ball.state = "pooled";
+    ball.edgeId = null;
+    ball.path = null;
+    ball.pathLength = 0;
+    ball.distance = 0;
+    ball.dir = 1;
+    ball.fadeElapsed = 0;
+    ball.onComplete = null;
+    ball.node.setAttribute("opacity", "0");
+    ball.node.style.display = "none";
+  }
+
+  function positionOnPath(ball) {
+    return ball.dir > 0 ? ball.distance : ball.pathLength - ball.distance;
+  }
+
+  function updatePosition(ball) {
+    const t = Math.max(0, Math.min(ball.pathLength, positionOnPath(ball)));
+    const pt = ball.path.getPointAtLength(t);
+    ball.node.setAttribute("cx", pt.x);
+    ball.node.setAttribute("cy", pt.y);
+  }
+
+  function edgeBalls(edgeId) {
+    return balls.filter((b) => b.state !== "pooled" && b.edgeId === edgeId);
+  }
+
+  function canPlace(edgeId, position) {
+    if (edgeBalls(edgeId).length >= MAX_PER_EDGE) return false;
+    for (const b of edgeBalls(edgeId)) {
+      if (Math.abs(position - positionOnPath(b)) < MIN_SPACING) return false;
+    }
+    return true;
+  }
+
+  function findSpawn(edgeId, dir, pathLength) {
+    for (const d of [0, MIN_SPACING, MIN_SPACING * 2, MIN_SPACING * 3, MIN_SPACING * 4]) {
+      if (d >= pathLength) continue;
+      const pos = dir > 0 ? d : pathLength - d;
+      if (canPlace(edgeId, pos)) return d;
+    }
+    return null;
+  }
+
+  function spawnBall(edgeId, dir, onComplete) {
+    if (destroyed || !enabled || motionQuery.matches || document.hidden) return null;
+    const edge = wireEdges.find((e) => e.id === edgeId);
+    if (!edge || !edge.path || !edge.path.isConnected) return null;
+    let pathLength = 0;
+    try {
+      pathLength = edge.path.getTotalLength();
+    } catch (e) {
+      return null;
+    }
+    if (!pathLength || !isFinite(pathLength)) return null;
+    if (balls.filter((b) => b.state !== "pooled").length >= MAX_BALLS) return null;
+    dir = dir < 0 ? -1 : 1;
+    const d = findSpawn(edgeId, dir, pathLength);
+    if (d === null) return null;
+    const ball = balls.find((b) => b.state === "pooled") || createBall();
+    if (!ball) return null;
+    ball.state = "active";
+    ball.edgeId = edgeId;
+    ball.path = edge.path;
+    ball.pathLength = pathLength;
+    ball.distance = d;
+    ball.dir = dir;
+    ball.fadeElapsed = 0;
+    ball.onComplete = typeof onComplete === "function" ? onComplete : null;
+    ball.node.style.display = "";
+    ball.node.setAttribute("opacity", "0.95");
+    ball.node.setAttribute("class", "flow-ball is-active");
+    updatePosition(ball);
+    ensureRunning();
+    return ball;
+  }
+
+  function releaseBall(ball) {
+    if (!ball || ball.state !== "active") return;
+    ball.state = "fading";
+    ball.fadeElapsed = 0;
+    ball.onComplete = null;
+  }
+
+  function finishBall(ball) {
+    const cb = ball.onComplete;
+    resetBall(ball);
+    if (typeof cb === "function") cb();
+  }
+
+  function tick(now) {
+    rafId = requestAnimationFrame(tick);
+    if (lastTime === null) lastTime = now;
+    const dt = Math.min(MAX_DELTA, now - lastTime);
+    lastTime = now;
+    for (const ball of balls) {
+      if (ball.state === "active") {
+        ball.distance += (SPEED * dt) / 1000;
+        if (ball.distance >= ball.pathLength) {
+          finishBall(ball);
+          continue;
+        }
+        updatePosition(ball);
+      } else if (ball.state === "fading") {
+        ball.fadeElapsed += dt;
+        const p = Math.min(1, ball.fadeElapsed / FADE_MS);
+        ball.node.setAttribute("opacity", String(0.95 * (1 - p)));
+        if (p >= 1) resetBall(ball);
+      }
+    }
+  }
+
+  function ensureRunning() {
+    const want = enabled && !motionQuery.matches && !document.hidden;
+    if (want && !rafId) {
+      lastTime = null;
+      rafId = requestAnimationFrame(tick);
+    } else if (!want && rafId) {
+      cancelAnimationFrame(rafId);
+      rafId = 0;
+      lastTime = null;
+    }
+  }
+
+  function setPaths(edges, targetSvg) {
+    // path 元素是池化复用的，位置随时会变；这里只登记 id -> 元素，
+    // 每帧真正取坐标时都从元素上重新算长度。
+    ensureLayer(targetSvg);
+    for (const ball of balls) {
+      if (ball.state === "pooled") continue;
+      const edge = edges.find((e) => e.id === ball.edgeId);
+      if (!edge || !edge.path || !edge.path.isConnected) {
+        releaseBall(ball);
+        continue;
+      }
+      ball.path = edge.path;
+      try {
+        ball.pathLength = edge.path.getTotalLength();
+        ball.distance = Math.min(ball.distance, ball.pathLength);
+      } catch (e) {
+        releaseBall(ball);
+      }
+    }
+  }
+
+  function setEnabled(on) {
+    enabled = !!on;
+    if (!enabled) {
+      for (const ball of balls) resetBall(ball);
+      if (layer) layer.style.display = "none";
+    } else {
+      if (layer) layer.style.display = "";
+    }
+    ensureRunning();
+  }
+
+  function isEnabled() {
+    return enabled;
+  }
+
+  document.addEventListener("visibilitychange", () => {
+    ensureRunning();
+  });
+
+  return { spawnBall, setPaths, setEnabled, isEnabled, ensureRunning };
+})();
+
+// 第一阶段：没有后端 inflight 指标，用装饰性数据源顶替。
+// 在活跃上游链路上定时发一颗球，跑到网关后再串一颗到下游（回包是流式的，不画球）。
+const decorativeFlow = (() => {
+  const MIN_INTERVAL = 1400;
+  const MAX_INTERVAL = 2800;
+  let timer = 0;
+  let running = false;
+
+  function allowed() {
+    return running && !document.hidden && flowSystem.isEnabled();
+  }
+
+  function pick(list) {
+    return list.length ? list[Math.floor(Math.random() * list.length)] : null;
+  }
+
+  function upEdges() {
+    const usable = wireEdges.filter((e) => e.kind === "up" && e.health !== "down");
+    const active = usable.filter((e) => e.owner === activeUpstream);
+    // 没有明确的活跃通道时，就在所有可用通道里挑一条，别让动画空转
+    return active.length ? active : usable;
+  }
+
+  function downEdges() {
+    return wireEdges.filter((e) => e.kind === "down");
+  }
+
+  function pulse() {
+    timer = 0;
+    if (!allowed()) return;
+    const up = pick(upEdges());
+    if (up) {
+      const down = pick(downEdges());
+      flowSystem.spawnBall(up.id, 1, () => {
+        if (down && allowed()) flowSystem.spawnBall(down.id, 1);
+      });
+    }
+    schedule();
+  }
+
+  function schedule() {
+    if (!allowed() || timer) return;
+    timer = setTimeout(pulse, MIN_INTERVAL + Math.random() * (MAX_INTERVAL - MIN_INTERVAL));
+  }
+
+  function start() {
+    running = true;
+    if (timer) clearTimeout(timer);
+    timer = 0;
+    schedule();
+  }
+
+  function stop() {
+    running = false;
+    if (timer) clearTimeout(timer);
+    timer = 0;
+  }
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) stop();
+    else schedule();
+  });
+
+  return { start, stop };
+})();
+
+// 顶栏「动画」开关：默认开，关掉后连线静止、数据球消失
+const animToggle = $("#animToggle");
+function applyAnim(on) {
+  $("#wires").classList.toggle("anim-off", !on);
+  flowSystem.setEnabled(on);
+  if (on) decorativeFlow.start();
+  else decorativeFlow.stop();
+}
+animToggle.checked = localStorage.getItem("ha.anim") !== "0";
+animToggle.onchange = () => {
+  localStorage.setItem("ha.anim", animToggle.checked ? "1" : "0");
+  applyAnim(animToggle.checked);
+  pushLog("info", "连线动画已" + (animToggle.checked ? "开启" : "关闭"));
+};
+
 loadState();
+applyAnim(animToggle.checked);
 setInterval(loadState, 2000);
 setInterval(loadEvents, 2000);
 setInterval(async () => {

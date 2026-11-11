@@ -196,9 +196,101 @@ main {
   font-size: 11px;
 }
 .legend i { display: inline-block; width: 16px; height: 3px; margin-right: 5px; vertical-align: middle; }
-.l-active { background: var(--blue); }
-.l-ready { background: #d5d9e0; }
+.l-active { background: #829bb8; height: 5px; }
+.l-ready { background: #829bb8; }
 .l-ghost { background: #dfe3e8; }
+.l-degraded { background: #d69a38; }
+.l-down { background: #d65b60; }
+
+/* =========================================
+   连线动画：流动虚线 + 请求数据球
+   ========================================= */
+
+.wire-flow {
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+/* up：正常，蓝灰，缓慢流动 */
+.wire-flow-up {
+  stroke: #829bb8;
+  stroke-dasharray: 5 7;
+  animation: wire-dash-flow 3.5s linear infinite;
+}
+
+/* degraded：降级，琥珀，稍快 */
+.wire-flow-degraded {
+  stroke: #d69a38;
+  stroke-dasharray: 5 7;
+  animation: wire-dash-flow 2.5s linear infinite;
+}
+
+/* down：不可用，红色，静止 */
+.wire-flow-down {
+  stroke: #d65b60;
+  stroke-dasharray: 5 7;
+  animation: none;
+  stroke-dashoffset: 0;
+}
+
+/* ghost：占位槽位，灰色，静止 */
+.wire-flow-ghost {
+  stroke: #dfe3e8;
+  stroke-dasharray: 4 4;
+  animation: none;
+  stroke-dashoffset: 0;
+}
+
+/* 当前活跃上游：只用线宽强调，不覆盖健康色 */
+.wire-flow-active {
+  stroke-width: 2.8;
+}
+
+@keyframes wire-dash-flow {
+  from {
+    stroke-dashoffset: 0;
+  }
+  to {
+    stroke-dashoffset: -12;
+  }
+}
+
+/* 开关关掉：连线静止、数据球隐藏 */
+#wires.anim-off .wire-flow {
+  animation: none !important;
+  stroke-dashoffset: 0 !important;
+}
+#wires.anim-off .flow-layer {
+  display: none !important;
+}
+
+.flow-layer {
+  pointer-events: none;
+}
+
+.flow-ball {
+  fill: #a8c9ee;
+  stroke: #ffffff;
+  stroke-width: 1;
+  opacity: 0;
+  pointer-events: none;
+}
+.flow-ball.is-active {
+  opacity: 0.95;
+}
+
+/* 用户在系统里关掉了动效：静态虚线，不画球 */
+@media (prefers-reduced-motion: reduce) {
+  .wire-flow-up,
+  .wire-flow-degraded {
+    animation: none !important;
+    stroke-dashoffset: 0 !important;
+  }
+  .flow-layer {
+    display: none !important;
+  }
+}
 
 .empty {
   position: absolute;
