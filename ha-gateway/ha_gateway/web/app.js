@@ -1112,6 +1112,7 @@ function applyHint(wrap, labelEl, inputEl, hint, mode) {
 function modelField(draft, opts) {
   opts = opts || {};
   const wrap = el("div", "f");
+  let probeBtn = null;
   const l = el("label");
   l.appendChild(el("span", null, "探测模型"));
   const holder = el("div", "picker");
@@ -1119,7 +1120,7 @@ function modelField(draft, opts) {
   btn.type = "button";
   btn.dataset.field = "model";
   btn.textContent = draft.fields.model || "未选择模型";
-  btn.title = "探测时用哪个模型。先点右边「拉取模型」拿上游真实支持的清单";
+  btn.title = "探测时用哪个模型。先点下方「拉取模型」拿上游真实支持的清单";
   const inp = el("input", "picker-input");
   inp.type = "text";
   inp.dataset.field = "model";
@@ -1132,6 +1133,7 @@ function modelField(draft, opts) {
     draft.fields.model = inp.value;
     draft.dirty = true;
     btn.textContent = inp.value || "未选择模型";
+    if (probeBtn) probeBtn.disabled = !inp.value;
     refreshDirtyMarks();
   };
   holder.appendChild(btn);
@@ -1170,6 +1172,11 @@ function modelField(draft, opts) {
     }
   );
   row.appendChild(fetchBtn);
+  // 探测按钮紧挨「拉取模型」：拉完选一个模型，右边直接点探测
+  if (!draft.isNew) {
+    probeBtn = probeButton(draft);
+    row.appendChild(probeBtn);
+  }
   wrap.appendChild(row);
 
   btn.onclick = (ev) => {
@@ -1249,9 +1256,8 @@ function openModelMenu(btn, holder, draft) {
   }
 }
 
-// 探测按钮单独一行：没选模型就禁用，并说明为什么
-function probeRow(draft) {
-  const row = el("div", "row");
+// 探测按钮：没选模型就禁用，并说明为什么
+function probeButton(draft) {
   const probe = mkBtn(
     "",
     "probe",
@@ -1264,8 +1270,7 @@ function probeRow(draft) {
     }
   );
   probe.disabled = !draft.fields.model;
-  row.appendChild(probe);
-  return row;
+  return probe;
 }
 
 // 分段单选（不用原生 select，避免重绘时残留空白弹层）
@@ -1531,9 +1536,6 @@ function renderInline() {
     row.appendChild(del);
   }
   box.appendChild(row);
-  // 探测单独一行：要先选好模型才有意义
-  if (!draft.isNew) box.appendChild(probeRow(draft));
-
   if (!draft.isNew) {
     const row2 = el("div", "row");
     const forced = (STATE.settings || {}).forced_upstream_id === draft.id;
@@ -2009,8 +2011,6 @@ function renderDock() {
       row.appendChild(del);
     }
     sec.appendChild(row);
-    // 探测单独一行：要先选好模型才有意义
-    if (!draft.isNew) sec.appendChild(probeRow(draft));
     sec.appendChild(
       el(
         "div",
