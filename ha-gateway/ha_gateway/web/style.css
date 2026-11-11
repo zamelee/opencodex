@@ -328,6 +328,14 @@ main {
   font-weight: 700;
 }
 
+/* 对账字段：rid / resp_id / request_id，暗色等宽，不抢正文 */
+.log-body .kv {
+  font-family: var(--mono, ui-monospace, Consolas, monospace);
+  font-size: 11px;
+  color: var(--muted);
+  opacity: 0.85;
+}
+
 .legend {
   position: absolute;
   left: 14px;

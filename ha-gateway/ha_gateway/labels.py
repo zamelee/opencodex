@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 SLOT_LABELS = ["主通道", "备通道"]
+SELF_NAMED_PREFIX = "通道 "
 
 
 def slot_label(index: int) -> str:
@@ -25,5 +26,9 @@ def upstream_label(upstreams, upstream_id: str) -> str:
             continue
         name = (u.name or "").strip()
         tag = slot_label(i)
+        # 通道名本身就叫「通道 5」这类时，再叠一层槽位就是「通道 5 通道 5」，
+        # 重复得毫无意义，直接用名字。
+        if name and (tag in name or name.startswith(SELF_NAMED_PREFIX)):
+            return name
         return f"{tag} {name}" if name else f"{tag} {u.id}"
     return upstream_id

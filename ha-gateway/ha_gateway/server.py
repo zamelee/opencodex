@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import re
 import time
 from typing import Callable
@@ -13,6 +14,7 @@ import aiohttp
 from aiohttp import web
 
 from .failover import UpstreamSelector, classify_exception, classify_status
+from .labels import upstream_label
 from .metrics import Metrics
 from .models import Phase, Rule
 from .session import session_key as make_session_key
@@ -112,6 +114,10 @@ def _host_of(base_url: str) -> str:
 
 
 _RESP_ID_RE = re.compile(rb'"id"\s*:\s*"((?:resp|chatcmpl|msg)_[A-Za-z0-9_\-]{6,})"')
+_REQ_ID_RE = re.compile(
+    rb'"(?:request_id|requestId|request-id|x-request-id)"\s*:\s*"([^"]{4,200})"'
+)
+_REQ_ID_TEXT_RE = re.compile(rb"request[ _-]?id[:=]\s*([A-Za-z0-9_\-]{6,200})", re.I)
 
 
 def _extract_response_id(chunk: bytes) -> str:
@@ -120,6 +126,31 @@ def _extract_response_id(chunk: bytes) -> str:
         return ""
     m = _RESP_ID_RE.search(chunk)
     return m.group(1).decode("ascii", "ignore") if m else ""
+
+
+def _extract_request_id(body: bytes) -> str:
+    """从上游错误体里捞出 request id（没有就返回空串）。"""
+    if not body or len(body) > 256 * 1024:
+        return ""
+    m = _REQ_ID_RE.search(body)
+    if not m:
+        m = _REQ_ID_TEXT_RE.search(body)
+    return m.group(1).decode("utf-8", "ignore") if m else ""
+
+
+def _extract_model(body: bytes) -> str:
+    """从请求体里取 model 名（只取元信息，绝不记录对话内容）。"""
+    if not body or len(body) > 4 * 1024 * 1024:
+        return ""
+    try:
+        data = json.loads(body)
+    except (ValueError, TypeError):
+        return ""
+    if isinstance(data, dict):
+        model = data.get("model")
+        if isinstance(model, str):
+            return model[:80]
+    return ""
 
 
 class Gateway:
@@ -232,7 +263,26 @@ class Gateway:
             self.metrics.downstream_end()
             return _normalize_error(502, b"no upstream configured", "no_upstream")
 
+        # 一次下游请求一个短 rid，把这次请求牵出的所有日志行串起来。
+        # resp_id 只有成功响应才有；失败行靠 rid + request_id 对账。
+        rid = os.urandom(4).hex()
+        labels = {u.id: upstream_label(upstreams, u.id) for u in upstreams}
+        model_name = _extract_model(body)
+        self.log(
+            "info",
+            "request",
+            f"请求 rid={rid} {request.method} {path} "
+            f"model={model_name or '-'} body={len(body)}B",
+        )
+
         plan = self.selector.plan(upstreams, skey)
+        cand = [labels.get(u.id, u.name) for u in plan.candidates]
+        sticky = labels.get(plan.sticky_id, "") if plan.sticky_id else ""
+        self.log(
+            "info",
+            "plan",
+            f"候选 rid={rid} 顺序 {'→'.join(cand) if cand else '无'} 粘性={sticky or '无'}",
+        )
         last_body = b""
         last_code = "upstream_unavailable"
 
@@ -263,11 +313,22 @@ class Gateway:
                 rule = classify_exception(exc)
                 self.health.record_failure(upstream.id, str(exc))
                 self.selector.mark_failure(upstream.id)
-                self.log("warn", "upstream", f"{upstream.name} 连接失败: {exc}")
+                self.log(
+                    "warn",
+                    "upstream",
+                    f"✗ {labels.get(upstream.id, upstream.name)} rid={rid} "
+                    f"连接失败 rule=connect_fail: {exc}",
+                )
                 if self.selector.should_switch(plan, rule, phase):
                     plan.mark_failed(upstream.id)
                     self.selector.note_switch(plan)
-                    self.log("info", "switch", f"切换到下一个上游（原 {upstream.name}）")
+                    nxt = plan.next_upstream()
+                    self.log(
+                        "info",
+                        "switch",
+                        f"切换 rid={rid} {labels.get(upstream.id, upstream.name)}"
+                        + (f" → {labels.get(nxt.id, nxt.name)}" if nxt else " → 无候选"),
+                    )
                     continue
                 self.metrics.downstream_end()
                 return _normalize_error(502, str(exc).encode("utf-8"), "connect_failed")
@@ -289,8 +350,9 @@ class Gateway:
                     self.log(
                         "warn",
                         "upstream",
-                        f"{upstream.name} 预提交等待超过 "
-                        f"{self.settings.precommit_budget_s}s，判定过慢",
+                        f"✗ {labels.get(upstream.id, upstream.name)} rid={rid} "
+                        f"预提交等待超过 {self.settings.precommit_budget_s}s，判定过慢 "
+                        f"rule=connect_fail",
                     )
                     if self.selector.should_switch(plan, Rule.CONNECT_FAIL, phase):
                         plan.mark_failed(upstream.id)
@@ -308,8 +370,19 @@ class Gateway:
                 self.health.record_success(upstream.id)
                 self.session_router.bind(skey, upstream.id)
                 self.on_route(upstream.id)
-                self.log("info", "route", f"{upstream.name} 命中 {status}")
-                return await self._commit_stream(request, resp, first, upstream.id)
+                resp_id = _extract_response_id(first)
+                stream = await self._commit_stream(
+                    request, resp, first, upstream.id, resp_id
+                )
+                total_ms = (time.monotonic() - attempt_started) * 1000
+                self.log(
+                    "info",
+                    "route",
+                    f"✓ {labels.get(upstream.id, upstream.name)} rid={rid} {status} "
+                    f"ttfb={ttfb_ms:.0f}ms 总={total_ms:.0f}ms "
+                    f"resp_id={resp_id or '-'}",
+                )
+                return stream
 
             body_bytes = await resp.read()
             await resp.release()
@@ -319,22 +392,38 @@ class Gateway:
             rule = classify_status(status)
             self.health.record_failure(upstream.id, f"HTTP {status}")
             self.selector.mark_failure(upstream.id)
-            self.log("warn", "upstream", f"{upstream.name} 返回 {status}")
             last_body = body_bytes
             last_code = {
                 Rule.UPSTREAM_429: "upstream_429",
                 Rule.UPSTREAM_5XX: "upstream_5xx",
                 Rule.UPSTREAM_4XX: "upstream_4xx",
             }.get(rule, "upstream_error")
-            if self.selector.should_switch(plan, rule, phase):
+            req_id = _extract_request_id(body_bytes)
+            will_switch = self.selector.should_switch(plan, rule, phase)
+            nxt = None
+            if will_switch:
                 plan.mark_failed(upstream.id)
+                nxt = plan.next_upstream()
+            self.log(
+                "warn",
+                "upstream",
+                f"✗ {labels.get(upstream.id, upstream.name)} rid={rid} {status} "
+                f"规则={last_code} request_id={req_id or '-'}"
+                + (f" → {labels.get(nxt.id, nxt.name)}" if nxt else ""),
+            )
+            if will_switch:
                 self.selector.note_switch(plan)
                 continue
             self.metrics.downstream_end()
             return _normalize_error(502, last_body, last_code)
 
     async def _commit_stream(
-        self, request: web.Request, resp, first: bytes, upstream_id: str = ""
+        self,
+        request: web.Request,
+        resp,
+        first: bytes,
+        upstream_id: str = "",
+        resp_id: str = "",
     ) -> web.StreamResponse:
         """把上游响应提交给下游并透传剩余数据。"""
         ctype = resp.headers.get("Content-Type", "application/json")
@@ -348,7 +437,6 @@ class Gateway:
         try:
             if first:
                 ttfb_ms = 0.0
-                resp_id = _extract_response_id(first)
                 if resp_id:
                     self.session_router.bind_response(resp_id, upstream_id)
                 await stream.write(first)

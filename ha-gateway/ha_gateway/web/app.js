@@ -23,15 +23,38 @@ const RULE_LABELS = {
   upstream_4xx: "上游 4xx（除 429）",
   post_commit_break: "已提交后断流",
 };
-const SLOT_NAMES = ["主通道", "备通道", "通道 3", "通道 4"];
+// 槽位名按数量动态生成：前两个是主/备通道，第 3 个起是「通道 N」。
+// 之前写死 4 个，通道多于 4 个就全部回落成同一个兜底名。
+function slotName(index) {
+  if (index === 0) return "主通道";
+  if (index === 1) return "备通道";
+  return `通道 ${index + 1}`;
+}
 const PROTOCOLS = ["openai-responses", "openai-chat", "anthropic"];
 
 // 每个通道槽位一个固定颜色：日志里的通道名、通道框的顶条都用它，
 // 两者对得上，日志里扫一眼就知道是哪条通道。
-const CHANNEL_COLORS = ["#2563eb", "#0e7490", "#7c3aed", "#be185d", "#4d7c0f"];
+// 前 8 个是手工挑的（色相拉开、都避开「红=不可用」的健康语义）；
+// 第 9 个起用黄金角自动生成，保证通道再多也不撞色。
+const CHANNEL_COLORS = [
+  "#2563eb", // 蓝
+  "#0d9488", // 青绿
+  "#7c3aed", // 紫
+  "#db2777", // 洋红
+  "#65a30d", // 黄绿
+  "#d97706", // 橙
+  "#0891b2", // 青
+  "#4338ca", // 靛
+];
 
 function channelColor(index) {
-  return CHANNEL_COLORS[index % CHANNEL_COLORS.length];
+  if (index < CHANNEL_COLORS.length) return CHANNEL_COLORS[index];
+  // 黄金角兜底：色相均匀铺在色环上，越往后越不会撞前面手挑的颜色
+  let hue = (index * 137.508 + 18) % 360;
+  // 跳过红/橙区段，避免和「红=不可用 / 橙=降级」的健康色混淆
+  if (hue >= 330 || hue < 12) hue = (hue + 32) % 360;
+  else if (hue >= 18 && hue < 42) hue = (hue + 30) % 360;
+  return `hsl(${hue.toFixed(1)} 58% 40%)`;
 }
 
 function channelIndexOf(id) {
@@ -53,11 +76,31 @@ function channelColorMap() {
 
 // 把日志消息里的通道名拆成带色的片段。
 // detailId 命中时优先用它对应的通道名（route_active 事件带 upstream id）。
+const KV_RE = /((?:rid|resp_id|request_id)=[A-Za-z0-9_\-]+)/g;
+
+// rid / resp_id / request_id 是用来跟上游对账的字段，标成暗色等宽，
+// 免得和正文混在一起看不清。
+function appendTextWithKv(parent, text) {
+  if (!text) return;
+  let rest = String(text);
+  let m;
+  KV_RE.lastIndex = 0;
+  while ((m = KV_RE.exec(rest)) !== null) {
+    if (m.index > 0) parent.appendChild(document.createTextNode(rest.slice(0, m.index)));
+    const s = document.createElement("span");
+    s.className = "kv";
+    s.textContent = m[1];
+    parent.appendChild(s);
+    rest = rest.slice(m.index + m[1].length);
+  }
+  if (rest) parent.appendChild(document.createTextNode(rest));
+}
+
 function highlightChannels(message, detailId) {
   const frag = document.createDocumentFragment();
   const map = channelColorMap();
   if (!map.size) {
-    frag.appendChild(document.createTextNode(message));
+    appendTextWithKv(frag, message);
     return frag;
   }
   // 长名优先，避免"模拟通道 A"被"模拟通道"抢先匹配
@@ -75,10 +118,10 @@ function highlightChannels(message, detailId) {
       }
     }
     if (hitIdx < 0) {
-      frag.appendChild(document.createTextNode(rest));
+      appendTextWithKv(frag, rest);
       break;
     }
-    if (hitIdx > 0) frag.appendChild(document.createTextNode(rest.slice(0, hitIdx)));
+    if (hitIdx > 0) appendTextWithKv(frag, rest.slice(0, hitIdx));
     const s = document.createElement("span");
     s.className = "ch-tag";
     s.style.color = map.get(hit);
@@ -483,7 +526,11 @@ function buildUpstreamNode(u, i) {
   // 第一行：槽位标签 + 状态徽标；第二行：通道名。
   // 以前这些都浮在框外，通道一多就压到通道名上。
   const head = el("div", "n-head");
-  head.appendChild(el("span", "slot-tag", SLOT_NAMES[i] || `通道 ${i + 1}`));
+  const slot = slotName(i);
+  // 通道名本身就是「通道 5」这类时，槽位标签是重复信息，不显示。
+  if (!((u.name || "").includes(slot)) && !/^通道\s+\d+$/.test(u.name || "")) {
+    head.appendChild(el("span", "slot-tag", slot));
+  }
   const marks = el("div", "n-marks");
   n.appendChild(el("div", "n-title", u.name));
   n.appendChild(el("div", "n-sub", u.health === "down" ? u.provider + " · 不可用" : u.provider));
@@ -510,7 +557,7 @@ function buildUpstreamNode(u, i) {
     marks.appendChild(badge);
   }
   if (marks.childElementCount) head.appendChild(marks);
-  n.insertBefore(head, n.firstChild);
+  if (head.childElementCount) n.insertBefore(head, n.firstChild);
   n.onclick = (ev) => {
     ev.stopPropagation();
     selectObject("upstream", u.id);
@@ -845,7 +892,7 @@ function renderTopology() {
   for (let i = 0; i < L.slotCount; i++) {
     const u = L.ups[i];
     const x = L.upX[i];
-    const tag = SLOT_NAMES[i] || `通道 ${i + 1}`;
+    const tag = slotName(i);
     if (u) {
       nodePos[u.id] = { x, y: L.topY };
       const hc = healthClass(u);
@@ -1876,7 +1923,7 @@ async function newUpstream() {
   if (!(await guard())) return;
   selected = { kind: "upstream", id: "__new__" };
   const idx = STATE.upstreams.length;
-  const defName = SLOT_NAMES[idx] || `通道 ${idx + 1}`;
+  const defName = slotName(idx);
   draft = {
     kind: "upstream",
     id: "__new__",
