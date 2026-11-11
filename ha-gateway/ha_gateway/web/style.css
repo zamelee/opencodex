@@ -77,6 +77,8 @@ main {
   flex: 1;
   min-width: 0;
   overflow: hidden;
+  background-image: radial-gradient(circle, #e6eaf0 1px, transparent 1px);
+  background-size: 26px 26px;
 }
 
 #wires {
@@ -92,7 +94,7 @@ main {
 .node {
   position: absolute;
   transform: translate(-50%, -50%);
-  width: 168px;
+  width: 148px;
   min-height: 52px;
   border: 2px solid var(--green);
   border-radius: var(--radius);
@@ -288,24 +290,26 @@ input:focus, select:focus { outline: 2px solid rgba(26, 115, 232, 0.35); border-
 .po-line { color: var(--muted); margin-bottom: 2px; }
 .po-key { font-family: Consolas, monospace; color: var(--blue); word-break: break-all; margin-bottom: 6px; }
 
-/* 画布内的管理面板开关：蓝色实心圆钮，只留箭头 */
+/* 画布右侧贴边的贯通渐变提示条：只留箭头，文字走 hover tooltip */
 .drawer-toggle {
   position: absolute;
-  right: 12px;
-  top: 12px;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
   z-index: 30;
-  width: 30px;
-  height: 30px;
+  width: 20px;
+  height: 108px;
   border: none;
-  border-radius: 50%;
-  background: var(--blue);
+  border-radius: 8px 0 0 8px;
+  background: linear-gradient(180deg, #e8f0fd 0%, #1a73e8 45%, #e8f0fd 100%);
   color: #fff;
-  font-size: 13px;
+  font-size: 12px;
   line-height: 1;
   cursor: pointer;
-  box-shadow: 0 2px 10px rgba(26, 115, 232, 0.45);
+  box-shadow: -2px 0 10px rgba(26, 115, 232, 0.35);
+  text-shadow: 0 0 3px rgba(26, 115, 232, 0.8);
 }
-.drawer-toggle:hover { background: #1667d6; }
+.drawer-toggle:hover { background: linear-gradient(180deg, #d5e4fb 0%, #1667d6 45%, #d5e4fb 100%); }
 
 /* 上游节点旁的就地编辑卡 */
 .inline-card {
@@ -339,6 +343,12 @@ input:focus, select:focus { outline: 2px solid rgba(26, 115, 232, 0.35); border-
   padding: 12px 14px;
 }
 .gw-console .sub-title { font-weight: 600; margin: 10px 0 4px; }
+.gw-console.compact {
+  top: 12px;
+  transform: none;
+  width: calc(100% - 24px);
+  max-height: 52%;
+}
 
 /* 节点内小按钮（复制 / 删除） */
 .node-actions {
@@ -371,7 +381,11 @@ input:focus, select:focus { outline: 2px solid rgba(26, 115, 232, 0.35); border-
   z-index: 35;
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
+  justify-content: center;
   gap: 8px;
+  max-width: calc(100% - 24px);
+  white-space: nowrap;
   background: #fff;
   border: 1px solid var(--amber);
   border-radius: var(--radius);

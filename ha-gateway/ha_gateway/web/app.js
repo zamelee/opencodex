@@ -189,17 +189,17 @@ function layout() {
 
   const spread = (n, width) => {
     if (!n) return [];
-    const span = Math.min(width - 80, n * 200);
-    const step = span / n;
+    const step = Math.max(150, Math.min(200, (width - 40) / n));
+    const span = Math.min(width - 30, step * n);
     return Array.from({ length: n }, (_, i) => (width - span) / 2 + step * i + step / 2);
   };
 
-  const upX = spread(slotCount, w);
+  const upX = spread(slotCount + 1, w);
   const keyX = spread(keys.length + 1, w);
   const gw = { x: w / 2, y: h / 2 };
   const topY = 64;
   const botY = h - 76;
-  return { w, h, ups, keys, slotCount, upX, keyX, gw, topY, botY };
+  return { w, h, ups, keys, slotCount, upX, keyX, gw, topY, botY, addX: upX[slotCount] };
 }
 
 function healthClass(u) {
@@ -233,16 +233,18 @@ function renderTopology() {
   });
 
   edges.forEach((e) => {
-    const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
-    line.setAttribute("x1", e.x1);
-    line.setAttribute("y1", e.y1);
-    line.setAttribute("x2", e.x2);
-    line.setAttribute("y2", e.y2);
+    const dy = (e.y2 - e.y1) * 0.55;
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute(
+      "d",
+      `M ${e.x1} ${e.y1} C ${e.x1} ${e.y1 + dy}, ${e.x2} ${e.y2 - dy}, ${e.x2} ${e.y2}`
+    );
     const isActive = e.kind === "up" && e.owner === activeUpstream;
-    line.setAttribute("stroke", isActive ? "#1a73e8" : e.kind === "ghost" ? "#dfe3e8" : "#d5d9e0");
-    line.setAttribute("stroke-width", "2");
-    if (e.kind === "ghost") line.setAttribute("stroke-dasharray", "4 4");
-    svg.appendChild(line);
+    path.setAttribute("stroke", isActive ? "#1a73e8" : e.kind === "ghost" ? "#dfe3e8" : "#d5d9e0");
+    path.setAttribute("stroke-width", "2");
+    path.setAttribute("fill", "none");
+    if (e.kind === "ghost") path.setAttribute("stroke-dasharray", "4 4");
+    svg.appendChild(path);
   });
 
   // 上游节点（含空槽位）
@@ -277,8 +279,8 @@ function renderTopology() {
     nodes.appendChild(n);
   }
 
-  // 右侧：新增上游通道的虚线方块
-  const addX = Math.min((L.upX[L.slotCount - 1] || L.gw.x) + 195, L.w - 92);
+  // 行末：新增上游通道的虚线方块
+  const addX = L.addX;
   nodePos.__new__ = { x: addX, y: L.topY };
   const addU = el("div", "node ghost");
   addU.style.left = addX + "px";
@@ -370,6 +372,16 @@ function field(label, name, value, type, placeholder) {
   return l;
 }
 
+// 名称输入：清空后在失焦时恢复默认名（新建上游时自动填好，可改）
+function nameField(draft) {
+  const l = field("名称", "name", draft.fields.name, null, draft.defaultName || "");
+  const i = l.querySelector("input");
+  i.onblur = () => {
+    if (!i.value.trim() && draft.defaultName) setField("name", draft.defaultName);
+  };
+  return l;
+}
+
 function selectField(label, name, value, options) {
   const l = el("label");
   l.appendChild(el("span", null, label));
@@ -404,7 +416,7 @@ function renderInline() {
   }
   box.appendChild(el("div", "po-title", draft.isNew ? "新增上游通道" : "上游通道"));
   const f = el("div", "form");
-  f.appendChild(field("名称", "name", draft.fields.name));
+  f.appendChild(nameField(draft));
   f.appendChild(field("Provider", "provider", draft.fields.provider));
   f.appendChild(field("Base URL", "base_url", draft.fields.base_url));
   f.appendChild(field("API Key", "api_key", draft.fields.api_key, "password", "留空则不修改"));
@@ -432,6 +444,8 @@ function renderGwConsole() {
     return;
   }
   box.classList.remove("hidden");
+  const stage = $("#stage");
+  box.classList.toggle("compact", stage.clientWidth < 760);
   box.appendChild(el("div", "po-title", "网关控制台"));
   box.appendChild(el("div", "hint", "网关与故障转移的核心设置，改动后点「保存应用」。"));
 
@@ -532,7 +546,7 @@ function renderDock() {
     if (draft.dirty) h.appendChild(el("small", null, "（未保存）"));
     sec.appendChild(h);
     const f = el("div", "form");
-    f.appendChild(field("名称", "name", draft.fields.name));
+    f.appendChild(nameField(draft));
     f.appendChild(field("Provider", "provider", draft.fields.provider));
     f.appendChild(field("Base URL", "base_url", draft.fields.base_url));
     f.appendChild(field("API Key", "api_key", draft.fields.api_key, "password", "留空则不修改"));
@@ -603,7 +617,7 @@ async function saveDraft() {
   if (!draft) return true;
   if (draft.kind === "upstream") {
     const body = {
-      name: draft.fields.name,
+      name: (draft.fields.name || "").trim() || draft.defaultName || "",
       provider: draft.fields.provider,
       base_url: draft.fields.base_url,
     };
@@ -647,11 +661,14 @@ async function saveDraft() {
 async function newUpstream() {
   if (!(await guard())) return;
   selected = { kind: "upstream", id: "__new__" };
+  const idx = STATE.upstreams.length;
+  const defName = SLOT_NAMES[idx] || `通道 ${idx + 1}`;
   draft = {
     kind: "upstream",
     id: "__new__",
     isNew: true,
-    fields: { name: "", provider: "", base_url: "", api_key: "" },
+    defaultName: defName,
+    fields: { name: defName, provider: "", base_url: "", api_key: "" },
     dirty: false,
   };
   renderTopology();
