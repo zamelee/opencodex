@@ -365,6 +365,7 @@ function renderWires(svg, edges) {
   for (let i = edges.length; i < wirePool.length; i++) wirePool[i].remove();
   wireEdges = edges.map((e, i) => ({ ...e, path: wirePool[i] }));
   flowSystem.setPaths(wireEdges, svg);
+  flowSystem.refreshHeat();
 }
 
 function wireClass(e) {
@@ -1720,7 +1721,7 @@ const flowSystem = (() => {
   const MAX_BALLS = 24;      // 全局上限
   const MAX_PER_EDGE = 4;    // 单条连线上限
   const MIN_SPACING = 36;    // 同一条线上两个球的最小间距（px）
-  const RADIUS = 3.5;
+  const RADIUS = 5.5; // 基础半径；实际按线的粗细放大
   const SPEED = 110;         // px/s
   const FADE_MS = 300;
   const MAX_DELTA = 50;      // 帧间隔截断，避免从后台切回来时球突然跳一大段
@@ -1728,6 +1729,8 @@ const flowSystem = (() => {
   let svg = null;
   let layer = null;
   const balls = [];
+  let edges = []; // 当前这一帧的连线（edgeId -> path 元素）
+  const lastHeat = new Map();
   let rafId = 0;
   let lastTime = null;
   let enabled = true;        // 用户开关（顶栏「动画」）
@@ -1836,6 +1839,18 @@ const flowSystem = (() => {
     if (d === null) return null;
     const ball = balls.find((b) => b.state === "pooled") || createBall();
     if (!ball) return null;
+    // 球大小跟线的粗细走：线本身越粗（锁定/当前通道），球越大；
+    // 不用 computedStyle，免得"传输中变亮"时球在半路突然变大
+    let r = RADIUS;
+    try {
+      const cls = edge.path.classList || { contains: () => false };
+      const thick =
+        cls.contains("wire-flow-locked") || cls.contains("wire-flow-active");
+      r = thick ? 6.5 : RADIUS;
+    } catch (e) {
+      /* 取不到就用默认值 */
+    }
+    ball.node.setAttribute("r", String(r));
     ball.state = "active";
     ball.edgeId = edgeId;
     ball.path = edge.path;
@@ -1885,6 +1900,40 @@ const flowSystem = (() => {
         if (p >= 1) resetBall(ball);
       }
     }
+    updateHeat();
+  }
+
+  // 传输态联动：有球在跑的线变亮；下游线的亮度是上面各线的"或"
+  function updateHeat(force) {
+    if (!edges.length) return;
+    const hot = new Set();
+    for (const b of balls) {
+      if (b.state === "active" && b.edgeId) hot.add(b.edgeId);
+    }
+    let upHot = 0;
+    const levels = new Map();
+    for (const e of edges) {
+      if (e.kind === "up") {
+        const lv = hot.has(e.id) ? 1 : 0;
+        levels.set(e.id, lv);
+        if (lv) upHot++;
+      }
+    }
+    for (const e of edges) {
+      if (e.kind === "down") {
+        // 上面只要有一条在传，下游就在传；两条以上同时传，下游更亮
+        levels.set(e.id, upHot === 0 ? 0 : upHot > 1 ? 2 : 1);
+      }
+    }
+    for (const e of edges) {
+      const lv = levels.get(e.id) || 0;
+      if (!force && lastHeat.get(e.id) === lv) continue;
+      lastHeat.set(e.id, lv);
+      const p = e.path;
+      if (!p || !p.classList) continue;
+      p.classList.toggle("wire-hot", lv === 1);
+      p.classList.toggle("wire-hot2", lv === 2);
+    }
   }
 
   function ensureRunning() {
@@ -1899,13 +1948,14 @@ const flowSystem = (() => {
     }
   }
 
-  function setPaths(edges, targetSvg) {
+  function setPaths(nextEdges, targetSvg) {
     // path 元素是池化复用的，位置随时会变；这里只登记 id -> 元素，
     // 每帧真正取坐标时都从元素上重新算长度。
     ensureLayer(targetSvg);
+    edges = nextEdges;
     for (const ball of balls) {
       if (ball.state === "pooled") continue;
-      const edge = edges.find((e) => e.id === ball.edgeId);
+      const edge = nextEdges.find((e) => e.id === ball.edgeId);
       if (!edge || !edge.path || !edge.path.isConnected) {
         releaseBall(ball);
         continue;
@@ -1928,7 +1978,12 @@ const flowSystem = (() => {
     } else {
       if (layer) layer.style.display = "";
     }
+    updateHeat(true);
     ensureRunning();
+  }
+
+  function refreshHeat() {
+    updateHeat(true);
   }
 
   function isEnabled() {
@@ -1969,6 +2024,7 @@ const flowSystem = (() => {
     countActive,
     releaseEdge,
     setSpeed,
+    refreshHeat,
   };
 })();
 

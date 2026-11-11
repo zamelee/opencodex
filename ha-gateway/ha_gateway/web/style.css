@@ -302,7 +302,40 @@ main {
   opacity: 1;
 }
 .wire-flow-dim {
-  opacity: 0.35;
+  /* 旁路：淡红 + 静止，表示"这条没在用"，不是故障 */
+  stroke: #e3a3a6;
+  animation: none;
+  stroke-dashoffset: 0;
+  opacity: 0.75;
+}
+/* 旁路即使有残留流量，也保持"没在用"的淡红，不跟着变亮 */
+.wire-flow-dim.wire-hot,
+.wire-flow-dim.wire-hot2 {
+  stroke: #e3a3a6;
+  stroke-width: 2;
+}
+
+/* 传输中：有球在跑 -> 线变亮 */
+.wire-flow-up.wire-hot {
+  stroke: #a8c9ee;
+  stroke-width: 3;
+}
+.wire-flow-degraded.wire-hot {
+  stroke: #f0bf6b;
+  stroke-width: 3;
+}
+.wire-flow-down.wire-hot {
+  stroke: #ef8f93;
+  stroke-width: 3;
+}
+.wire-flow.wire-hot {
+  stroke: #a8c9ee;
+  stroke-width: 3;
+}
+/* 汇聚更亮：上面有多条线同时在传 */
+.wire-flow.wire-hot2 {
+  stroke: #cfe2fb;
+  stroke-width: 3.6;
 }
 
 @keyframes wire-dash-flow {
