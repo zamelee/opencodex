@@ -2,9 +2,11 @@
 
 from ha_gateway.labels import upstream_label
 from ha_gateway.server import (
+    _extract_usage,
     _extract_model,
     _extract_request_id,
     _extract_response_id,
+    _merge_usage,
 )
 
 
@@ -56,3 +58,26 @@ def test_label_dedupes_slot_prefix():
 def test_label_falls_back_to_id():
     ups = [U("a", "模拟通道 A")]
     assert upstream_label(ups, "zzz") == "zzz"
+
+
+def test_extract_usage_responses_style():
+    chunk = b'{"type":"response.completed","response":{"usage":{"input_tokens":11,"output_tokens":5,"total_tokens":16}}}'
+    u = _extract_usage(chunk)
+    assert u == {"in": 11, "out": 5, "total": 16}
+
+
+def test_extract_usage_chat_style():
+    chunk = b'{"usage":{"prompt_tokens":120,"completion_tokens":30,"total_tokens":150}}'
+    u = _extract_usage(chunk)
+    assert u == {"in": 120, "out": 30, "total": 150}
+
+
+def test_extract_usage_absent():
+    assert _extract_usage(b'{"id":"resp_x"}') is None
+    assert _extract_usage(b"") is None
+
+
+def test_merge_usage_keeps_partial_fields():
+    acc = _merge_usage({}, {"in": 10, "out": 2})
+    acc = _merge_usage(acc, {"out": 7})
+    assert acc == {"in": 10, "out": 7}

@@ -71,6 +71,13 @@ function channelColorMap() {
     const name = (u.name || "").trim();
     if (name) map.set(name, channelColor(i));
   });
+  // 槽位名（主通道 / 备通道 / 通道 N）用同一个通道的颜色：
+  // 否则日志里「通道 4 模拟通道 B」前半截是黑的、后半截才有色，看着割裂。
+  // 通道名优先（两轮都设，先设的赢）。
+  ups.forEach((u, i) => {
+    const slot = slotName(i);
+    if (slot && !map.has(slot)) map.set(slot, channelColor(i));
+  });
   return map;
 }
 

@@ -118,6 +118,7 @@ _REQ_ID_RE = re.compile(
     rb'"(?:request_id|requestId|request-id|x-request-id)"\s*:\s*"([^"]{4,200})"'
 )
 _REQ_ID_TEXT_RE = re.compile(rb"request[ _-]?id[:=]\s*([A-Za-z0-9_\-]{6,200})", re.I)
+_USAGE_RE = re.compile(rb'"usage"\s*:\s*(\{[^{}]{0,600}\})')
 
 
 def _extract_response_id(chunk: bytes) -> str:
@@ -151,6 +152,47 @@ def _extract_model(body: bytes) -> str:
         if isinstance(model, str):
             return model[:80]
     return ""
+
+
+def _extract_usage(chunk: bytes) -> dict | None:
+    """从流式数据块里捞 usage（token 计数）。
+
+    三种协议都带 usage，字段名不一样：
+      openai-responses: response.completed 事件 -> response.usage
+      openai-chat:     最后一个 chunk -> usage
+      anthropic:       message_start (input_tokens) / message_delta (output_tokens)
+    这里只认「顶层 usage 对象」，取到就合并；取不到就返回 None。
+    """
+    if not chunk or len(chunk) > 1024 * 1024:
+        return None
+    m = _USAGE_RE.search(chunk)
+    if not m:
+        return None
+    try:
+        obj = json.loads(m.group(1))
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(obj, dict):
+        return None
+    out = {
+        "in": obj.get("input_tokens") or obj.get("prompt_tokens"),
+        "out": obj.get("output_tokens") or obj.get("completion_tokens"),
+        "total": obj.get("total_tokens"),
+    }
+    out = {k: v for k, v in out.items() if isinstance(v, int)}
+    return out or None
+
+
+def _merge_usage(acc: dict | None, part: dict | None) -> dict | None:
+    """把多段 usage 合并成一份（后到的字段覆盖，缺失的保留）。"""
+    if not part:
+        return acc
+    if acc is None:
+        acc = {}
+    for k, v in part.items():
+        if v is not None:
+            acc[k] = v
+    return acc
 
 
 class Gateway:
@@ -371,16 +413,24 @@ class Gateway:
                 self.session_router.bind(skey, upstream.id)
                 self.on_route(upstream.id)
                 resp_id = _extract_response_id(first)
+                usage_box: dict = {}
                 stream = await self._commit_stream(
-                    request, resp, first, upstream.id, resp_id
+                    request, resp, first, upstream.id, resp_id, usage_box
                 )
                 total_ms = (time.monotonic() - attempt_started) * 1000
+                usage_txt = ""
+                if usage_box:
+                    usage_txt = (
+                        f" usage=入{usage_box.get('in', '-')}"
+                        f"/出{usage_box.get('out', '-')}"
+                        f"/总{usage_box.get('total', '-')}"
+                    )
                 self.log(
                     "info",
                     "route",
                     f"✓ {labels.get(upstream.id, upstream.name)} rid={rid} {status} "
                     f"ttfb={ttfb_ms:.0f}ms 总={total_ms:.0f}ms "
-                    f"resp_id={resp_id or '-'}",
+                    f"resp_id={resp_id or '-'}{usage_txt}",
                 )
                 return stream
 
@@ -399,6 +449,14 @@ class Gateway:
                 Rule.UPSTREAM_4XX: "upstream_4xx",
             }.get(rule, "upstream_error")
             req_id = _extract_request_id(body_bytes)
+            # 提示词过长这类错误，日志里点出来，省得再去翻原始报文
+            low = body_bytes[:4000].lower()
+            too_long = (
+                b"prompt_too_long" in low
+                or b"too many tokens" in low
+                or b"maximum context length" in low
+                or b"context_length_exceeded" in low
+            )
             will_switch = self.selector.should_switch(plan, rule, phase)
             nxt = None
             if will_switch:
@@ -409,6 +467,7 @@ class Gateway:
                 "upstream",
                 f"✗ {labels.get(upstream.id, upstream.name)} rid={rid} {status} "
                 f"规则={last_code} request_id={req_id or '-'}"
+                + (" 提示=疑似提示词超长" if too_long else "")
                 + (f" → {labels.get(nxt.id, nxt.name)}" if nxt else ""),
             )
             if will_switch:
@@ -424,6 +483,7 @@ class Gateway:
         first: bytes,
         upstream_id: str = "",
         resp_id: str = "",
+        usage_box: dict | None = None,
     ) -> web.StreamResponse:
         """把上游响应提交给下游并透传剩余数据。"""
         ctype = resp.headers.get("Content-Type", "application/json")
@@ -439,9 +499,13 @@ class Gateway:
                 ttfb_ms = 0.0
                 if resp_id:
                     self.session_router.bind_response(resp_id, upstream_id)
+                if usage_box is not None:
+                    _merge_usage(usage_box, _extract_usage(first))
                 await stream.write(first)
             async for chunk in resp.content.iter_any():
                 if chunk:
+                    if usage_box is not None:
+                        _merge_usage(usage_box, _extract_usage(chunk))
                     await stream.write(chunk)
             await stream.write_eof()
         except (ConnectionResetError, asyncio.CancelledError):
