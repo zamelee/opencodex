@@ -294,12 +294,25 @@ main {
   stroke-width: 2.8;
 }
 
-/* 手动锁定：这条线钉死了 -> 实线加粗；其余通道淡下去 */
+/* 手动锁定：这条线钉死了 -> 粗虚线照常流动；旁路淡红静止 */
 .wire-flow-locked {
   stroke-width: 3.4;
-  stroke-dasharray: none;
-  animation: none;
+  stroke-dasharray: 8 6;
+  animation: wire-dash-flow-locked calc(2.6s / var(--anim-speed, 1)) linear infinite;
   opacity: 1;
+}
+@keyframes wire-dash-flow-locked {
+  from {
+    stroke-dashoffset: 0;
+  }
+  to {
+    stroke-dashoffset: -14;
+  }
+}
+/* 锁定线在传输中也要保持"粗 + 动" */
+.wire-flow-locked.wire-hot,
+.wire-flow-locked.wire-hot2 {
+  stroke-width: 3.8;
 }
 .wire-flow-dim {
   /* 旁路：淡红 + 静止，表示"这条没在用"，不是故障 */
