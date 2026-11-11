@@ -546,8 +546,10 @@ function renderGwLink() {
   const cb = box.getBoundingClientRect();
   const x1 = cb.left - sb.left + cb.width / 2;
   const y1 = cb.top - sb.top + cb.height / 2;
-  const x2 = gw.x;
-  const y2 = gw.y;
+  // 终点停在节点边框之外，箭头完整露出、不压到节点上
+  const t = rectEnterT(x1, y1, gw.x, gw.y, gw.x, gw.y, 80, 32);
+  const x2 = x1 + (gw.x - x1) * Math.max(0, t - 0.02);
+  const y2 = y1 + (gw.y - y1) * Math.max(0, t - 0.02);
 
   const defs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
   const marker = document.createElementNS("http://www.w3.org/2000/svg", "marker");
@@ -575,6 +577,26 @@ function renderGwLink() {
   path.setAttribute("fill", "none");
   path.setAttribute("marker-end", "url(#gwArrow)");
   svg.appendChild(path);
+}
+
+// 求从 (x1,y1) 指向 (x2,y2) 的射线进入矩形（中心 cx,cy，半宽 hw，半高 hh）时的参数 t
+function rectEnterT(x1, y1, x2, y2, cx, cy, hw, hh) {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  let tmin = 0;
+  let tmax = 1;
+  const slab = (p, d, lo, hi) => {
+    if (d === 0) return p >= lo && p <= hi;
+    let t1 = (lo - p) / d;
+    let t2 = (hi - p) / d;
+    if (t1 > t2) [t1, t2] = [t2, t1];
+    tmin = Math.max(tmin, t1);
+    tmax = Math.min(tmax, t2);
+    return tmax >= tmin;
+  };
+  if (!slab(x1, dx, cx - hw, cx + hw)) return 1;
+  if (!slab(y1, dy, cy - hh, cy + hh)) return 1;
+  return Math.min(1, Math.max(0, tmin));
 }
 
 function focusGwConsole() {
