@@ -33,6 +33,7 @@ class RequestPlan:
     sticky_id: str | None = None
     switched: int = 0
     excluded: set[str] = field(default_factory=set)
+    session_key: str | None = None
 
     def next_upstream(self) -> Upstream | None:
         for c in self.candidates:
@@ -80,11 +81,18 @@ class UpstreamSelector:
             sticky_id = self.session_router.lookup(session_key, {u.id for u in alive})
 
         ordered: list[Upstream] = []
+        # 手动锁定的通道优先（健康可用时）
+        forced_id = getattr(self.settings, "forced_upstream_id", "") or ""
+        if forced_id:
+            for u in fresh:
+                if u.id == forced_id and self.health.usable(u.id):
+                    ordered.append(u)
+                    break
         if sticky_id:
             for u in fresh:
-                if u.id == sticky_id and self.health.usable(u.id):
+                if u.id == sticky_id and self.health.usable(u.id) and u.id not in {x.id for x in ordered}:
                     ordered.append(u)
-        rest = [u for u in fresh if u.id != sticky_id]
+        rest = [u for u in fresh if u.id != sticky_id and u.id not in {x.id for x in ordered}]
         # 健康优先，然后轮转，避免总是压同一台
         rest.sort(key=lambda u: (self.health.health_of(u.id) is Health.DOWN, -u.weight))
         if rest:
@@ -97,6 +105,7 @@ class UpstreamSelector:
             candidates=ordered,
             sticky_id=sticky_id,
             max_switches=self.settings.max_switches_per_request,
+            session_key=session_key,
         )
 
     def switch_allowed(self, rule: Rule | None) -> bool:
@@ -114,7 +123,20 @@ class UpstreamSelector:
             return False
         if rule is None:
             return False
+        # 短时间来回横跳兜底：同一会话在窗口内切换过多就不再切
+        if (
+            self.session_router is not None
+            and plan.session_key
+            and self.session_router.switch_count(plan.session_key)
+            >= self.settings.max_switches_per_minute
+        ):
+            return False
         return self.switch_allowed(rule)
+
+    def note_switch(self, plan: RequestPlan) -> None:
+        """记录一次真实发生的切换（用于短时间横跳兜底）。"""
+        if self.session_router is not None and plan.session_key:
+            self.session_router.note_switch(plan.session_key)
 
     def prefer_sticky(self, plan: RequestPlan) -> bool:
         return plan.sticky_id is not None and plan.sticky_id not in plan.excluded

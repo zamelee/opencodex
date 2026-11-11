@@ -59,6 +59,7 @@ def _state(app) -> dict:
         for k in app.storage.list_client_keys()
     ]
     s = app.settings
+    metrics = app.gateway.metrics.snapshot([u.id for u in app.upstreams()])
     return {
         "upstreams": ups,
         "keys": keys,
@@ -68,12 +69,15 @@ def _state(app) -> dict:
             "listen_host": s.listen_host,
             "listen_port": s.listen_port,
             "max_switches_per_request": s.max_switches_per_request,
+            "max_switches_per_minute": s.max_switches_per_minute,
             "min_residency_s": s.min_residency_s,
             "precommit_budget_s": s.precommit_budget_s,
             "retry_after_commit": s.retry_after_commit,
+            "forced_upstream_id": s.forced_upstream_id,
             "rules": {r.value: bool(v) for r, v in s.rules.items()},
         },
         "running": app._started.is_set(),
+        "metrics": metrics,
     }
 
 
@@ -170,6 +174,7 @@ def build_web_app(app) -> web.Application:
             "listen_host",
             "listen_port",
             "max_switches_per_request",
+            "max_switches_per_minute",
             "min_residency_s",
             "precommit_budget_s",
             "retry_after_commit",
@@ -178,6 +183,24 @@ def build_web_app(app) -> web.Application:
                 setattr(s, key, data[key])
         app.save_settings(s)
         return web.json_response({"ok": True})
+
+    async def set_forced(request):
+        """手动锁定路由：指定上游 id，或传空串恢复自动。"""
+        data = await request.json()
+        uid = (data.get("id") or "").strip()
+        if uid:
+            if not any(u.id == uid for u in app.upstreams()):
+                raise web.HTTPNotFound()
+        s = app.settings
+        s.forced_upstream_id = uid
+        app.save_settings(s)
+        name = next((u.name for u in app.upstreams() if u.id == uid), "")
+        app._log(
+            "info",
+            "route",
+            f"手动锁定通道 {name or uid}" if uid else "恢复自动路由",
+        )
+        return web.json_response({"ok": True, "forced_upstream_id": uid})
 
     async def put_rules(request):
         data = await request.json()
@@ -204,6 +227,7 @@ def build_web_app(app) -> web.Application:
     routes.put("/api/keys/{id}")(update_key)
     routes.delete("/api/keys/{id}")(delete_key)
     routes.put("/api/settings")(put_settings)
+    routes.post("/api/force")(set_forced)
     routes.put("/api/rules")(put_rules)
 
     web_app = web.Application()

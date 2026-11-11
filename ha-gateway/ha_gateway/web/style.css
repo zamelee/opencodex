@@ -155,6 +155,7 @@ main {
   position: absolute;
   top: -8px;
   right: -8px;
+  z-index: 2;
   width: 19px;
   height: 19px;
   border-radius: 50%;
@@ -166,6 +167,21 @@ main {
   line-height: 15px;
   text-align: center;
   cursor: help;
+}
+
+/* 手动锁定通道的角标 */
+.node-lock {
+  position: absolute;
+  top: -8px;
+  left: -8px;
+  z-index: 2;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--blue);
+  border: 2px solid #fff;
+  color: #fff;
+  font-size: 11px;
+  line-height: 1;
 }
 .node.gateway { border-color: var(--blue); }
 .node.down { border-color: #5f6368; }
@@ -514,6 +530,25 @@ input:focus, select:focus { outline: 2px solid rgba(26, 115, 232, 0.35); border-
 
 .rules { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
 .rules label { display: flex; align-items: center; gap: 6px; }
+
+/* 固定行为说明（不可勾选） */
+.rule-fixed {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+}
+.rule-fixed .fixed-tag {
+  flex: none;
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: #f3f4f6;
+  color: var(--muted);
+}
+.rules .f-hint { margin-left: 0; }
 .danger-zone {
   display: block;
   margin: 6px 0 8px;

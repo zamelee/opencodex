@@ -31,6 +31,7 @@ const HINTS = {
   listen_host: "HA Gateway 对下游（Codex）暴露的监听地址，默认只监听本机。",
   listen_port: "转发端口。10110 是 LLM 转发口，10111 是这个管理页面。",
   max_switches: "一个请求内最多向上游切换几次，防止来回横跳。",
+  switch_per_minute: "同一个会话在一分钟内最多切换几次。超过就不再切，避免两边来回甩。",
   residency: "切换后至少在同一上游驻留多少秒，避免刚切就又切。",
   budget: "请求已发出、上游尚未响应时，允许在多少秒内换上游重试。",
   up_name: "这条上游在拓扑图里的显示名。",
@@ -44,7 +45,7 @@ const RULE_HINTS = {
   upstream_5xx: "上游返回 5xx（服务端错误）时切换。",
   upstream_429: "上游返回 429（限流或额度用尽）时切换，这通常是该换 key 的信号。",
   upstream_4xx: "上游返回 4xx（参数错误等）时切换；同一请求重发通常还是会失败，默认不切。",
-  post_commit_break: "请求已交给下游之后上游断流时切换；可能造成重复内容与重复计费，默认关。",
+  post_commit_break: "固定行为：请求已交给下游之后，上游断流不再切换（避免重复内容与重复计费）。",
 };
 
 async function api(path, opts) {
@@ -83,7 +84,8 @@ async function loadState() {
   const next = await api("/api/state");
   // 状态没变就别重绘：避免每 2 秒把 DOM 拆一遍
   // （这会让元素拾取抓不到目标、界面闪烁、输入焦点丢失）
-  const sig = JSON.stringify(next);
+  // 流量指标每轮都在变，不能进签名——否则等于每 2 秒重绘整张拓扑图
+  const sig = JSON.stringify(Object.assign({}, next, { metrics: null }));
   const changed = sig !== lastStateSig;
   lastStateSig = sig;
   STATE = next;
@@ -91,6 +93,8 @@ async function loadState() {
     renderTop();
     renderTopology();
   }
+  // 指标单独走数据球通道，与拓扑渲染解耦
+  flowDriver.sync(next.metrics);
   if (!isEditing()) {
     if (changed || pendingPanel) {
       pendingPanel = false;
@@ -147,6 +151,7 @@ function rebuildDraft() {
         listen_host: s.listen_host,
         listen_port: s.listen_port,
         max_switches_per_request: s.max_switches_per_request,
+        max_switches_per_minute: s.max_switches_per_minute,
         min_residency_s: s.min_residency_s,
         precommit_budget_s: s.precommit_budget_s,
       },
@@ -355,6 +360,11 @@ function buildUpstreamNode(u, i) {
   n.appendChild(el("div", "slot-tag", SLOT_NAMES[i] || `通道 ${i + 1}`));
   n.appendChild(el("div", "n-title", u.name));
   n.appendChild(el("div", "n-sub", u.health === "down" ? u.provider + " · 不可用" : u.provider));
+  if ((STATE.settings || {}).forced_upstream_id === u.id) {
+    const lock = el("div", "node-lock", "锁");
+    lock.title = "已手动锁定到这条通道";
+    n.appendChild(lock);
+  }
   const missing = missingFields(u);
   if (missing.length) {
     const badge = el("div", "node-badge", "!");
@@ -599,7 +609,14 @@ function renderTopology() {
         cls: "node" + (hc ? " " + hc : "") + sel,
         x,
         y: L.topY,
-        sig: JSON.stringify([tag, u.name, sub, u.base_url, miss]),
+        sig: JSON.stringify([
+          tag,
+          u.name,
+          sub,
+          u.base_url,
+          miss,
+          (STATE.settings || {}).forced_upstream_id === u.id ? "locked" : "",
+        ]),
         build: () => buildUpstreamNode(u, i),
       });
     } else {
@@ -996,6 +1013,13 @@ function renderInline() {
     probe.title = "对这条上游发一次实际请求，检查连通性与凭据是否有效";
     probe.onclick = () => probeUpstream(draft.id);
     row.appendChild(probe);
+    const forced = (STATE.settings || {}).forced_upstream_id === draft.id;
+    const forceBtn = el("button", "btn" + (forced ? " primary" : ""), forced ? "恢复自动" : "切到此通道");
+    forceBtn.title = forced
+      ? "取消手动锁定，回到自动路由（健康优先 + 会话粘性）"
+      : "手动把路由锁到这条通道；它不可用时仍会自动切走";
+    forceBtn.onclick = () => setForcedUpstream(forced ? "" : draft.id);
+    row.appendChild(forceBtn);
     const del = el("button", "btn danger", "删除");
     del.title = "移除这条上游通道";
     del.onclick = () => deleteUpstream(draft.id);
@@ -1003,6 +1027,16 @@ function renderInline() {
   }
   box.appendChild(row);
   renderLinks();
+}
+
+async function setForcedUpstream(id) {
+  try {
+    await api("/api/force", { method: "POST", headers: jsonH(), body: JSON.stringify({ id }) });
+    await loadState();
+    toast(id ? "已锁定到该通道" : "已恢复自动路由");
+  } catch (e) {
+    toast("切换失败：" + (e.message || e), "warn");
+  }
 }
 
 function healthColor(u) {
@@ -1099,6 +1133,13 @@ function gwControls(mode) {
       mode,
     })
   );
+  f.appendChild(
+    fieldBlock("每分钟最大切换", "max_switches_per_minute", draft.fields.max_switches_per_minute, {
+      type: "number",
+      hint: HINTS.switch_per_minute,
+      mode,
+    })
+  );
   f.appendChild(fieldBlock("最小驻留(秒)", "min_residency_s", draft.fields.min_residency_s, { type: "number", hint: HINTS.residency, mode }));
   f.appendChild(
     fieldBlock("提交前预算(秒)", "precommit_budget_s", draft.fields.precommit_budget_s, { type: "number", hint: HINTS.budget, mode })
@@ -1108,6 +1149,17 @@ function gwControls(mode) {
   wrap.appendChild(el("div", "sub-title", "触发自动切换的状态"));
   const rules = el("div", "rules");
   Object.keys(RULE_LABELS).forEach((k) => {
+    // 「已提交后不重试」是固定行为，不给勾选框；
+    // 想要"已提交后仍重试"请用下面的危险开关。
+    if (k === "post_commit_break") {
+      const fixed = el("div", "f rule-fixed");
+      fixed.appendChild(el("span", "fixed-tag", "固定"));
+      fixed.appendChild(el("span", null, "已提交后不重试"));
+      rules.appendChild(fixed);
+      const note = el("div", "f-hint", RULE_HINTS[k] + "（如需强制重试，见下方危险开关）");
+      rules.appendChild(note);
+      return;
+    }
     rules.appendChild(ruleBlock(k, RULE_LABELS[k], draft.rules[k], RULE_HINTS[k], mode));
   });
   wrap.appendChild(rules);
@@ -1456,6 +1508,7 @@ async function saveDraft() {
         listen_host: draft.fields.listen_host,
         listen_port: Number(draft.fields.listen_port),
         max_switches_per_request: Number(draft.fields.max_switches_per_request),
+        max_switches_per_minute: Number(draft.fields.max_switches_per_minute),
         min_residency_s: Number(draft.fields.min_residency_s),
         precommit_budget_s: Number(draft.fields.precommit_budget_s),
       }),
@@ -1842,11 +1895,36 @@ const flowSystem = (() => {
     return enabled;
   }
 
+  function countActive(edgeId) {
+    return balls.filter((b) => b.state === "active" && b.edgeId === edgeId).length;
+  }
+
+  // 目标数量下降时，淡出多余的球（优先回收走得最远的）
+  function releaseEdge(edgeId, keep) {
+    const list = balls
+      .filter((b) => b.state === "active" && b.edgeId === edgeId)
+      .sort((a, b) => b.distance - a.distance);
+    let n = list.length - keep;
+    for (const b of list) {
+      if (n <= 0) break;
+      releaseBall(b);
+      n--;
+    }
+  }
+
   document.addEventListener("visibilitychange", () => {
     ensureRunning();
   });
 
-  return { spawnBall, setPaths, setEnabled, isEnabled, ensureRunning };
+  return {
+    spawnBall,
+    setPaths,
+    setEnabled,
+    isEnabled,
+    ensureRunning,
+    countActive,
+    releaseEdge,
+  };
 })();
 
 // 第一阶段：没有后端 inflight 指标，用装饰性数据源顶替。
@@ -1913,6 +1991,40 @@ const decorativeFlow = (() => {
   });
 
   return { start, stop };
+})();
+
+// 数据球驱动：按后端真实并发数决定每条线上跑几颗球。
+// 后端还没给指标时，退回装饰性模式（random pulse）。
+const flowDriver = (() => {
+  const MAX_PER_EDGE = 4;
+
+  function sync(metrics) {
+    if (!metrics) {
+      decorativeFlow.start();
+      return;
+    }
+    decorativeFlow.stop();
+    if (!flowSystem.isEnabled()) return;
+    const downs = wireEdges.filter((e) => e.kind === "down").length || 1;
+    for (const e of wireEdges) {
+      let want = 0;
+      if (e.kind === "up") {
+        const u = (metrics.upstreams || {})[e.owner] || {};
+        want = Math.min(MAX_PER_EDGE, Math.round(u.inflight || 0));
+      } else if (e.kind === "down") {
+        const g = metrics.gateway || {};
+        want = Math.min(MAX_PER_EDGE, Math.round((g.inflight || 0) / downs));
+      }
+      const have = flowSystem.countActive(e.id);
+      if (have < want) {
+        for (let i = have; i < want; i++) flowSystem.spawnBall(e.id, 1);
+      } else if (have > want) {
+        flowSystem.releaseEdge(e.id, want);
+      }
+    }
+  }
+
+  return { sync };
 })();
 
 // 顶栏「动画」开关：默认开，关掉后连线静止、数据球消失

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import time
 from typing import Callable
 
@@ -12,6 +13,7 @@ import aiohttp
 from aiohttp import web
 
 from .failover import UpstreamSelector, classify_exception, classify_status
+from .metrics import Metrics
 from .models import Phase, Rule
 from .session import session_key as make_session_key
 
@@ -109,6 +111,17 @@ def _host_of(base_url: str) -> str:
         return ""
 
 
+_RESP_ID_RE = re.compile(rb'"id"\s*:\s*"((?:resp|chatcmpl|msg)_[A-Za-z0-9_\-]{6,})"')
+
+
+def _extract_response_id(chunk: bytes) -> str:
+    """从首个数据块里捞出上游的 response/chat id（尽力而为，失败就跳过）。"""
+    if not chunk or len(chunk) > 512 * 1024:
+        return ""
+    m = _RESP_ID_RE.search(chunk)
+    return m.group(1).decode("ascii", "ignore") if m else ""
+
+
 class Gateway:
     def __init__(
         self,
@@ -129,6 +142,7 @@ class Gateway:
         self.client: aiohttp.ClientSession | None = None
         self._client_loop: asyncio.AbstractEventLoop | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
+        self.metrics = Metrics()
         self.active = 0
         self.last_error = ""
 
@@ -165,6 +179,15 @@ class Gateway:
         h = hashlib.sha256(raw.encode("utf-8")).hexdigest()
         return h in self.storage.client_key_hashes()
 
+    def client_key_id(self, request: web.Request) -> str:
+        """下游 key 的 id（会话键材料之一）。取不到就退回 key 前缀的哈希。"""
+        auth = request.headers.get("authorization", "")
+        raw = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+        if not raw:
+            return ""
+        h = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        return self.storage.client_key_id_by_hash(h) or h[:12]
+
     def build_headers(self, request: web.Request, upstream) -> dict[str, str]:
         headers = {}
         for k, v in request.headers.items():
@@ -182,9 +205,11 @@ class Gateway:
                 status=401,
             )
 
+        self.metrics.downstream_start()
         path = request.path
         upstream_desc = resolve_endpoint(self.settings.protocol, request.method, path)
         if upstream_desc is None:
+            self.metrics.downstream_end()
             return web.json_response(
                 {
                     "error": {
@@ -199,10 +224,12 @@ class Gateway:
         skey = make_session_key(
             self.settings.protocol,
             dict(request.headers),
+            self.client_key_id(request),
             request.headers.get("authorization", ""),
         )
         upstreams = self.storage.list_upstreams()
         if not upstreams:
+            self.metrics.downstream_end()
             return _normalize_error(502, b"no upstream configured", "no_upstream")
 
         plan = self.selector.plan(upstreams, skey)
@@ -212,11 +239,14 @@ class Gateway:
         while True:
             upstream = plan.next_upstream()
             if upstream is None:
+                self.metrics.downstream_end()
                 return _normalize_error(502, last_body or b"all upstreams failed", last_code)
 
             phase = Phase.NOT_SENT
+            attempt_started = time.monotonic()
             try:
                 client = await self.ensure_client()
+                self.metrics.upstream_start(upstream.id)
                 resp = await client.request(
                     request.method,
                     upstream.base_url.rstrip("/") + upstream_desc.split(" ", 1)[1],
@@ -227,14 +257,19 @@ class Gateway:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
+                self.metrics.upstream_end(
+                    upstream.id, (time.monotonic() - attempt_started) * 1000, ok=False
+                )
                 rule = classify_exception(exc)
                 self.health.record_failure(upstream.id, str(exc))
                 self.selector.mark_failure(upstream.id)
                 self.log("warn", "upstream", f"{upstream.name} 连接失败: {exc}")
                 if self.selector.should_switch(plan, rule, phase):
                     plan.mark_failed(upstream.id)
+                    self.selector.note_switch(plan)
                     self.log("info", "switch", f"切换到下一个上游（原 {upstream.name}）")
                     continue
+                self.metrics.downstream_end()
                 return _normalize_error(502, str(exc).encode("utf-8"), "connect_failed")
 
             status = resp.status
@@ -247,6 +282,9 @@ class Gateway:
                     )
                 except asyncio.TimeoutError:
                     resp.close()
+                    self.metrics.upstream_end(
+                        upstream.id, (time.monotonic() - attempt_started) * 1000, ok=False
+                    )
                     self.health.record_failure(upstream.id, "precommit budget exceeded")
                     self.log(
                         "warn",
@@ -256,21 +294,28 @@ class Gateway:
                     )
                     if self.selector.should_switch(plan, Rule.CONNECT_FAIL, phase):
                         plan.mark_failed(upstream.id)
+                        self.selector.note_switch(plan)
                         continue
+                    self.metrics.downstream_end()
                     return _normalize_error(
                         504,
                         b"upstream did not send first chunk in time",
                         "precommit_timeout",
                     )
                 phase = Phase.UPSTREAM_RESPONSE_STARTED
+                ttfb_ms = (time.monotonic() - attempt_started) * 1000
+                self.metrics.upstream_end(upstream.id, ttfb_ms)
                 self.health.record_success(upstream.id)
                 self.session_router.bind(skey, upstream.id)
                 self.on_route(upstream.id)
                 self.log("info", "route", f"{upstream.name} 命中 {status}")
-                return await self._commit_stream(request, resp, first)
+                return await self._commit_stream(request, resp, first, upstream.id)
 
             body_bytes = await resp.read()
             await resp.release()
+            self.metrics.upstream_end(
+                upstream.id, (time.monotonic() - attempt_started) * 1000, ok=False
+            )
             rule = classify_status(status)
             self.health.record_failure(upstream.id, f"HTTP {status}")
             self.selector.mark_failure(upstream.id)
@@ -283,11 +328,13 @@ class Gateway:
             }.get(rule, "upstream_error")
             if self.selector.should_switch(plan, rule, phase):
                 plan.mark_failed(upstream.id)
+                self.selector.note_switch(plan)
                 continue
+            self.metrics.downstream_end()
             return _normalize_error(502, last_body, last_code)
 
     async def _commit_stream(
-        self, request: web.Request, resp, first: bytes
+        self, request: web.Request, resp, first: bytes, upstream_id: str = ""
     ) -> web.StreamResponse:
         """把上游响应提交给下游并透传剩余数据。"""
         ctype = resp.headers.get("Content-Type", "application/json")
@@ -297,8 +344,13 @@ class Gateway:
             headers["Content-Encoding"] = encoding
         stream = web.StreamResponse(status=resp.status, headers=headers)
         await stream.prepare(request)
+        ttfb_ms = None
         try:
             if first:
+                ttfb_ms = 0.0
+                resp_id = _extract_response_id(first)
+                if resp_id:
+                    self.session_router.bind_response(resp_id, upstream_id)
                 await stream.write(first)
             async for chunk in resp.content.iter_any():
                 if chunk:
@@ -310,6 +362,7 @@ class Gateway:
             pass
         finally:
             resp.close()
+            self.metrics.downstream_end(ttfb_ms)
         return stream
 
     async def manual_probe(self, upstream, model: str = "gpt-4o-mini") -> dict:

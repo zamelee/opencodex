@@ -82,6 +82,7 @@ class Settings:
     upstream_read_timeout_s: float = 300.0
     upstream_connect_timeout_s: float = 10.0
     max_switches_per_request: int = 2
+    max_switches_per_minute: int = 5
     min_residency_s: float = 30.0
     probe_interval_s: float = 3.0
     probe_timeout_s: float = 2.0
@@ -89,6 +90,7 @@ class Settings:
     recover_threshold: int = 5
     sticky_ttl_s: float = 24 * 3600
     retry_after_commit: bool = False
+    forced_upstream_id: str = ""  # 手动锁定通道；空 = 自动路由
     rules: dict[Rule, bool] = field(default_factory=lambda: dict(DEFAULT_RULES))
 
 

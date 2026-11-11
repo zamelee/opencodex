@@ -94,6 +94,7 @@ class Storage:
             "protocol",
             "listen_host",
             "web_host",
+            "forced_upstream_id",
         ):
             if name in raw:
                 setattr(s, name, raw[name])
@@ -101,6 +102,7 @@ class Storage:
             "listen_port",
             "web_port",
             "max_switches_per_request",
+            "max_switches_per_minute",
             "fail_threshold",
             "recover_threshold",
         ):
@@ -145,6 +147,7 @@ class Storage:
             "upstream_read_timeout_s": str(s.upstream_read_timeout_s),
             "upstream_connect_timeout_s": str(s.upstream_connect_timeout_s),
             "max_switches_per_request": str(s.max_switches_per_request),
+            "max_switches_per_minute": str(s.max_switches_per_minute),
             "min_residency_s": str(s.min_residency_s),
             "probe_interval_s": str(s.probe_interval_s),
             "probe_timeout_s": str(s.probe_timeout_s),
@@ -152,6 +155,7 @@ class Storage:
             "recover_threshold": str(s.recover_threshold),
             "sticky_ttl_s": str(s.sticky_ttl_s),
             "retry_after_commit": "1" if s.retry_after_commit else "0",
+            "forced_upstream_id": s.forced_upstream_id,
         }
         with self._lock:
             self._conn.executemany(
@@ -290,6 +294,13 @@ class Storage:
             r["key_hash"]
             for r in self._conn.execute("SELECT key_hash FROM client_keys WHERE enabled=1")
         }
+
+    def client_key_id_by_hash(self, key_hash: str) -> str | None:
+        """按 key 的 sha256 找到 key id（会话键的第三段材料）。"""
+        row = self._conn.execute(
+            "SELECT id FROM client_keys WHERE key_hash=?", (key_hash,)
+        ).fetchone()
+        return row["id"] if row else None
 
     # ---------- routes ----------
 
