@@ -278,6 +278,11 @@ class Storage:
             self._conn.execute("DELETE FROM client_keys WHERE id=?", (key_id,))
             self._conn.commit()
 
+    def update_client_key_label(self, key_id: str, label: str) -> None:
+        with self._lock:
+            self._conn.execute("UPDATE client_keys SET label=? WHERE id=?", (label, key_id))
+            self._conn.commit()
+
     def client_key_hashes(self) -> set[str]:
         import hashlib
 

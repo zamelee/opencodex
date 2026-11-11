@@ -153,6 +153,15 @@ def build_web_app(app) -> web.Application:
         app.storage.delete_client_key(request.match_info["id"])
         return web.json_response({"ok": True})
 
+    async def update_key(request):
+        uid = request.match_info["id"]
+        data = await request.json()
+        label = (data.get("label") or "").strip()
+        if not label:
+            raise web.HTTPBadRequest(reason="label required")
+        app.storage.update_client_key_label(uid, label)
+        return web.json_response({"ok": True})
+
     async def put_settings(request):
         data = await request.json()
         s = app.settings
@@ -192,6 +201,7 @@ def build_web_app(app) -> web.Application:
     routes.delete("/api/upstreams/{id}")(delete_upstream)
     routes.post("/api/upstreams/{id}/probe")(probe_upstream)
     routes.post("/api/keys")(add_key)
+    routes.put("/api/keys/{id}")(update_key)
     routes.delete("/api/keys/{id}")(delete_key)
     routes.put("/api/settings")(put_settings)
     routes.put("/api/rules")(put_rules)

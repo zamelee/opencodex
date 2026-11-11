@@ -52,6 +52,27 @@ async function api(path, opts) {
   if (!r.ok) throw new Error(await r.text());
   return r.json();
 }
+
+// 轻提示：替代 alert/confirm 那种硬弹框
+function toast(msg, kind) {
+  const t = el("div", "toast" + (kind ? " " + kind : ""), msg);
+  document.body.appendChild(t);
+  requestAnimationFrame(() => t.classList.add("in"));
+  setTimeout(() => {
+    t.classList.remove("in");
+    setTimeout(() => t.remove(), 300);
+  }, 2800);
+}
+
+// 往底部日志窗格写一行（探测详情这类长文本用，不弹框）
+function pushLog(level, message) {
+  const body = $("#logBody");
+  const line = el("div");
+  line.appendChild(el("span", "ts", "[" + fmtTs(Date.now() / 1000) + "] "));
+  line.appendChild(el("span", level, level.toUpperCase().padEnd(5) + " " + message));
+  body.appendChild(line);
+  if ($("#logFollow").checked) body.scrollTop = body.scrollHeight;
+}
 function jsonH() {
   return { "Content-Type": "application/json" };
 }
@@ -114,7 +135,8 @@ function rebuildDraft() {
       dirty: false,
     };
   } else if (selected.kind === "key") {
-    draft = { kind: "key", id: selected.id, fields: {}, dirty: false };
+    const k = STATE.keys.find((x) => x.id === selected.id);
+    draft = { kind: "key", id: selected.id, fields: { label: k ? k.label : "" }, dirty: false };
   } else if (selected.kind === "gw") {
     const s = STATE.settings;
     draft = {
@@ -158,6 +180,8 @@ function syncField(name, value) {
     }
     if (i.classList.contains("picker-btn")) {
       i.dataset.value = value;
+      i.classList.remove("pi-loopback", "pi-all", "pi-specific", "pi-custom");
+      i.classList.add(hostClass(value));
       i.textContent = hostLabel(value);
       const inp = i.parentNode.querySelector("input.picker-input");
       if (inp) inp.style.display = knownHost(value) ? "none" : "";
@@ -282,6 +306,12 @@ function healthClass(u) {
   return "";
 }
 
+function healthText(u) {
+  if (u.health === "down") return "不可用";
+  if (u.health === "degraded") return "降级";
+  return "健康";
+}
+
 // ---------- 拓扑（增量渲染） ----------
 // 关键约束：节点元素按 key 复用，只有内容真的变了才重建。
 // 之前每 2 秒轮询都把 #nodes 全量清空重建，导致
@@ -379,16 +409,23 @@ function buildGwNode() {
 
 function buildKeyNode(k) {
   const n = el("div", "node down");
-  n.appendChild(el("div", "n-title", k.label));
+  const title = el("div", "n-title", k.label);
+  title.title = "双击改名";
+  title.ondblclick = (ev) => {
+    ev.stopPropagation();
+    startRenameKey(title, k);
+  };
+  n.appendChild(title);
   n.appendChild(el("div", "n-sub mono", maskKey(k.key)));
   const acts = el("div", "node-actions");
   const cp = el("button", null, "复制");
   cp.title = "复制 Key";
   cp.onclick = (ev) => {
     ev.stopPropagation();
-    navigator.clipboard.writeText(k.key);
+    navigator.clipboard.writeText(k.key).catch(() => {});
     cp.textContent = "已复制";
     setTimeout(() => (cp.textContent = "复制"), 1200);
+    toast("已复制这把 Key");
   };
   const del = el("button", "danger", "删除");
   del.title = "删除该 Key";
@@ -404,6 +441,83 @@ function buildKeyNode(k) {
     selectObject("key", k.id);
   };
   return n;
+}
+
+// 节点上就地改名：标题换成输入框，回车提交，Esc 取消
+function startRenameKey(title, k) {
+  if (title.querySelector("input")) return;
+  const inp = el("input", "rename-input");
+  inp.value = k.label;
+  title.textContent = "";
+  title.appendChild(inp);
+  inp.focus();
+  inp.select();
+  let done = false;
+  const finish = async (commit) => {
+    if (done) return;
+    done = true;
+      const val = inp.value.trim();
+      if (!commit || !val || val === k.label) {
+        title.textContent = k.label;
+        return;
+      }
+    title.textContent = val;
+    renameKey(k.id, val);
+  };
+  inp.onkeydown = (ev) => {
+    ev.stopPropagation();
+    if (ev.key === "Enter") finish(true);
+    else if (ev.key === "Escape") finish(false);
+  };
+  inp.onblur = () => finish(true);
+}
+
+// 右侧面板里的名称：失焦即存，不用额外的保存按钮
+function keyNameField(k) {
+  const wrap = el("div", "f");
+  const l = el("label");
+  l.appendChild(el("span", null, "名称"));
+  const inp = el("input");
+  inp.type = "text";
+  inp.value = k.label;
+  l.appendChild(inp);
+  wrap.appendChild(l);
+  const hint = el(
+    "div",
+    "f-hint",
+    "这把 Key 在拓扑图上的名字，随便起个好认的，比如 codex、备用机。改完失焦自动保存；也可以直接在拓扑图上双击名字改。"
+  );
+  wrap.appendChild(hint);
+  inp.oninput = () => {
+    if (draft && draft.kind === "key") draft.fields.label = inp.value;
+  };
+  inp.onkeydown = (ev) => {
+    ev.stopPropagation();
+    if (ev.key === "Enter") inp.blur();
+    else if (ev.key === "Escape") {
+      inp.value = k.label;
+      inp.blur();
+    }
+  };
+  inp.onblur = () => {
+    const val = inp.value.trim();
+    if (!val || val === k.label) {
+      inp.value = k.label;
+      return;
+    }
+    renameKey(k.id, val);
+  };
+  return wrap;
+}
+
+async function renameKey(id, label) {
+  try {
+    await api("/api/keys/" + id, { method: "PUT", headers: jsonH(), body: JSON.stringify({ label }) });
+    toast("已改名：" + label);
+    await loadState();
+  } catch (e) {
+    toast("改名失败：" + e.message, "warn");
+  }
 }
 
 function buildAddKey() {
@@ -424,6 +538,14 @@ function renderTopology() {
   nodePos = {};
   nodePos.__gw = { x: L.gw.x, y: L.gw.y };
   $("#emptyHint").classList.toggle("hidden", L.ups.length > 0);
+
+  // 上游 / 下游 区域底色
+  const zoneUp = $("#zoneUp");
+  const zoneDown = $("#zoneDown");
+  zoneUp.style.top = L.topY - 50 + "px";
+  zoneUp.style.height = "100px";
+  zoneDown.style.top = L.botY - 50 + "px";
+  zoneDown.style.height = "100px";
 
   const edges = [];
   for (let i = 0; i < L.slotCount; i++) {
@@ -694,10 +816,18 @@ function knownHost(v) {
   return v === HOST_LOOPBACK || v === HOST_ALL || (STATE.local_ips || []).indexOf(v) >= 0;
 }
 
+// 监听范围的类别，决定下拉项与已选按钮的配色
+function hostClass(v) {
+  if (v === HOST_LOOPBACK) return "pi-loopback";
+  if (v === HOST_ALL) return "pi-all";
+  if ((STATE.local_ips || []).indexOf(v) >= 0) return "pi-specific";
+  return "pi-custom";
+}
+
 function hostLabel(v) {
   if (v === HOST_LOOPBACK) return "本机回环 " + v;
-  if (v === HOST_ALL) return "全部 IP " + v;
-  if ((STATE.local_ips || []).indexOf(v) >= 0) return "本机 IP " + v;
+  if (v === HOST_ALL) return "本机全部 IP " + v;
+  if ((STATE.local_ips || []).indexOf(v) >= 0) return "指定 IP " + v;
   return v || "—";
 }
 
@@ -711,6 +841,7 @@ function hostField(name, value, opts) {
   btn.type = "button";
   btn.dataset.field = name;
   btn.dataset.value = value;
+  btn.classList.add(hostClass(value));
   btn.textContent = hostLabel(value);
   const inp = el("input", "picker-input");
   inp.type = "text";
@@ -744,8 +875,12 @@ function openHostMenu(btn, holder) {
     menu.remove();
     if (openPickerMenu === menu) openPickerMenu = null;
   };
-  const add = (val, label, hint) => {
-    const b = el("button", "picker-item" + (val === btn.dataset.value ? " on" : ""), label);
+  const add = (val, label, hint, cls) => {
+    const b = el(
+      "button",
+      "picker-item" + (val === btn.dataset.value ? " on" : "") + (cls ? " " + cls : ""),
+      label
+    );
     b.type = "button";
     if (hint) b.title = hint;
     b.onclick = (ev) => {
@@ -758,10 +893,10 @@ function openHostMenu(btn, holder) {
     };
     menu.appendChild(b);
   };
-  add(HOST_LOOPBACK, "本机回环  " + HOST_LOOPBACK, "只接受本机访问，外部连不上");
-  add(HOST_ALL, "全部 IP  " + HOST_ALL, "监听所有网卡，允许局域网访问");
-  (STATE.local_ips || []).forEach((ip) => add(ip, "本机 IP  " + ip, "只监听这张网卡"));
-  const custom = el("button", "picker-item", "自定义…");
+  add(HOST_LOOPBACK, "本机回环  " + HOST_LOOPBACK, "只接受本机访问，外部连不上", "pi-loopback");
+  add(HOST_ALL, "本机全部 IP  " + HOST_ALL, "监听所有网卡，允许局域网访问", "pi-all");
+  (STATE.local_ips || []).forEach((ip) => add(ip, "指定 IP  " + ip, "只监听这张网卡", "pi-specific"));
+  const custom = el("button", "picker-item pi-custom", "自定义…");
   custom.type = "button";
   custom.onclick = (ev) => {
     ev.stopPropagation();
@@ -1120,14 +1255,45 @@ function renderDock() {
       )
     );
     body.appendChild(t);
-    const list = el("div", "sec");
-    list.appendChild(el("h3", null, "概览"));
     const s = STATE.settings;
-    list.appendChild(el("div", "po-line", `协议　${s.protocol}`));
-    list.appendChild(el("div", "po-line", `监听　${s.listen_host}:${s.listen_port}`));
-    list.appendChild(el("div", "po-line", `上游　${STATE.upstreams.length} 条`));
-    list.appendChild(el("div", "po-line", `下游 Key　${STATE.keys.length} 把`));
-    body.appendChild(list);
+
+    // 概览：全部信息只读列出来
+    const gw = el("div", "sec");
+    gw.appendChild(el("h3", null, "网关"));
+    gw.appendChild(el("div", "po-line", `协议　${s.protocol}`));
+    gw.appendChild(el("div", "po-line", `监听　${s.listen_host}:${s.listen_port}`));
+    gw.appendChild(el("div", "po-line", `单请求最大切换　${s.max_switches_per_request}`));
+    gw.appendChild(el("div", "po-line", `最小驻留　${s.min_residency_s} 秒`));
+    gw.appendChild(el("div", "po-line", `提交前预算　${s.precommit_budget_s} 秒`));
+    const on = Object.keys(RULE_LABELS).filter((k) => (s.rules || {})[k]);
+    gw.appendChild(el("div", "po-line", `自动切换　${on.length ? on.map((k) => RULE_LABELS[k]).join("、") : "关闭"}`));
+    gw.appendChild(el("div", "po-line", `已提交后仍重试　${s.retry_after_commit ? "开启（危险）" : "关闭"}`));
+    body.appendChild(gw);
+
+    const up = el("div", "sec");
+    up.appendChild(el("h3", null, `上游（${STATE.upstreams.length}）`));
+    if (!STATE.upstreams.length) up.appendChild(el("div", "po-line", "还没有上游通道"));
+    STATE.upstreams.forEach((u) => {
+      const row = el("div", "po-card");
+      row.appendChild(el("div", "po-card-t", u.name));
+      row.appendChild(el("div", "po-line", `Provider　${u.provider || "—"}`));
+      row.appendChild(el("div", "po-line", `Base URL　${u.base_url || "—"}`));
+      row.appendChild(el("div", "po-line", `API Key　${u.has_key === false ? "未填写" : "已填写"}`));
+      row.appendChild(el("div", "po-line", `状态　${healthText(u)}`));
+      up.appendChild(row);
+    });
+    body.appendChild(up);
+
+    const kd = el("div", "sec");
+    kd.appendChild(el("h3", null, `下游 Key（${STATE.keys.length}）`));
+    if (!STATE.keys.length) kd.appendChild(el("div", "po-line", "还没有下游 Key"));
+    STATE.keys.forEach((k) => {
+      const row = el("div", "po-card");
+      row.appendChild(el("div", "po-card-t", k.label));
+      row.appendChild(el("div", "po-line mono", k.key));
+      kd.appendChild(row);
+    });
+    body.appendChild(kd);
     return;
   }
   if (draft.kind === "upstream") {
@@ -1191,18 +1357,19 @@ function renderDock() {
     const sec = el("div", "sec");
     sec.appendChild(el("h3", null, "下游 Key"));
     if (k) {
-      sec.appendChild(el("div", "po-line", `名称　${k.label}`));
+      sec.appendChild(keyNameField(k));
       sec.appendChild(el("div", "po-key", k.key));
       sec.appendChild(el("div", "f-hint", "这把 Key 是下游（Codex）用来调用网关的凭证，等同于一把单独发放的入口密码。"));
     }
     const row = el("div", "row");
-    const cp = el("button", "btn primary", "复制");
+    const cp = el("button", "btn", "复制");
     cp.title = "复制这把 Key，填进 Codex 的配置里";
     cp.onclick = () => {
       if (!k) return;
-      navigator.clipboard.writeText(k.key);
+      navigator.clipboard.writeText(k.key).catch(() => {});
       cp.textContent = "已复制";
       setTimeout(() => (cp.textContent = "复制"), 1200);
+      toast("已复制这把 Key");
     };
     row.appendChild(cp);
     const del = el("button", "btn danger", "删除");
@@ -1251,7 +1418,7 @@ async function saveDraft() {
     };
     if (draft.fields.api_key) body.api_key = draft.fields.api_key;
     if (!body.name || !body.base_url) {
-      alert("名称与 Base URL 必填");
+      toast("名称与 Base URL 必填", "warn");
       return false;
     }
     if (draft.isNew) {
@@ -1314,7 +1481,9 @@ async function deleteUpstream(id) {
 
 async function probeUpstream(id) {
   const res = await api("/api/upstreams/" + id + "/probe", { method: "POST" });
-  alert(`HTTP ${res.status}\n耗时 ${res.ms}ms\n\n${res.body || ""}`);
+  const detail = `HTTP ${res.status} · ${res.ms}ms`;
+  pushLog(res.status >= 200 && res.status < 300 ? "info" : "warn", `探测上游 ${id}：${detail} ${res.body || ""}`);
+  toast("探测完成 " + detail, res.status >= 200 && res.status < 300 ? "" : "warn");
 }
 
 async function deleteKey(k) {
@@ -1332,7 +1501,7 @@ async function newKey() {
   try {
     await navigator.clipboard.writeText(res.key);
   } catch (e) {}
-  alert("已生成并复制：\n" + res.key);
+  toast("已生成并复制：" + res.key);
   await loadState();
 }
 
