@@ -37,6 +37,16 @@ body {
 
 .topbar .spacer, .log-head .spacer { flex: 1; }
 
+.brand {
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: 1px;
+  color: var(--text);
+  padding-right: 8px;
+  margin-right: 2px;
+  border-right: 1px solid var(--line);
+}
+
 .dot {
   width: 10px;
   height: 10px;

@@ -446,7 +446,8 @@ function buildAddUp() {
 function buildGwNode() {
   const n = el("div", "node gateway");
   const s = STATE.settings || {};
-  n.appendChild(el("div", "n-title", "HA Gateway"));
+  n.appendChild(el("div", "n-title", "乾坤机枢"));
+  n.appendChild(el("div", "n-sub", "HA Gateway · 双路高可用"));
   n.appendChild(el("div", "n-sub mono", s.protocol || "—"));
   n.appendChild(el("div", "n-sub mono", `${s.listen_host || "—"}:${s.listen_port || "—"}`));
   n.onclick = (ev) => {
@@ -680,7 +681,7 @@ function renderTopology() {
     cls: "node gateway" + (selected && selected.kind === "gw" ? " sel" : ""),
     x: L.gw.x,
     y: L.gw.y,
-    sig: JSON.stringify(["HA Gateway", gs.protocol, gs.listen_host, gs.listen_port]),
+    sig: JSON.stringify(["乾坤机枢", gs.protocol, gs.listen_host, gs.listen_port]),
     build: buildGwNode,
   });
 

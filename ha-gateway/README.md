@@ -1,7 +1,9 @@
-# HA Gateway
+# 乾坤机枢（HA Gateway）
 
 本机前置的高可用 LLM 网关。下游（Codex 等）只连一个地址、持一把网关签发的 key；
 网关背后挂多路上游（各自的 provider、各自的 api key），任一路故障时在下游无感的前提下切换。
+
+> 命名取自武侠里的「机关枢纽」：乾坤为势，机枢为枢——正是主备两路互为犄角的意象。
 
 ![拓扑](docs/HA-GATEWAY-SPEC.md)
 
@@ -17,6 +19,16 @@ run.bat
 build.bat
 ```
 
+产物是 `dist\HA-Gateway.exe`（约 55 MB，onefile）。运行后：
+
+- 弹出一个**内嵌窗口**（Edge WebView2）就是管理页，不再外开浏览器；
+- 关窗口只是隐藏到系统托盘，网关继续跑；
+- 托盘菜单：打开管理页 / 退出；
+- 单实例：重复启动会提示「乾坤机枢 已经在运行了」；
+- 没装 WebView2 Runtime 的机器自动降级为系统浏览器打开管理页。
+
+exe 用正式配置目录（`%APPDATA%`），和 `dev.bat` 的临时库**不互通**。
+
 首次使用：
 
 1. 「上游」页添加上游：名称、Provider、Base URL、API Key。
@@ -24,7 +36,7 @@ build.bat
 
    ```toml
    [model_providers.ha]
-   name = "HA Gateway"
+   name = "乾坤机枢"
    base_url = "http://127.0.0.1:10110/v1/"
    env_key = "HA_GATEWAY_KEY"
    wire_api = "responses"

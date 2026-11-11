@@ -31,7 +31,7 @@ def test_web_ui_and_api():
                     async with sess.get(base + "/") as r:
                         assert r.status == 200
                         html = await r.text()
-                        assert "HA Gateway" in html
+                        assert "乾坤机枢" in html
                     async with sess.get(base + "/app.js") as r:
                         assert r.status == 200
                     async with sess.get(base + "/style.css") as r:

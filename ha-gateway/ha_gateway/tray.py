@@ -26,13 +26,14 @@ class Tray:
 
     def start(self) -> None:
         import pystray
+        from .branding import APP_NAME, APP_TAGLINE
 
         menu = pystray.Menu(
-            pystray.MenuItem("显示主界面", lambda: self.on_show()),
+            pystray.MenuItem(f"打开管理页（{APP_NAME}）", lambda: self.on_show()),
             pystray.MenuItem("退出", lambda: self.on_quit()),
         )
         self._icon = pystray.Icon(
-            "ha-gateway", _icon_image(True), "HA Gateway", menu
+            "ha-gateway", _icon_image(True), f"{APP_NAME} · {APP_TAGLINE}", menu
         )
         self._thread = threading.Thread(target=self._icon.run, daemon=True, name="ha-tray")
         self._thread.start()
