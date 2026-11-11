@@ -256,6 +256,48 @@ main {
 }
 
 .bwrap { display: inline-block; }
+
+/* 监听主机下拉 */
+.picker { position: relative; }
+.picker-btn {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--text);
+  padding: 5px 9px;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.picker-btn:hover { background: #f7f8fa; }
+.picker-input { width: 100%; }
+.picker-menu {
+  z-index: 999;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16);
+  padding: 4px;
+  max-height: 340px;
+  overflow: auto;
+}
+.picker-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  padding: 6px 8px;
+  border-radius: 6px;
+  font: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.picker-item:hover { background: #f0f2f5; }
+.picker-item.on { background: var(--blue); color: #fff; }
+
 input, select {
   border: 1px solid var(--line);
   border-radius: 6px;

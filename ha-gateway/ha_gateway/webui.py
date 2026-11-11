@@ -4,12 +4,35 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 
 from aiohttp import web
 
 from .models import Rule
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
+
+
+def _local_ips() -> list[str]:
+    """本机可被访问到的 IPv4 地址（不含回环）。"""
+    ips: set[str] = set()
+    # UDP connect 不会真的发包，只是让系统选路，从而问出本机出口 IP
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            ips.add(s.getsockname()[0])
+        finally:
+            s.close()
+    except OSError:
+        pass
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ips.add(info[4][0])
+    except OSError:
+        pass
+    ips.discard("127.0.0.1")
+    return sorted(ips)
 
 
 def _state(app) -> dict:
@@ -39,6 +62,7 @@ def _state(app) -> dict:
     return {
         "upstreams": ups,
         "keys": keys,
+        "local_ips": _local_ips(),
         "settings": {
             "protocol": s.protocol,
             "listen_host": s.listen_host,

@@ -156,6 +156,13 @@ function syncField(name, value) {
       i.classList.toggle("on", i.dataset.value === value);
       return;
     }
+    if (i.classList.contains("picker-btn")) {
+      i.dataset.value = value;
+      i.textContent = hostLabel(value);
+      const inp = i.parentNode.querySelector("input.picker-input");
+      if (inp) inp.style.display = knownHost(value) ? "none" : "";
+      return;
+    }
     if (i.type === "checkbox") i.checked = !!value;
     else i.value = value;
   });
@@ -215,6 +222,13 @@ async function selectObject(kind, id) {
   renderTopology();
   renderPanels();
   if (kind === "gw") focusGwConsole();
+}
+
+// 放弃当前草稿，恢复到已保存的值
+function cancelDraft() {
+  rebuildDraft();
+  renderTopology();
+  renderPanels();
 }
 
 async function deselect() {
@@ -669,6 +683,113 @@ function selectField(label, name, value, options) {
   return l;
 }
 
+// ---------- 监听主机选择器 ----------
+// 监听地址不能靠手打：本机 IP 会变。本机回环 / 全部 IP / 本机各 IP 做成下拉，
+// 另留「自定义…」入口填任意地址。
+const HOST_LOOPBACK = "127.0.0.1";
+const HOST_ALL = "0.0.0.0";
+let openPickerMenu = null;
+
+function knownHost(v) {
+  return v === HOST_LOOPBACK || v === HOST_ALL || (STATE.local_ips || []).indexOf(v) >= 0;
+}
+
+function hostLabel(v) {
+  if (v === HOST_LOOPBACK) return "本机回环 " + v;
+  if (v === HOST_ALL) return "全部 IP " + v;
+  if ((STATE.local_ips || []).indexOf(v) >= 0) return "本机 IP " + v;
+  return v || "—";
+}
+
+function hostField(name, value, opts) {
+  opts = opts || {};
+  const wrap = el("div", "f");
+  const l = el("label");
+  l.appendChild(el("span", null, opts.label || "监听 IP"));
+  const holder = el("div", "picker");
+  const btn = el("button", "picker-btn");
+  btn.type = "button";
+  btn.dataset.field = name;
+  btn.dataset.value = value;
+  btn.textContent = hostLabel(value);
+  const inp = el("input", "picker-input");
+  inp.type = "text";
+  inp.dataset.field = name;
+  inp.value = value;
+  inp.style.display = knownHost(value) ? "none" : "";
+  inp.oninput = () => setField(name, inp.value);
+  holder.appendChild(btn);
+  holder.appendChild(inp);
+  l.appendChild(holder);
+  wrap.appendChild(l);
+  applyHint(wrap, l, null, opts.hint, opts.mode);
+
+  btn.onclick = (ev) => {
+    ev.stopPropagation();
+    openHostMenu(btn, holder);
+  };
+  return wrap;
+}
+
+function openHostMenu(btn, holder) {
+  if (openPickerMenu) {
+    openPickerMenu.remove();
+    openPickerMenu = null;
+    return;
+  }
+  const menu = el("div", "picker-menu");
+  const name0 = btn.dataset.field;
+  const inp = holder.querySelector("input.picker-input");
+  const closeMenu = () => {
+    menu.remove();
+    if (openPickerMenu === menu) openPickerMenu = null;
+  };
+  const add = (val, label, hint) => {
+    const b = el("button", "picker-item" + (val === btn.dataset.value ? " on" : ""), label);
+    b.type = "button";
+    if (hint) b.title = hint;
+    b.onclick = (ev) => {
+      ev.stopPropagation();
+      closeMenu();
+      setField(name0, val);
+      btn.dataset.value = val;
+      btn.textContent = hostLabel(val);
+      inp.style.display = knownHost(val) ? "none" : "";
+    };
+    menu.appendChild(b);
+  };
+  add(HOST_LOOPBACK, "本机回环  " + HOST_LOOPBACK, "只接受本机访问，外部连不上");
+  add(HOST_ALL, "全部 IP  " + HOST_ALL, "监听所有网卡，允许局域网访问");
+  (STATE.local_ips || []).forEach((ip) => add(ip, "本机 IP  " + ip, "只监听这张网卡"));
+  const custom = el("button", "picker-item", "自定义…");
+  custom.type = "button";
+  custom.onclick = (ev) => {
+    ev.stopPropagation();
+    closeMenu();
+    inp.style.display = "";
+    inp.focus();
+    inp.select();
+  };
+  menu.appendChild(custom);
+  // 菜单用 fixed 定位，避免被画布的 overflow 裁掉
+  menu.style.position = "fixed";
+  document.body.appendChild(menu);
+  const r = btn.getBoundingClientRect();
+  const mh = Math.min(menu.offsetHeight, 260);
+  const below = window.innerHeight - r.bottom;
+  const top = below < mh + 12 ? Math.max(8, r.top - mh - 4) : r.bottom + 4;
+  menu.style.left = r.left + "px";
+  menu.style.top = top + "px";
+  menu.style.minWidth = r.width + "px";
+  openPickerMenu = menu;
+  setTimeout(() => document.addEventListener("click", closeOnOutside, true), 0);
+  function closeOnOutside(e) {
+    if (holder.contains(e.target) || menu.contains(e.target)) return;
+    closeMenu();
+    document.removeEventListener("click", closeOnOutside, true);
+  }
+}
+
 function renderInline() {
   const box = $("#inline");
   box.innerHTML = "";
@@ -773,7 +894,7 @@ function renderGwConsole() {
     })
   );
   form.appendChild(
-    fieldBlock("监听 IP", "listen_host", draft.fields.listen_host, { hint: HINTS.listen_host, mode: "tooltip" })
+    hostField("listen_host", draft.fields.listen_host, { hint: HINTS.listen_host, mode: "tooltip" })
   );
   form.appendChild(
     fieldBlock("端口", "listen_port", draft.fields.listen_port, {
@@ -792,6 +913,13 @@ function renderGwConsole() {
     saveDraft();
   };
   row.appendChild(save);
+  const cancel = el("button", "btn", "取消");
+  cancel.title = "放弃本次修改";
+  cancel.onclick = (ev) => {
+    ev.stopPropagation();
+    cancelDraft();
+  };
+  row.appendChild(cancel);
   const more = el("button", "btn", "更多…");
   more.title = "在右侧面板调整全部参数：切换预算、故障转移规则等";
   more.onclick = (ev) => {
@@ -809,7 +937,7 @@ function gwControls(mode) {
   const wrap = el("div");
   const f = el("div", "form");
   f.appendChild(radioBlock("协议", "protocol", draft.fields.protocol, PROTOCOLS, { hint: HINTS.protocol, mode }));
-  f.appendChild(fieldBlock("监听主机", "listen_host", draft.fields.listen_host, { hint: HINTS.listen_host, mode }));
+  f.appendChild(hostField("listen_host", draft.fields.listen_host, { hint: HINTS.listen_host, mode }));
   f.appendChild(fieldBlock("监听端口", "listen_port", draft.fields.listen_port, { type: "number", hint: HINTS.listen_port, mode }));
   f.appendChild(
     fieldBlock("单请求最大切换", "max_switches_per_request", draft.fields.max_switches_per_request, {
@@ -864,6 +992,10 @@ function gwControls(mode) {
   save.title = "把协议、监听、切换预算与故障转移规则写入配置";
   save.onclick = () => saveDraft();
   row.appendChild(save);
+  const cancel = el("button", "btn", "取消");
+  cancel.title = "放弃本次修改，恢复到已保存的配置";
+  cancel.onclick = () => cancelDraft();
+  row.appendChild(cancel);
   wrap.appendChild(row);
   if (mode === "inline") {
     wrap.appendChild(el("div", "f-hint", "「保存应用」写入协议、监听、切换预算与故障转移规则。"));
