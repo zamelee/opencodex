@@ -294,6 +294,17 @@ main {
   stroke-width: 2.8;
 }
 
+/* 手动锁定：这条线钉死了 -> 实线加粗；其余通道淡下去 */
+.wire-flow-locked {
+  stroke-width: 3.4;
+  stroke-dasharray: none;
+  animation: none;
+  opacity: 1;
+}
+.wire-flow-dim {
+  opacity: 0.35;
+}
+
 @keyframes wire-dash-flow {
   from {
     stroke-dashoffset: 0;

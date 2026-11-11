@@ -370,8 +370,20 @@ function renderWires(svg, edges) {
 function wireClass(e) {
   if (e.kind === "ghost") return "wire-flow wire-flow-ghost";
   const h = e.health === "down" ? "down" : e.health === "degraded" ? "degraded" : "up";
-  const active = e.kind === "up" && e.owner === activeUpstream ? " wire-flow-active" : "";
-  return "wire-flow wire-flow-" + h + active;
+  let cls = "wire-flow wire-flow-" + h;
+  if (e.kind === "up") {
+    const forced = (STATE.settings || {}).forced_upstream_id || "";
+    if (forced && e.owner === forced) {
+      // 锁定通道：实线加粗，视觉上就是"确定走这条"
+      cls += " wire-flow-locked";
+    } else if (forced) {
+      // 别的通道淡下去，一眼看出当前钉住了谁
+      cls += " wire-flow-dim";
+    } else if (e.owner === activeUpstream) {
+      cls += " wire-flow-active";
+    }
+  }
+  return cls;
 }
 
 function buildUpstreamNode(u, i) {
