@@ -651,11 +651,42 @@ input:focus, select:focus { outline: 2px solid rgba(26, 115, 232, 0.35); border-
 .hint { color: var(--muted); }
 
 .logpane {
-  height: 168px;
+  height: var(--log-h, 168px);
   background: var(--panel);
   border-top: 1px solid var(--line);
   display: flex;
   flex-direction: column;
+}
+
+/* 画布与日志窗格之间的可拖动分隔条 */
+.splitter {
+  height: 7px;
+  flex: none;
+  cursor: ns-resize;
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+  position: relative;
+  z-index: 6;
+}
+.splitter::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 46px;
+  height: 3px;
+  margin: -1.5px 0 0 -23px;
+  border-radius: 2px;
+  background: #c7ccd4;
+  transition: background 0.15s;
+}
+.splitter:hover::after,
+.splitter.dragging::after {
+  background: var(--blue);
+}
+.splitter.dragging {
+  cursor: ns-resize;
+  user-select: none;
 }
 .log-head { display: flex; align-items: center; gap: 8px; padding: 4px 10px; border-bottom: 1px solid var(--line); }
 .log-head .follow { display: flex; align-items: center; gap: 5px; color: var(--muted); }

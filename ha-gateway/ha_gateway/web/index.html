@@ -45,13 +45,15 @@
     <aside class="drawer hidden" id="drawer">
       <div class="drawer-head">
         <span id="dockTitle">管理</span>
-        <button class="btn icon" id="closeDrawer" title="收起面板">◀</button>
+      <button class="btn icon" id="closeDrawer" title="收起面板">✕</button>
       </div>
       <div class="drawer-body" id="dockBody"></div>
     </aside>
   </main>
 
-  <footer class="logpane">
+  <div class="splitter" id="splitter" title="拖动调整画布与日志窗格的高度比例"></div>
+
+  <footer class="logpane" id="logpane">
     <div class="log-head">
       <label class="follow"><input type="checkbox" id="logFollow" checked /> 自动跟随滚动</label>
       <span class="spacer"></span>

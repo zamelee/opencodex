@@ -1612,7 +1612,8 @@ async function newKey() {
 
 function openDrawer() {
   $("#drawer").classList.remove("hidden");
-  $("#toggleDrawer").textContent = "◀";
+  // 面板已经打开 -> 箭头朝右，点它表示"收起到右边"
+  $("#toggleDrawer").textContent = "▶";
   $("#toggleDrawer").title = "收起管理面板";
   renderTopology();
   renderPanels();
@@ -1620,7 +1621,8 @@ function openDrawer() {
 
 function closeDrawer() {
   $("#drawer").classList.add("hidden");
-  $("#toggleDrawer").textContent = "▶";
+  // 面板已收起 -> 箭头朝左，点它表示"把面板拉出来"
+  $("#toggleDrawer").textContent = "◀";
   $("#toggleDrawer").title = "管理面板";
   renderTopology();
   renderPanels();
@@ -1707,6 +1709,50 @@ window.addEventListener("keydown", async (ev) => {
 });
 
 // ---------- 启动 ----------
+
+// 上下分隔条：拖动调整画布与日志窗格的高度比例
+(() => {
+  const sp = $("#splitter");
+  if (!sp) return;
+  const saved = localStorage.getItem("ha.logH");
+  if (saved) document.documentElement.style.setProperty("--log-h", saved + "px");
+  let dragging = false;
+  let pending = false;
+  sp.addEventListener("pointerdown", (e) => {
+    dragging = true;
+    sp.classList.add("dragging");
+    try {
+      sp.setPointerCapture(e.pointerId);
+    } catch (err) {}
+    e.preventDefault();
+  });
+  sp.addEventListener("pointermove", (e) => {
+    if (!dragging) return;
+    const rect = $("#logpane").getBoundingClientRect();
+    const h = Math.round(
+      Math.max(80, Math.min(rect.bottom - e.clientY, window.innerHeight - 260))
+    );
+    document.documentElement.style.setProperty("--log-h", h + "px");
+    localStorage.setItem("ha.logH", String(h));
+    if (!pending) {
+      pending = true;
+      requestAnimationFrame(() => {
+        pending = false;
+        renderTopology();
+      });
+    }
+  });
+  const stop = (e) => {
+    if (!dragging) return;
+    dragging = false;
+    sp.classList.remove("dragging");
+    try {
+      sp.releasePointerCapture(e.pointerId);
+    } catch (err) {}
+  };
+  sp.addEventListener("pointerup", stop);
+  sp.addEventListener("pointercancel", stop);
+})();
 
 // ---------- 连线动画（流动虚线 + 请求数据球） ----------
 //
