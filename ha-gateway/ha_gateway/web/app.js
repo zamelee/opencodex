@@ -119,6 +119,25 @@ function renderTop() {
   $("#dot").className = "dot" + (STATE.running ? "" : " off");
   $("#addr").textContent = `${s.listen_host}:${s.listen_port}`;
   $("#proto").textContent = s.protocol;
+  renderRouteMode();
+}
+
+// 画布左上角：当前是自动路由还是手动锁定到某条通道
+function renderRouteMode() {
+  const box = $("#routeMode");
+  if (!box) return;
+  const s = STATE.settings || {};
+  const forced = s.forced_upstream_id || "";
+  if (forced) {
+    const u = STATE.upstreams.find((x) => x.id === forced);
+    box.textContent = "路由：锁定 " + (u ? u.name : forced);
+    box.classList.add("locked");
+    box.title = "已手动锁定到「" + (u ? u.name : forced) + "」。点一下恢复自动路由。";
+  } else {
+    box.textContent = "路由：自动";
+    box.classList.remove("locked");
+    box.title = "自动路由：健康优先 + 会话粘性 + 故障转移。点一下打开网关设置。";
+  }
 }
 
 // ---------- 草稿 ----------
@@ -1631,6 +1650,14 @@ $("#closeDrawer").onclick = async () => {
   closeDrawer();
 };
 $("#refresh").onclick = loadState;
+$("#routeMode").onclick = () => {
+  const s = STATE.settings || {};
+  if (s.forced_upstream_id) {
+    setForcedUpstream("");
+  } else {
+    selectObject("gw", "gw");
+  }
+};
 $("#copyAddr").onclick = () => {
   const s = STATE.settings;
   const url = `http://${s.listen_host}:${s.listen_port}/v1/`;
@@ -1692,6 +1719,7 @@ const flowSystem = (() => {
   let rafId = 0;
   let lastTime = null;
   let enabled = true;        // 用户开关（顶栏「动画」）
+  let speedMul = 1;          // 用户速度滑块
   let destroyed = false;
 
   const motionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -1832,7 +1860,7 @@ const flowSystem = (() => {
     lastTime = now;
     for (const ball of balls) {
       if (ball.state === "active") {
-        ball.distance += (SPEED * dt) / 1000;
+        ball.distance += (SPEED * speedMul * dt) / 1000;
         if (ball.distance >= ball.pathLength) {
           finishBall(ball);
           continue;
@@ -1895,6 +1923,10 @@ const flowSystem = (() => {
     return enabled;
   }
 
+  function setSpeed(mul) {
+    speedMul = Math.max(0.25, Math.min(3, Number(mul) || 1));
+  }
+
   function countActive(edgeId) {
     return balls.filter((b) => b.state === "active" && b.edgeId === edgeId).length;
   }
@@ -1924,6 +1956,7 @@ const flowSystem = (() => {
     ensureRunning,
     countActive,
     releaseEdge,
+    setSpeed,
   };
 })();
 
@@ -2029,6 +2062,21 @@ const flowDriver = (() => {
 
 // 顶栏「动画」开关：默认开，关掉后连线静止、数据球消失
 const animToggle = $("#animToggle");
+const animSpeed = $("#animSpeed");
+
+function applyAnimSpeed(v) {
+  const mul = Math.max(0.25, Math.min(3, Number(v) || 1));
+  document.documentElement.style.setProperty("--anim-speed", String(mul));
+  flowSystem.setSpeed(mul);
+}
+
+animSpeed.value = localStorage.getItem("ha.animSpeed") || "1";
+applyAnimSpeed(animSpeed.value);
+animSpeed.oninput = () => {
+  localStorage.setItem("ha.animSpeed", animSpeed.value);
+  applyAnimSpeed(animSpeed.value);
+};
+
 function applyAnim(on) {
   $("#wires").classList.toggle("anim-off", !on);
   flowSystem.setEnabled(on);

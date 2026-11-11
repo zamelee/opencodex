@@ -222,6 +222,37 @@ main {
    连线动画：流动虚线 + 请求数据球
    ========================================= */
 
+/* 顶栏速度滑块 */
+.topbar .speed { display: flex; align-items: center; gap: 6px; }
+.topbar .speed input[type="range"] {
+  width: 84px;
+  accent-color: var(--blue);
+  cursor: pointer;
+}
+
+/* 当前路由模式角标 */
+.route-mode {
+  position: absolute;
+  left: 16px;
+  top: 62px;
+  z-index: 3;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+.route-mode:hover { border-color: var(--blue); color: var(--blue); }
+.route-mode.locked {
+  border-color: var(--blue);
+  background: #eaf1fd;
+  color: var(--blue);
+  font-weight: 600;
+}
+
 .wire-flow {
   fill: none;
   stroke-width: 2;
@@ -232,14 +263,14 @@ main {
 .wire-flow-up {
   stroke: #829bb8;
   stroke-dasharray: 5 7;
-  animation: wire-dash-flow 3.5s linear infinite;
+  animation: wire-dash-flow calc(3.5s / var(--anim-speed, 1)) linear infinite;
 }
 
 /* degraded：降级，琥珀，稍快 */
 .wire-flow-degraded {
   stroke: #d69a38;
   stroke-dasharray: 5 7;
-  animation: wire-dash-flow 2.5s linear infinite;
+  animation: wire-dash-flow calc(2.5s / var(--anim-speed, 1)) linear infinite;
 }
 
 /* down：不可用，红色，静止 */
