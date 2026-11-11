@@ -77,6 +77,27 @@ body {
 .btn.ghost { color: var(--muted); }
 .btn.icon { padding: 2px 8px; }
 
+/* 按钮内图标 */
+.btn .ico {
+  display: inline-flex;
+  vertical-align: -3px;
+  margin-right: 5px;
+}
+.btn .ico svg {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+
+/* 已排除态：琥珀色，与「锁定」的蓝色明确区分 */
+.btn.excluded-on {
+  background: var(--amber);
+  border-color: var(--amber);
+  color: #fff;
+  font-weight: 600;
+}
+.btn.excluded-on:hover { background: #a67400; }
+
 main {
   flex: 1;
   display: flex;
@@ -279,8 +300,8 @@ main {
 /* 被排除通道的角标 */
 .node-excluded {
   position: absolute;
-  top: 12px;
-  left: -8px;
+  top: -8px;
+  left: 24px;
   z-index: 2;
   padding: 2px 6px;
   border-radius: 999px;

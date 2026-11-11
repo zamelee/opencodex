@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 from urllib.parse import urlsplit, urlunsplit
 
 # 各协议下会被网关自己拼接的路径后缀
@@ -29,6 +30,27 @@ PROTOCOL_SUFFIXES: dict[str, tuple[str, ...]] = {
 }
 
 
+LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
+
+
+def default_scheme(host: str) -> str:
+    """没写协议头时的默认：本机回环走 http，公网域名走 https。"""
+    h = (host or "").strip().lower()
+    if h.startswith("[") and "]" in h:  # [::1]:port
+        h = h[1 : h.index("]")]
+    h = h.split(":")[0]
+    if not h or h in LOCAL_HOSTS:
+        return "http"
+    if h.endswith(".local") or h.endswith(".lan") or h.endswith(".home"):
+        return "http"
+    try:
+        ipaddress.ip_address(h)
+        return "http"  # 裸 IP（含内网）通常没有 TLS
+    except ValueError:
+        pass
+    return "https"
+
+
 def normalize_base_url(raw: str, protocol: str) -> tuple[str, str]:
     """返回 (纠正后的 Base URL, 备注)。备注为空表示原样可用。"""
     s = (raw or "").strip()
@@ -37,10 +59,12 @@ def normalize_base_url(raw: str, protocol: str) -> tuple[str, str]:
 
     note = ""
 
-    # 1) 没写 scheme 就补 http://
+    # 1) 没写 scheme 就补一个合适的默认（本地 http，公网 https）
     if "://" not in s:
-        s = "http://" + s
-        note = "已补全协议头 http://"
+        host = s.split("/")[0]
+        sch = default_scheme(host)
+        s = f"{sch}://{s}"
+        note = f"已补全协议头 {sch}://"
 
     parts = urlsplit(s)
     if not parts.hostname:
@@ -75,7 +99,7 @@ def provider_from_base_url(base_url: str) -> str:
     if not s:
         return ""
     if "://" not in s:
-        s = "http://" + s
+        s = f"{default_scheme(s.split('/')[0])}://{s}"
     parts = urlsplit(s)
     if not parts.hostname:
         return ""

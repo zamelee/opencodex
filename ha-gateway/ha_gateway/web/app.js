@@ -36,7 +36,7 @@ const HINTS = {
   budget: "请求已发出、上游尚未响应时，允许在多少秒内换上游重试。",
   up_name: "这条上游在拓扑图里的显示名。",
   up_provider: "上游服务商标识（例如 m.aiio.chat），用于分组与展示。",
-  up_base: "上游的 OpenAI 兼容接口根地址，例如 http://127.0.0.1:10100。只填到端口，不要带 /v1/responses 这类路径——网关会在其后自己拼协议路径。",
+  up_base: "上游的 OpenAI 兼容接口根地址，例如 http://127.0.0.1:10100 或 https://api.example.com。只填到端口，不要带 /v1/responses 这类路径——网关会在其后自己拼协议路径。不写协议头时，本机回环默认 http，公网域名默认 https。",
   up_key: "调用上游的密钥；留空表示不修改已保存的密钥。",
 };
 
@@ -468,8 +468,9 @@ function normalizeBaseUrl(raw, protocol) {
   if (!s) return { url: "", note: "" };
   let note = "";
   if (s.indexOf("://") < 0) {
-    s = "http://" + s;
-    note = "已补全 http://";
+    const sch = defaultScheme(s.split("/")[0]);
+    s = sch + "://" + s;
+    note = "已补全 " + sch + "://";
   }
   const m = /^([a-z0-9+.-]+:\/\/[^/?#]+)([^?#]*)/i.exec(s);
   if (!m) return { url: s, note };
@@ -496,11 +497,25 @@ function normalizeBaseUrl(raw, protocol) {
   return { url: (schemeHost + path).replace(/\/+$/, ""), note };
 }
 
+// 没写协议头时的默认：本机回环 http，公网域名 https（与后端 urlnorm.py 一致）
+function defaultScheme(host) {
+  let h = (host || "").trim().toLowerCase();
+  if (h.startsWith("[") && h.indexOf("]") > 0) h = h.slice(1, h.indexOf("]"));
+  h = h.split(":")[0];
+  if (!h) return "http";
+  if (["127.0.0.1", "localhost", "::1", "0.0.0.0"].indexOf(h) >= 0) return "http";
+  if (/\.(local|lan|home)$/.test(h)) return "http";
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(h) || h.indexOf(":") >= 0) return "http"; // 裸 IP
+  return "https";
+}
+
 // Provider 缺省值：Base URL 的域名+端口
 function providerFromBaseUrl(baseUrl) {
   const s = (baseUrl || "").trim();
   if (!s) return "";
-  const m = /^[a-z0-9+.-]+:\/\/([^/?#]+)/i.exec(s.indexOf("://") < 0 ? "http://" + s : s);
+  const m = /^[a-z0-9+.-]+:\/\/([^/?#]+)/i.exec(
+    s.indexOf("://") < 0 ? defaultScheme(s.split("/")[0]) + "://" + s : s
+  );
   return m ? m[1] : "";
 }
 
@@ -758,6 +773,7 @@ function renderTopology() {
           u.base_url,
           miss,
           (STATE.settings || {}).forced_upstream_id === u.id ? "locked" : "",
+          isExcluded(u.id) ? "excluded" : "",
         ]),
         build: () => buildUpstreamNode(u, i),
       });
@@ -1147,40 +1163,80 @@ function renderInline() {
     })
   );
   box.appendChild(f);
+  // 图示：按钮文字前面的小图标（内联 SVG，无外部依赖）
+  const ICONS = {
+    save: '<path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8"/><path d="M7 3v5h8"/>',
+    probe: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>',
+    trash: '<path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/>',
+    lock: '<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+    ban: '<circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/>',
+  };
+  const icon = (name) => {
+    const s = el("span", "ico");
+    s.innerHTML =
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
+      'stroke-linecap="round" stroke-linejoin="round">' +
+      (ICONS[name] || "") +
+      "</svg>";
+    return s;
+  };
+  const mkBtn = (cls, ico, label, title, onclick) => {
+    const b = el("button", "btn " + cls);
+    b.appendChild(icon(ico));
+    b.appendChild(el("span", "bt", label));
+    b.title = title;
+    b.onclick = onclick;
+    return b;
+  };
+
   const row = el("div", "row");
-  const save = el("button", "btn primary", draft.isNew ? "添加" : "保存");
+  const save = el("button", "btn primary");
+  if (!draft.isNew) save.appendChild(icon("save"));
+  save.appendChild(el("span", "bt", draft.isNew ? "添加" : "保存"));
   save.title = draft.isNew ? "创建这条上游通道" : "把改动写回这条上游通道";
   save.onclick = () => saveDraft();
   row.appendChild(save);
   if (!draft.isNew) {
-    const probe = el("button", "btn", "探测");
-    probe.title = "对这条上游发一次实际请求，检查连通性与凭据是否有效";
-    probe.onclick = () => probeUpstream(draft.id);
-    row.appendChild(probe);
-    const forced = (STATE.settings || {}).forced_upstream_id === draft.id;
-    const forceBtn = el("button", "btn" + (forced ? " primary" : ""), forced ? "恢复自动" : "锁定此通道");
-    forceBtn.title = forced
-      ? "取消手动锁定，回到自动路由（健康优先 + 会话粘性）"
-      : "手动把路由锁到这条通道；它不可用时仍会自动切走。锁定优先于「排除」。";
-    forceBtn.onclick = () => setForcedUpstream(forced ? "" : draft.id);
-    row.appendChild(forceBtn);
-    const exc = isExcluded(draft.id);
-    const excBtn = el("button", "btn" + (exc ? " primary" : ""), exc ? "取消排除" : "排除此通道");
-    excBtn.title = exc
-      ? "这条通道目前不参与自动路由。点一下把它放回候选池。"
-      : "把这条通道移出自动路由候选池（仍会探测健康，也可再手动锁定）。";
-    excBtn.onclick = async () => {
-      const cur = ((STATE.settings || {}).excluded_upstream_ids || []).slice();
-      const next = exc ? cur.filter((x) => x !== draft.id) : cur.concat([draft.id]);
-      await setExcluded(next);
-    };
-    row.appendChild(excBtn);
-    const del = el("button", "btn danger", "删除");
-    del.title = "移除这条上游通道";
-    del.onclick = () => deleteUpstream(draft.id);
+    row.appendChild(
+      mkBtn("", "probe", "探测", "对这条上游发一次实际请求，检查连通性与凭据是否有效", () =>
+        probeUpstream(draft.id)
+      )
+    );
+    const del = mkBtn("danger", "trash", "删除", "移除这条上游通道", () => deleteUpstream(draft.id));
     row.appendChild(del);
   }
   box.appendChild(row);
+
+  if (!draft.isNew) {
+    const row2 = el("div", "row");
+    const forced = (STATE.settings || {}).forced_upstream_id === draft.id;
+    const forceBtn = mkBtn(
+      forced ? "primary" : "",
+      "lock",
+      forced ? "恢复自动" : "锁定此通道",
+      forced
+        ? "取消手动锁定，回到自动路由（健康优先 + 会话粘性）"
+        : "手动把路由锁到这条通道；它不可用时仍会自动切走。锁定优先于「排除」。",
+      () => setForcedUpstream(forced ? "" : draft.id)
+    );
+    row2.appendChild(forceBtn);
+    const exc = isExcluded(draft.id);
+    const excBtn = mkBtn(
+      exc ? "excluded-on" : "",
+      "ban",
+      exc ? "取消排除" : "排除此通道",
+      exc
+        ? "这条通道目前不参与自动路由。点一下把它放回候选池。"
+        : "把这条通道移出自动路由候选池（仍会探测健康，也可再手动锁定）。",
+      async () => {
+        const cur = ((STATE.settings || {}).excluded_upstream_ids || []).slice();
+        const next = exc ? cur.filter((x) => x !== draft.id) : cur.concat([draft.id]);
+        await setExcluded(next);
+      }
+    );
+    row2.appendChild(excBtn);
+    box.appendChild(row2);
+  }
   renderLinks();
 }
 

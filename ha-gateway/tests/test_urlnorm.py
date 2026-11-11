@@ -1,4 +1,4 @@
-from ha_gateway.urlnorm import normalize_base_url, provider_from_base_url
+from ha_gateway.urlnorm import default_scheme, normalize_base_url, provider_from_base_url
 
 
 def test_strips_protocol_path():
@@ -48,3 +48,28 @@ def test_provider_default_fills_from_normalized_url():
     """Provider 留空 -> 取归一化后 Base URL 的域名+端口。"""
     url, _ = normalize_base_url("http://10.126.126.2:10100/v1/responses", "openai-responses")
     assert provider_from_base_url(url) == "10.126.126.2:10100"
+
+
+def test_https_is_supported():
+    """https 地址原样保留，不被改写。"""
+    url, note = normalize_base_url("https://api.example.com", "openai-responses")
+    assert url == "https://api.example.com"
+    assert note == ""
+
+
+def test_default_scheme_rules():
+    assert default_scheme("127.0.0.1:10100") == "http"
+    assert default_scheme("localhost:10100") == "http"
+    assert default_scheme("10.126.126.2:10100") == "http"
+    assert default_scheme("api.example.com") == "https"
+
+
+def test_public_domain_without_scheme_becomes_https():
+    url, note = normalize_base_url("api.example.com", "openai-responses")
+    assert url == "https://api.example.com"
+    assert "https" in note
+
+
+def test_bare_ip_without_scheme_stays_http():
+    url, _ = normalize_base_url("10.126.126.2:10100", "openai-responses")
+    assert url == "http://10.126.126.2:10100"
