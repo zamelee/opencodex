@@ -264,12 +264,68 @@ main {
   color: var(--muted);
 }
 .node .slot-tag {
-  position: absolute;
-  top: -16px;
-  left: 0;
-  right: 0;
   color: var(--muted);
   font-size: 11px;
+}
+
+/* 通道框第一行：槽位标签在左，状态徽标在右。
+   以前都浮在框外，通道一多就压到通道名上。 */
+.node .n-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-height: 17px;
+  margin-bottom: 2px;
+}
+.node .n-marks {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  flex: 0 0 auto;
+}
+.node .n-marks .node-lock,
+.node .n-marks .node-excluded,
+.node .n-marks .node-badge {
+  position: static;
+  transform: none;
+}
+.node .n-marks .node-badge {
+  width: auto;
+  height: auto;
+  min-width: 15px;
+  padding: 0 4px;
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 15px;
+}
+.node .n-marks .node-badge.warn {
+  right: auto;
+}
+
+/* 通道配色：顶条用通道色，标题也跟着染。
+   边框仍由健康状态（绿/黄/红）决定，两套语义不打架。 */
+.node.ch-colored::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 4px;
+  border-radius: var(--radius) var(--radius) 0 0;
+  background: var(--ch, var(--green));
+}
+.node.ch-colored .n-title {
+  color: var(--ch, var(--text));
+}
+.node.ch-colored .slot-tag {
+  color: var(--ch, var(--muted));
+  font-weight: 600;
+}
+
+/* 日志里的通道名，用与通道框相同的颜色 */
+.log-body .ch-tag {
+  font-weight: 700;
 }
 
 .legend {
@@ -303,8 +359,9 @@ main {
 /* 当前路由模式角标 */
 .route-mode {
   position: absolute;
+  /* 放在画布顶部空白带里：以前压在第一个通道框上 */
   left: 16px;
-  top: 62px;
+  top: 6px;
   z-index: 3;
   padding: 4px 10px;
   border-radius: 999px;

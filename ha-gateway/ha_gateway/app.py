@@ -12,6 +12,7 @@ from typing import Callable
 
 from . import crypto
 from .health import HealthMonitor
+from .labels import upstream_label
 from .server import Gateway, build_app
 from .session import SessionRouter
 from .storage import Storage
@@ -92,13 +93,27 @@ class HaApp:
             pass
 
     def _route_hit(self, upstream_id: str) -> None:
-        self.events.publish("info", "route_active", f"命中上游 {upstream_id}", upstream_id)
+        self.events.publish(
+            "info", "route_active", f"命中上游 {self.upstream_label(upstream_id)}", upstream_id
+        )
+
+    def upstream_label(self, upstream_id: str) -> str:
+        """把内部 id 换成人能认出来的「槽位 · 通道名」。
+
+        日志里光打 id（120ebe055898）没人认得出来，这里按当前槽位顺序
+        还原成「通道 3 模拟通道 A」这样的说法。
+        """
+        try:
+            ups = self.storage.list_upstreams()
+        except Exception:
+            ups = []
+        return upstream_label(ups, upstream_id)
 
     def _on_health_change(self, state) -> None:
         self._log(
             "warn" if state.health.value == "down" else "info",
             "health",
-            f"上游 {state.upstream_id} 状态 -> {state.health.value}"
+            f"上游 {self.upstream_label(state.upstream_id)} 状态 -> {state.health.value}"
             + (f" ({state.last_error})" if state.last_error else ""),
         )
 
@@ -273,6 +288,26 @@ class HaApp:
 
     def data_dir(self) -> str:
         return crypto.data_dir()
+
+    async def probe_upstream_async(
+        self, upstream_id: str, model: str = "gpt-4o-mini"
+    ) -> dict:
+        """手动探测的异步版本。
+
+        网页管理接口跑在网关同一个事件循环里，不能走 run_coroutine_threadsafe
+        + fut.result() 那套同步包装（会把循环自己堵住，只能等到超时）。
+        桌面版（tkinter 子线程）继续用同步的 probe_upstream。
+        """
+        up = next((u for u in self.storage.list_upstreams() if u.id == upstream_id), None)
+        if up is None:
+            return {"ok": False, "status": None, "ms": 0, "body": "upstream not found"}
+        res = await self.gateway.manual_probe(up, model)
+        self._log(
+            "info" if res.get("ok") else "warn",
+            "probe",
+            f"手动探测 {up.name}: HTTP {res.get('status')} {res.get('ms')}ms",
+        )
+        return res
 
 
 def web_runner(app, settings):

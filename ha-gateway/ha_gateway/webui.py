@@ -87,14 +87,33 @@ def build_web_app(app) -> web.Application:
     routes = web.RouteTableDef()
 
     async def index(request):
-        return web.FileResponse(os.path.join(WEB_DIR, "index.html"))
+        # 前端文件按 mtime 加版本号：网关重启后浏览器一定拿到新资源，
+        # 不会出现"改了代码但页面还是旧的"这种幽灵问题。
+        path = os.path.join(WEB_DIR, "index.html")
+        with open(path, encoding="utf-8") as f:
+            html = f.read()
+        for asset in ("app.js", "style.css"):
+            apath = os.path.join(WEB_DIR, asset)
+            try:
+                ver = int(os.path.getmtime(apath))
+            except OSError:
+                ver = 0
+            html = html.replace(f'/{asset}"', f'/{asset}?v={ver}"')
+        return web.Response(
+            text=html,
+            content_type="text/html",
+            charset="utf-8",
+            headers={"Cache-Control": "no-cache"},
+        )
 
     async def static_file(request):
         name = request.match_info["name"]
         path = os.path.normpath(os.path.join(WEB_DIR, name))
         if not path.startswith(WEB_DIR) or not os.path.isfile(path):
             raise web.HTTPNotFound()
-        return web.FileResponse(path)
+        resp = web.FileResponse(path)
+        resp.headers["Cache-Control"] = "no-cache"
+        return resp
 
     async def get_state(request):
         return web.json_response(_state(app))
@@ -164,7 +183,7 @@ def build_web_app(app) -> web.Application:
 
     async def probe_upstream(request):
         uid = request.match_info["id"]
-        res = await app.probe_upstream(uid)
+        res = await app.probe_upstream_async(uid)
         return web.json_response(res)
 
     async def add_key(request):

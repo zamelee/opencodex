@@ -16,6 +16,54 @@ from ha_gateway.app import HaApp  # noqa: E402
 PORT = 10941
 
 
+def test_manual_probe_endpoint_returns_json():
+    """手动探测接口必须返回 JSON，不能 500。
+
+    回归点：网页管理接口与网关跑在同一个事件循环里，早前用
+    run_coroutine_threadsafe + fut.result() 把循环自己堵死，
+    再叠加 `await` 一个普通 dict，直接 TypeError -> 500。
+    """
+
+    async def run():
+        with tempfile.TemporaryDirectory() as d:
+            app = HaApp(os.path.join(d, "ha.db"))
+            app.settings.listen_port = 10942
+            app.settings.web_port = 10943
+            app.settings.web_host = "127.0.0.1"
+            app.start()
+            await asyncio.sleep(0.6)
+            try:
+                base = "http://127.0.0.1:10943"
+                async with aiohttp.ClientSession() as sess:
+                    async with sess.post(
+                        base + "/api/upstreams",
+                        json={
+                            "name": "u1",
+                            "provider": "p",
+                            "base_url": "http://127.0.0.1:1",
+                            "api_key": "k",
+                        },
+                    ) as r:
+                        uid = (await r.json())["id"]
+
+                    async with sess.post(
+                        base + f"/api/upstreams/{uid}/probe",
+                        timeout=aiohttp.ClientTimeout(total=40),
+                    ) as r:
+                        assert r.status == 200, r.status
+                        out = await r.json()
+                        assert "ok" in out, out
+                        # 127.0.0.1:1 连不上，应判定为不可用但结构完整
+                        assert out["ok"] is False, out
+                        assert out["status"] is None, out
+            finally:
+                app.stop()
+                app.storage.close()
+                await asyncio.sleep(0.2)
+
+    asyncio.run(run())
+
+
 def test_lock_and_exclude_are_mutually_exclusive():
     """锁定与排除是互斥状态：锁定会自动解除排除，排除会自动解除锁定。"""
 

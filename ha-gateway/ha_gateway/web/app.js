@@ -26,6 +26,69 @@ const RULE_LABELS = {
 const SLOT_NAMES = ["主通道", "备通道", "通道 3", "通道 4"];
 const PROTOCOLS = ["openai-responses", "openai-chat", "anthropic"];
 
+// 每个通道槽位一个固定颜色：日志里的通道名、通道框的顶条都用它，
+// 两者对得上，日志里扫一眼就知道是哪条通道。
+const CHANNEL_COLORS = ["#2563eb", "#0e7490", "#7c3aed", "#be185d", "#4d7c0f"];
+
+function channelColor(index) {
+  return CHANNEL_COLORS[index % CHANNEL_COLORS.length];
+}
+
+function channelIndexOf(id) {
+  const ups = STATE.upstreams || [];
+  for (let i = 0; i < ups.length; i++) if (ups[i].id === id) return i;
+  return -1;
+}
+
+// 通道名 -> 颜色。日志里出现哪个通道名，就用哪个通道的颜色标出来。
+function channelColorMap() {
+  const map = new Map();
+  const ups = STATE.upstreams || [];
+  ups.forEach((u, i) => {
+    const name = (u.name || "").trim();
+    if (name) map.set(name, channelColor(i));
+  });
+  return map;
+}
+
+// 把日志消息里的通道名拆成带色的片段。
+// detailId 命中时优先用它对应的通道名（route_active 事件带 upstream id）。
+function highlightChannels(message, detailId) {
+  const frag = document.createDocumentFragment();
+  const map = channelColorMap();
+  if (!map.size) {
+    frag.appendChild(document.createTextNode(message));
+    return frag;
+  }
+  // 长名优先，避免"模拟通道 A"被"模拟通道"抢先匹配
+  const names = [...map.keys()].sort((a, b) => b.length - a.length);
+  let rest = message;
+  let guard = 0;
+  while (rest && guard++ < 200) {
+    let hit = null;
+    let hitIdx = -1;
+    for (const n of names) {
+      const i = rest.indexOf(n);
+      if (i >= 0 && (hitIdx < 0 || i < hitIdx)) {
+        hit = n;
+        hitIdx = i;
+      }
+    }
+    if (hitIdx < 0) {
+      frag.appendChild(document.createTextNode(rest));
+      break;
+    }
+    if (hitIdx > 0) frag.appendChild(document.createTextNode(rest.slice(0, hitIdx)));
+    const s = document.createElement("span");
+    s.className = "ch-tag";
+    s.style.color = map.get(hit);
+    s.textContent = hit;
+    frag.appendChild(s);
+    rest = rest.slice(hitIdx + hit.length);
+  }
+  return frag;
+}
+
 const HINTS = {
   protocol: "下游请求使用的 wire 协议，决定请求/响应格式与上游适配方式。",
   listen_host: "HA Gateway 对下游（Codex）暴露的监听地址，默认只监听本机。",
@@ -70,7 +133,10 @@ function pushLog(level, message) {
   const body = $("#logBody");
   const line = el("div");
   line.appendChild(el("span", "ts", "[" + fmtTs(Date.now() / 1000) + "] "));
-  line.appendChild(el("span", level, level.toUpperCase().padEnd(5) + " " + message));
+  const msg = el("span", level);
+  msg.appendChild(document.createTextNode(level.toUpperCase().padEnd(5) + " "));
+  msg.appendChild(highlightChannels(message));
+  line.appendChild(msg);
   body.appendChild(line);
   if ($("#logFollow").checked) body.scrollTop = body.scrollHeight;
 }
@@ -333,7 +399,9 @@ function layout() {
   else if (keys.length === 1) keyX = [off + w / 2, Math.min(off + w / 2 + 190, off + w - 90)];
   else keyX = spread(keys.length + 1, w);
   const gw = { x: off + w / 2, y: h / 2 };
-  const topY = 64;
+  // 上游这一行往下留点空间：左上角要放"路由模式"按钮和"上游"区标签，
+  // 贴着画布顶边会压到第一个通道框。
+  const topY = 88;
   const botY = h - 76;
   return { w, h, ups, keys, slotCount, upX, keyX, gw, topY, botY, addX: upX[slotCount] };
 }
@@ -408,31 +476,41 @@ function wireClass(e) {
 
 function buildUpstreamNode(u, i) {
   const n = el("div", "node");
-  n.appendChild(el("div", "slot-tag", SLOT_NAMES[i] || `通道 ${i + 1}`));
+  // 通道配色：顶条 + 标题颜色，和日志里的通道名同色，方便两边对认
+  const chColor = channelColor(i);
+  n.style.setProperty("--ch", chColor);
+  n.classList.add("ch-colored");
+  // 第一行：槽位标签 + 状态徽标；第二行：通道名。
+  // 以前这些都浮在框外，通道一多就压到通道名上。
+  const head = el("div", "n-head");
+  head.appendChild(el("span", "slot-tag", SLOT_NAMES[i] || `通道 ${i + 1}`));
+  const marks = el("div", "n-marks");
   n.appendChild(el("div", "n-title", u.name));
   n.appendChild(el("div", "n-sub", u.health === "down" ? u.provider + " · 不可用" : u.provider));
   if ((STATE.settings || {}).forced_upstream_id === u.id) {
     const lock = el("div", "node-lock", "锁");
     lock.title = "已手动锁定到这条通道";
-    n.appendChild(lock);
+    marks.appendChild(lock);
   }
   if (isExcluded(u.id) && !isForced(u.id)) {
     const ex = el("div", "node-excluded", "排");
     ex.title = "已排除：不参与新的自动路由；已有的在途请求会跑完（排空流量）";
-    n.appendChild(ex);
+    marks.appendChild(ex);
   }
   const missing = missingFields(u);
   if (missing.length) {
     const badge = el("div", "node-badge", "!");
     badge.title = "信息未填完：" + missing.join("、");
-    n.appendChild(badge);
+    marks.appendChild(badge);
   }
   const badUrl = baseUrlProblem(u);
   if (badUrl) {
     const badge = el("div", "node-badge warn", "!");
     badge.title = badUrl;
-    n.appendChild(badge);
+    marks.appendChild(badge);
   }
+  if (marks.childElementCount) head.appendChild(marks);
+  n.insertBefore(head, n.firstChild);
   n.onclick = (ev) => {
     ev.stopPropagation();
     selectObject("upstream", u.id);
@@ -548,7 +626,9 @@ function autoFillProvider(formEl, provBlock, draft) {
 
 function buildGhostSlot(tag) {
   const n = el("div", "node ghost");
-  n.appendChild(el("div", "slot-tag", tag));
+  const head = el("div", "n-head");
+  head.appendChild(el("span", "slot-tag", tag));
+  n.appendChild(head);
   n.appendChild(el("div", "n-title", "未配置"));
   n.appendChild(el("div", "n-sub", "点击添加上游"));
   n.onclick = (ev) => {
@@ -560,7 +640,9 @@ function buildGhostSlot(tag) {
 
 function buildAddUp() {
   const n = el("div", "node ghost");
-  n.appendChild(el("div", "slot-tag", "新增"));
+  const head = el("div", "n-head");
+  head.appendChild(el("span", "slot-tag", "新增"));
+  n.appendChild(head);
   n.appendChild(el("div", "n-title", "＋"));
   n.appendChild(el("div", "n-sub", "新增上游通道"));
   n.onclick = (ev) => {
@@ -772,7 +854,8 @@ function renderTopology() {
       const miss = missingFields(u).join(",");
       want.push({
         key: "up:" + u.id,
-        cls: "node" + (hc ? " " + hc : "") + sel,
+        // ch-colored 不能丢：className 会被整体覆盖，通道配色靠它
+        cls: "node ch-colored" + (hc ? " " + hc : "") + sel,
         x,
         y: L.topY,
         sig: JSON.stringify([
@@ -1871,7 +1954,10 @@ async function loadEvents() {
     logSeen = e.ts * 1000;
     const line = el("div");
     line.appendChild(el("span", "ts", "[" + fmtTs(e.ts) + "] "));
-    line.appendChild(el("span", e.level, e.level.toUpperCase().padEnd(5) + " " + e.message));
+    const msg = el("span", e.level);
+    msg.appendChild(document.createTextNode(e.level.toUpperCase().padEnd(5) + " "));
+    msg.appendChild(highlightChannels(e.message, e.detail));
+    line.appendChild(msg);
     body.appendChild(line);
   });
   if ($("#logFollow").checked) body.scrollTop = body.scrollHeight;
