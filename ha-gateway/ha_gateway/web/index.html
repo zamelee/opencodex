@@ -52,6 +52,16 @@
     <div class="log-body" id="logBody"></div>
   </footer>
 
+  <script>
+    window.addEventListener("error", function (e) {
+      var b = document.getElementById("logBody");
+      if (!b) return;
+      var d = document.createElement("div");
+      d.className = "error";
+      d.textContent = "[js] " + e.message + " @ " + (e.filename || "") + ":" + (e.lineno || "");
+      b.insertBefore(d, b.firstChild);
+    });
+  </script>
   <script src="/app.js"></script>
 </body>
 </html>

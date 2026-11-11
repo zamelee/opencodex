@@ -24,6 +24,27 @@ const RULE_LABELS = {
 const SLOT_NAMES = ["主通道", "备通道", "通道 3", "通道 4"];
 const PROTOCOLS = ["openai-responses", "openai-chat", "anthropic"];
 
+const HINTS = {
+  protocol: "下游请求使用的 wire 协议，决定请求/响应格式与上游适配方式。",
+  listen_host: "HA Gateway 对下游（Codex）暴露的监听地址，默认只监听本机。",
+  listen_port: "转发端口。10110 是 LLM 转发口，10111 是这个管理页面。",
+  max_switches: "一个请求内最多向上游切换几次，防止来回横跳。",
+  residency: "切换后至少在同一上游驻留多少秒，避免刚切就又切。",
+  budget: "请求已发出、上游尚未响应时，允许在多少秒内换上游重试。",
+  up_name: "这条上游在拓扑图里的显示名。",
+  up_provider: "上游服务商标识（例如 m.aiio.chat），用于分组与展示。",
+  up_base: "上游的 OpenAI 兼容接口根地址。",
+  up_key: "调用上游的密钥；留空表示不修改已保存的密钥。",
+};
+
+const RULE_HINTS = {
+  connect_fail: "连不上上游或 DNS 解析失败时，判定该通道不可用并切换。",
+  upstream_5xx: "上游返回 5xx（服务端错误）时切换。",
+  upstream_429: "上游返回 429（限流或额度用尽）时切换，这通常是该换 key 的信号。",
+  upstream_4xx: "上游返回 4xx（参数错误等）时切换；同一请求重发通常还是会失败，默认不切。",
+  post_commit_break: "请求已交给下游之后上游断流时切换；可能造成重复内容与重复计费，默认关。",
+};
+
 async function api(path, opts) {
   const r = await fetch(path, opts);
   if (!r.ok) throw new Error(await r.text());
@@ -109,6 +130,10 @@ function setField(name, value) {
 function syncField(name, value) {
   $$(`[data-field="${name}"]`).forEach((i) => {
     if (i === document.activeElement) return;
+    if (i.classList.contains("seg-btn")) {
+      i.classList.toggle("on", i.dataset.value === value);
+      return;
+    }
     if (i.type === "checkbox") i.checked = !!value;
     else i.value = value;
   });
@@ -385,14 +410,104 @@ function field(label, name, value, type, placeholder) {
   return l;
 }
 
+// 带提示说明的字段块：
+//   mode="tooltip" —— 画布小卡用，提示走鼠标 hover
+//   mode="inline"  —— 右侧抽屉用，提示显示在控件下方
+function fieldBlock(label, name, value, opts) {
+  opts = opts || {};
+  const wrap = el("div", "f");
+  const l = el("label");
+  l.appendChild(el("span", null, label));
+  const i = el("input");
+  i.type = opts.type || "text";
+  i.value = value === undefined || value === null ? "" : value;
+  i.dataset.field = name;
+  if (opts.placeholder) i.placeholder = opts.placeholder;
+  i.oninput = () => setField(name, i.type === "number" ? Number(i.value) : i.value);
+  l.appendChild(i);
+  wrap.appendChild(l);
+  applyHint(wrap, l, i, opts.hint, opts.mode);
+  return wrap;
+}
+
+function applyHint(wrap, labelEl, inputEl, hint, mode) {
+  if (!hint) return;
+  if (mode === "inline") {
+    wrap.appendChild(el("div", "f-hint", hint));
+  } else {
+    const t = el("span", "f-tip", "ⓘ");
+    t.title = hint;
+    const span = labelEl.querySelector("span");
+    if (span) span.appendChild(t);
+    else labelEl.appendChild(t);
+    if (inputEl) inputEl.title = hint;
+  }
+}
+
+// 分段单选（不用原生 select，避免重绘时残留空白弹层）
+function radioBlock(label, name, value, options, opts) {
+  opts = opts || {};
+  const wrap = el("div", "f");
+  const l = el("label");
+  l.appendChild(el("span", null, label));
+  const group = el("div", "seg");
+  options.forEach((o) => {
+    const b = el("button", "seg-btn" + (o === value ? " on" : ""), o);
+    b.type = "button";
+    b.dataset.field = name;
+    b.dataset.value = o;
+    b.onclick = () => {
+      setField(name, o);
+      group.querySelectorAll(".seg-btn").forEach((x) => x.classList.toggle("on", x.dataset.value === o));
+    };
+    group.appendChild(b);
+  });
+  l.appendChild(group);
+  wrap.appendChild(l);
+  applyHint(wrap, l, null, opts.hint, opts.mode);
+  return wrap;
+}
+
+// 带说明的勾选项
+function ruleBlock(name, text, checked, hint, mode) {
+  const wrap = el("div", "f rule-f");
+  const l = el("label");
+  const i = el("input");
+  i.type = "checkbox";
+  i.dataset.rule = name;
+  i.checked = !!checked;
+  i.onchange = () => syncRule(name, i.checked);
+  l.appendChild(i);
+  l.appendChild(el("span", null, text));
+  wrap.appendChild(l);
+  applyHint(wrap, l, i, hint, mode);
+  return wrap;
+}
+
+// 按钮 + 提示（tooltip 或下方说明）
+function buttonWithHint(text, cls, onclick, hint, mode) {
+  const wrap = el("div", "bwrap");
+  const b = el("button", cls, text);
+  b.type = "button";
+  b.onclick = onclick;
+  if (hint) b.title = hint;
+  wrap.appendChild(b);
+  if (hint && mode === "inline") wrap.appendChild(el("div", "f-hint", hint));
+  return wrap;
+}
+
 // 名称输入：清空后在失焦时恢复默认名（新建上游时自动填好，可改）
-function nameField(draft) {
-  const l = field("名称", "name", draft.fields.name, null, draft.defaultName || "");
-  const i = l.querySelector("input");
+function nameField(draft, mode) {
+  const wrap = fieldBlock("名称", "name", draft.fields.name, {
+    placeholder: draft.defaultName || "",
+    hint: HINTS.up_name,
+    mode,
+  });
+  const i = wrap.querySelector("input");
   i.onblur = () => {
     if (!i.value.trim() && draft.defaultName) setField("name", draft.defaultName);
   };
-  return l;
+  return wrap;
 }
 
 function selectField(label, name, value, options) {
@@ -416,37 +531,68 @@ function renderInline() {
   box.innerHTML = "";
   if (!draft || draft.kind !== "upstream") {
     box.classList.add("hidden");
+    renderLinks();
     return;
   }
   const pos = nodePos[draft.id];
   const stage = $("#stage");
   const w = stage.clientWidth;
   box.classList.remove("hidden");
+  const u = STATE.upstreams.find((x) => x.id === draft.id);
+  const color = draft.isNew ? "#c3c8d0" : healthColor(u);
+  box.style.borderColor = color;
   if (pos) {
-    const left = Math.min(Math.max(8, pos.x - 90), w - 296);
+    const left = Math.min(Math.max(8, pos.x - 150), w - 296);
     box.style.left = left + "px";
     box.style.top = Math.max(8, pos.y + 32) + "px";
   }
-  box.appendChild(el("div", "po-title", draft.isNew ? "新增上游通道" : "上游通道"));
+  box.appendChild(el("div", "po-title", draft.isNew ? "新增上游通道" : u ? u.name : "上游通道"));
+  box.appendChild(
+    el(
+      "div",
+      "hint",
+      draft.isNew
+        ? "填好接入参数后点「添加」，新通道会立刻纳入自动切换候选。"
+        : "这条上游的接入参数，改动后点「保存」生效。"
+    )
+  );
   const f = el("div", "form");
-  f.appendChild(nameField(draft));
-  f.appendChild(field("Provider", "provider", draft.fields.provider));
-  f.appendChild(field("Base URL", "base_url", draft.fields.base_url));
-  f.appendChild(field("API Key", "api_key", draft.fields.api_key, "password", "留空则不修改"));
+  f.appendChild(nameField(draft, "tooltip"));
+  f.appendChild(fieldBlock("Provider", "provider", draft.fields.provider, { hint: HINTS.up_provider, mode: "tooltip" }));
+  f.appendChild(fieldBlock("Base URL", "base_url", draft.fields.base_url, { hint: HINTS.up_base, mode: "tooltip" }));
+  f.appendChild(
+    fieldBlock("API Key", "api_key", draft.fields.api_key, {
+      type: "password",
+      placeholder: "留空则不修改",
+      hint: HINTS.up_key,
+      mode: "tooltip",
+    })
+  );
   box.appendChild(f);
   const row = el("div", "row");
   const save = el("button", "btn primary", draft.isNew ? "添加" : "保存");
+  save.title = draft.isNew ? "创建这条上游通道" : "把改动写回这条上游通道";
   save.onclick = () => saveDraft();
   row.appendChild(save);
   if (!draft.isNew) {
     const probe = el("button", "btn", "探测");
+    probe.title = "对这条上游发一次实际请求，检查连通性与凭据是否有效";
     probe.onclick = () => probeUpstream(draft.id);
     row.appendChild(probe);
     const del = el("button", "btn danger", "删除");
+    del.title = "移除这条上游通道";
     del.onclick = () => deleteUpstream(draft.id);
     row.appendChild(del);
   }
   box.appendChild(row);
+  renderLinks();
+}
+
+function healthColor(u) {
+  if (!u) return "#2e7d32";
+  if (u.health === "down") return "#b3261e";
+  if (u.health === "degraded") return "#c58a00";
+  return "#2e7d32";
 }
 
 function renderGwConsole() {
@@ -454,13 +600,13 @@ function renderGwConsole() {
   box.innerHTML = "";
   if (!draft || draft.kind !== "gw") {
     box.classList.add("hidden");
-    renderGwLink();
+    renderLinks();
     return;
   }
   // 右侧抽屉打开时，配置内容搬进抽屉，画布左侧不再显示控制台
   if (!$("#drawer").classList.contains("hidden")) {
     box.classList.add("hidden");
-    renderGwLink();
+    renderLinks();
     return;
   }
   box.classList.remove("hidden");
@@ -468,38 +614,39 @@ function renderGwConsole() {
   box.classList.toggle("compact", stage.clientWidth < 760);
   box.appendChild(el("div", "po-title", "网关控制台"));
   box.appendChild(el("div", "hint", "网关与故障转移的核心设置，改动后点「保存应用」。"));
-  box.appendChild(gwControls());
-  renderGwLink();
+  box.appendChild(gwControls("tooltip"));
+  renderLinks();
 }
 
 // 网关控制台的控件组（画布控制台与右侧抽屉共用）
-function gwControls() {
+function gwControls(mode) {
   const wrap = el("div");
   const f = el("div", "form");
-  f.appendChild(selectField("协议", "protocol", draft.fields.protocol, PROTOCOLS));
-  f.appendChild(field("监听主机", "listen_host", draft.fields.listen_host));
-  f.appendChild(field("监听端口", "listen_port", draft.fields.listen_port, "number"));
-  f.appendChild(field("单请求最大切换", "max_switches_per_request", draft.fields.max_switches_per_request, "number"));
-  f.appendChild(field("最小驻留(秒)", "min_residency_s", draft.fields.min_residency_s, "number"));
-  f.appendChild(field("提交前预算(秒)", "precommit_budget_s", draft.fields.precommit_budget_s, "number"));
+  f.appendChild(radioBlock("协议", "protocol", draft.fields.protocol, PROTOCOLS, { hint: HINTS.protocol, mode }));
+  f.appendChild(fieldBlock("监听主机", "listen_host", draft.fields.listen_host, { hint: HINTS.listen_host, mode }));
+  f.appendChild(fieldBlock("监听端口", "listen_port", draft.fields.listen_port, { type: "number", hint: HINTS.listen_port, mode }));
+  f.appendChild(
+    fieldBlock("单请求最大切换", "max_switches_per_request", draft.fields.max_switches_per_request, {
+      type: "number",
+      hint: HINTS.max_switches,
+      mode,
+    })
+  );
+  f.appendChild(fieldBlock("最小驻留(秒)", "min_residency_s", draft.fields.min_residency_s, { type: "number", hint: HINTS.residency, mode }));
+  f.appendChild(
+    fieldBlock("提交前预算(秒)", "precommit_budget_s", draft.fields.precommit_budget_s, { type: "number", hint: HINTS.budget, mode })
+  );
   wrap.appendChild(f);
 
   wrap.appendChild(el("div", "sub-title", "触发自动切换的状态"));
   const rules = el("div", "rules");
   Object.keys(RULE_LABELS).forEach((k) => {
-    const l = el("label");
-    const i = el("input");
-    i.type = "checkbox";
-    i.dataset.rule = k;
-    i.checked = !!draft.rules[k];
-    i.onchange = () => syncRule(k, i.checked);
-    l.appendChild(i);
-    l.appendChild(el("span", null, RULE_LABELS[k]));
-    rules.appendChild(l);
+    rules.appendChild(ruleBlock(k, RULE_LABELS[k], draft.rules[k], RULE_HINTS[k], mode));
   });
   wrap.appendChild(rules);
 
   const dz = el("div", "danger-zone");
+  const dzf = el("div", "f");
   const rl = el("label");
   const ri = el("input");
   ri.type = "checkbox";
@@ -519,41 +666,63 @@ function gwControls() {
   };
   rl.appendChild(ri);
   rl.appendChild(el("span", null, "已提交后仍重试（危险）"));
-  dz.appendChild(rl);
+  dzf.appendChild(rl);
+  applyHint(dzf, rl, ri, "开启后，已经把请求交给下游的失败请求仍会被重放，可能重复内容、重复计费。默认关闭。", mode);
+  dz.appendChild(dzf);
   dz.classList.toggle("on", draft.retry);
   wrap.appendChild(dz);
 
   const row = el("div", "row");
   const save = el("button", "btn primary", "保存应用");
+  save.title = "把协议、监听、切换预算与故障转移规则写入配置";
   save.onclick = () => saveDraft();
   row.appendChild(save);
   const copy = el("button", "btn", "复制 Codex 配置");
+  copy.title = "生成可直接贴进 ~/.codex/config.toml 的 model_providers 配置片段";
   copy.onclick = () => copyCodexSnippet();
   row.appendChild(copy);
   wrap.appendChild(row);
+  if (mode === "inline") {
+    wrap.appendChild(el("div", "f-hint", "「保存应用」写入协议、监听、切换预算与故障转移规则；「复制 Codex 配置」生成可贴进 config.toml 的片段。"));
+  }
   return wrap;
 }
 
-// 控制台背后指向所属网关节点的提示线（带箭头，箭头压在节点之上不被遮挡）
-function renderGwLink() {
+// 当前显示的卡片背后，画一根指向它所属节点的提示线
+function renderLinks() {
   const svg = $("#overlay");
   svg.innerHTML = "";
+  const inline = $("#inline");
+  if (draft && draft.kind === "upstream" && !inline.classList.contains("hidden")) {
+    const pos = nodePos[draft.id];
+    if (pos) {
+      const u = STATE.upstreams.find((x) => x.id === draft.id);
+      drawLink(inline, pos.x, pos.y, draft.isNew ? "#c3c8d0" : healthColor(u), 80, 34);
+    }
+    return;
+  }
   const box = $("#gwConsole");
   const gw = nodePos.__gw;
-  if (!gw || box.classList.contains("hidden")) return;
+  if (!draft || draft.kind !== "gw" || !gw || box.classList.contains("hidden")) return;
+  drawLink(box, gw.x, gw.y, "#1a73e8", 80, 32);
+}
+
+// 从卡片中心画一条指向节点中心的虚线，箭头停在节点边框外
+function drawLink(box, tx, ty, color, hw, hh) {
+  const svg = $("#overlay");
   const stage = $("#stage");
   const sb = stage.getBoundingClientRect();
   const cb = box.getBoundingClientRect();
   const x1 = cb.left - sb.left + cb.width / 2;
   const y1 = cb.top - sb.top + cb.height / 2;
-  // 终点停在节点边框之外，箭头完整露出、不压到节点上
-  const t = rectEnterT(x1, y1, gw.x, gw.y, gw.x, gw.y, 80, 32);
-  const x2 = x1 + (gw.x - x1) * Math.max(0, t - 0.02);
-  const y2 = y1 + (gw.y - y1) * Math.max(0, t - 0.02);
+  const t = rectEnterT(x1, y1, tx, ty, tx, ty, hw, hh);
+  const x2 = x1 + (tx - x1) * Math.max(0, t - 0.02);
+  const y2 = y1 + (ty - y1) * Math.max(0, t - 0.02);
+  const mid = "linkArrow" + Math.floor(performance.now() % 100000);
 
   const defs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
   const marker = document.createElementNS("http://www.w3.org/2000/svg", "marker");
-  marker.setAttribute("id", "gwArrow");
+  marker.setAttribute("id", mid);
   marker.setAttribute("viewBox", "0 0 10 10");
   marker.setAttribute("refX", "8");
   marker.setAttribute("refY", "5");
@@ -562,7 +731,7 @@ function renderGwLink() {
   marker.setAttribute("orient", "auto-start-reverse");
   const head = document.createElementNS("http://www.w3.org/2000/svg", "path");
   head.setAttribute("d", "M 0 0 L 10 5 L 0 10 z");
-  head.setAttribute("fill", "#1a73e8");
+  head.setAttribute("fill", color);
   head.setAttribute("stroke", "#ffffff");
   head.setAttribute("stroke-width", "1");
   marker.appendChild(head);
@@ -571,11 +740,11 @@ function renderGwLink() {
 
   const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
   path.setAttribute("d", `M ${x1} ${y1} L ${x2} ${y2}`);
-  path.setAttribute("stroke", "#1a73e8");
+  path.setAttribute("stroke", color);
   path.setAttribute("stroke-width", "1.5");
   path.setAttribute("stroke-dasharray", "5 4");
   path.setAttribute("fill", "none");
-  path.setAttribute("marker-end", "url(#gwArrow)");
+  path.setAttribute("marker-end", `url(#${mid})`);
   svg.appendChild(path);
 }
 
@@ -634,28 +803,55 @@ function renderDock() {
   if (draft.kind === "upstream") {
     title.textContent = draft.isNew ? "新增上游" : "上游通道";
     const sec = el("div", "sec");
-    const h = el("h3", null, "上游通道");
+    const u = STATE.upstreams.find((x) => x.id === draft.id);
+    const h = el("h3", null, draft.isNew ? "新增上游通道" : u ? u.name : "上游通道");
     if (draft.dirty) h.appendChild(el("small", null, "（未保存）"));
     sec.appendChild(h);
+    sec.appendChild(
+      el(
+        "div",
+        "hint",
+        draft.isNew
+          ? "填好接入参数后点「添加」，新通道会立刻纳入自动切换候选。"
+          : "这条上游的接入参数，改动后点「保存」生效。"
+      )
+    );
     const f = el("div", "form");
-    f.appendChild(nameField(draft));
-    f.appendChild(field("Provider", "provider", draft.fields.provider));
-    f.appendChild(field("Base URL", "base_url", draft.fields.base_url));
-    f.appendChild(field("API Key", "api_key", draft.fields.api_key, "password", "留空则不修改"));
+    f.appendChild(nameField(draft, "inline"));
+    f.appendChild(fieldBlock("Provider", "provider", draft.fields.provider, { hint: HINTS.up_provider, mode: "inline" }));
+    f.appendChild(fieldBlock("Base URL", "base_url", draft.fields.base_url, { hint: HINTS.up_base, mode: "inline" }));
+    f.appendChild(
+      fieldBlock("API Key", "api_key", draft.fields.api_key, {
+        type: "password",
+        placeholder: "留空则不修改",
+        hint: HINTS.up_key,
+        mode: "inline",
+      })
+    );
     sec.appendChild(f);
     const row = el("div", "row");
     const save = el("button", "btn primary", draft.isNew ? "添加" : "保存");
+    save.title = draft.isNew ? "创建这条上游通道" : "把改动写回这条上游通道";
     save.onclick = () => saveDraft();
     row.appendChild(save);
     if (!draft.isNew) {
       const probe = el("button", "btn", "探测");
+      probe.title = "对这条上游发一次实际请求，检查连通性与凭据是否有效";
       probe.onclick = () => probeUpstream(draft.id);
       row.appendChild(probe);
       const del = el("button", "btn danger", "删除");
+      del.title = "移除这条上游通道";
       del.onclick = () => deleteUpstream(draft.id);
       row.appendChild(del);
     }
     sec.appendChild(row);
+    sec.appendChild(
+      el(
+        "div",
+        "f-hint",
+        "「保存」写回这条上游的接入参数；「探测」发一次实际请求检查连通性与凭据；「删除」移除这条通道。"
+      )
+    );
     body.appendChild(sec);
     return;
   }
@@ -667,9 +863,11 @@ function renderDock() {
     if (k) {
       sec.appendChild(el("div", "po-line", `名称　${k.label}`));
       sec.appendChild(el("div", "po-key", k.key));
+      sec.appendChild(el("div", "f-hint", "这把 Key 是下游（Codex）用来调用网关的凭证，等同于一把单独发放的入口密码。"));
     }
     const row = el("div", "row");
     const cp = el("button", "btn primary", "复制");
+    cp.title = "复制这把 Key，填进 Codex 的配置里";
     cp.onclick = () => {
       if (!k) return;
       navigator.clipboard.writeText(k.key);
@@ -678,9 +876,11 @@ function renderDock() {
     };
     row.appendChild(cp);
     const del = el("button", "btn danger", "删除");
+    del.title = "删除这把 Key，持有它的下游会立刻失效";
     del.onclick = () => deleteKey(k);
     row.appendChild(del);
     sec.appendChild(row);
+    sec.appendChild(el("div", "f-hint", "「复制」把这把 Key 复制到剪贴板；「删除」会立即让使用它的下游无法访问网关。"));
     body.appendChild(sec);
     return;
   }
@@ -694,7 +894,7 @@ function renderDock() {
     const drawerOpen = !$("#drawer").classList.contains("hidden");
     if (drawerOpen) {
       // 抽屉里直接给出完整配置，画布左侧不再出现控制台
-      sec.appendChild(gwControls());
+      sec.appendChild(gwControls("inline"));
     } else {
       sec.appendChild(el("div", "po-line", `协议　${s.protocol}`));
       sec.appendChild(el("div", "po-line", `监听　${s.listen_host}:${s.listen_port}`));

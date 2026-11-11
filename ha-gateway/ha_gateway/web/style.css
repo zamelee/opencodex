@@ -79,7 +79,13 @@ main {
   overflow: hidden;
   background-image: radial-gradient(circle, #e6eaf0 1px, transparent 1px);
   background-size: 26px 26px;
+  /* 画布上的点击会重建节点 DOM，若允许选中文本，浏览器会在旧锚点处拖出选区高亮 */
+  user-select: none;
 }
+
+.stage input,
+.stage textarea,
+.stage select { user-select: text; }
 
 #wires {
   position: absolute;
@@ -190,6 +196,45 @@ main {
   margin-bottom: 6px;
   color: var(--muted);
 }
+
+/* 带说明的字段块：右侧抽屉里说明显示在控件下方，画布小卡用 ⓘ 提示 */
+.f { margin-bottom: 8px; }
+.f > label { margin-bottom: 0; }
+.f-hint {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+  margin: 3px 0 0 100px;
+}
+.f-tip {
+  margin-left: 4px;
+  color: #b6bcc4;
+  cursor: help;
+  font-size: 11px;
+}
+.f-tip:hover { color: var(--blue); }
+.rule-f .f-hint { margin-left: 24px; }
+
+/* 分段单选 */
+.seg { display: flex; gap: 4px; }
+.seg-btn {
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--text);
+  border-radius: 6px;
+  padding: 4px 9px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.seg-btn:hover { background: #f0f2f5; }
+.seg-btn.on {
+  background: var(--blue);
+  border-color: var(--blue);
+  color: #fff;
+}
+
+.bwrap { display: inline-block; }
 input, select {
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -236,15 +281,16 @@ input:focus, select:focus { outline: 2px solid rgba(26, 115, 232, 0.35); border-
 .rules { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
 .rules label { display: flex; align-items: center; gap: 6px; }
 .danger-zone {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+  display: block;
   margin: 6px 0 8px;
   padding: 6px 8px;
   border-radius: 6px;
   border: 1px solid var(--line);
 }
+.danger-zone label { display: flex; align-items: center; gap: 6px; margin-bottom: 0; }
+.danger-zone .f-hint { margin-left: 24px; }
 .danger-zone.on { background: #ffe9e7; border-color: var(--red); color: var(--red); }
+.danger-zone.on .f-hint { color: #a3554f; }
 .hint { color: var(--muted); }
 
 .logpane {
