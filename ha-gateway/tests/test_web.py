@@ -16,6 +16,71 @@ from ha_gateway.app import HaApp  # noqa: E402
 PORT = 10941
 
 
+def test_lock_and_exclude_are_mutually_exclusive():
+    """锁定与排除是互斥状态：锁定会自动解除排除，排除会自动解除锁定。"""
+
+    async def run():
+        with tempfile.TemporaryDirectory() as d:
+            app = HaApp(os.path.join(d, "ha.db"))
+            app.settings.listen_port = 10940
+            app.settings.web_port = PORT
+            app.settings.web_host = "127.0.0.1"
+            app.start()
+            await asyncio.sleep(0.6)
+            try:
+                base = f"http://127.0.0.1:{PORT}"
+                async with aiohttp.ClientSession() as sess:
+                    async with sess.post(
+                        base + "/api/upstreams",
+                        json={
+                            "name": "u1",
+                            "provider": "p",
+                            "base_url": "http://127.0.0.1:1",
+                            "api_key": "k",
+                        },
+                    ) as r:
+                        uid = (await r.json())["id"]
+
+                    # 先排除，再锁定 -> 锁定生效，排除被解除
+                    async with sess.post(
+                        base + "/api/exclude", json={"ids": [uid]}
+                    ) as r:
+                        out = await r.json()
+                        assert out["excluded_upstream_ids"] == [uid]
+                        assert out["forced_upstream_id"] == ""
+                    async with sess.post(
+                        base + "/api/force", json={"id": uid}
+                    ) as r:
+                        out = await r.json()
+                        assert out["forced_upstream_id"] == uid
+                        assert out["excluded_upstream_ids"] == [], (
+                            "锁定后应自动解除该通道的排除"
+                        )
+
+                    # 反过来：先锁定，再排除 -> 排除生效，锁定被解除
+                    async with sess.post(
+                        base + "/api/exclude", json={"ids": [uid]}
+                    ) as r:
+                        out = await r.json()
+                        assert out["excluded_upstream_ids"] == [uid]
+                        assert out["forced_upstream_id"] == "", (
+                            "排除后应自动解除该通道的锁定"
+                        )
+
+                    # 落盘状态也必须是互斥的
+                    async with sess.get(base + "/api/state") as r:
+                        st = await r.json()
+                        s = st["settings"]
+                        assert s["forced_upstream_id"] == ""
+                        assert s["excluded_upstream_ids"] == [uid]
+            finally:
+                app.stop()
+                app.storage.close()
+                await asyncio.sleep(0.2)
+
+    asyncio.run(run())
+
+
 def test_web_ui_and_api():
     async def run():
         with tempfile.TemporaryDirectory() as d:

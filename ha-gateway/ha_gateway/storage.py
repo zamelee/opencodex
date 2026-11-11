@@ -134,6 +134,13 @@ class Storage:
                 ]
             except (ValueError, TypeError):
                 s.excluded_upstream_ids = []
+        # 锁定与排除互斥：历史脏数据里若同一条既被锁定又被排除，
+        # 以锁定为准（锁定是显式操作），把该条从排除名单里摘掉。
+        forced = getattr(s, "forced_upstream_id", "") or ""
+        if forced and forced in s.excluded_upstream_ids:
+            s.excluded_upstream_ids = [
+                x for x in s.excluded_upstream_ids if x != forced
+            ]
         rules = dict(DEFAULT_RULES)
         for r in self._conn.execute("SELECT rule_key, enabled FROM rules"):
             try:

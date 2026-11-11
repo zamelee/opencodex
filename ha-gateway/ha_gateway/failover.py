@@ -84,7 +84,7 @@ class UpstreamSelector:
 
         ordered: list[Upstream] = []
         # 手动锁定的通道优先（健康可用时）
-        # 手动锁定是明确指令，覆盖"排除"设置
+        # 锁定与排除在设置层互斥（webui 写入时互相摘除），这里不再需要覆盖逻辑
         forced_id = getattr(self.settings, "forced_upstream_id", "") or ""
         if forced_id:
             for u in enabled_all:

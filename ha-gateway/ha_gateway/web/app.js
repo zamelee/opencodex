@@ -397,7 +397,8 @@ function wireClass(e) {
     } else if (e.owner === activeUpstream) {
       cls += " wire-flow-active";
     }
-    if (isExcluded(e.owner)) {
+    // 锁定优先于排除：被锁定的那条即使也在排除名单里，仍按锁定样式走
+    if (upFlowKind(e.owner) === "residual") {
       // 被排除的通道：灰蓝细虚线，静止不流动 —— "不在候选池里"
       cls += " wire-flow-excluded";
     }
@@ -415,9 +416,9 @@ function buildUpstreamNode(u, i) {
     lock.title = "已手动锁定到这条通道";
     n.appendChild(lock);
   }
-  if (isExcluded(u.id)) {
+  if (isExcluded(u.id) && !isForced(u.id)) {
     const ex = el("div", "node-excluded", "排");
-    ex.title = "已排除：不参与自动路由（仍会探测健康，也可手动锁定）";
+    ex.title = "已排除：不参与新的自动路由；已有的在途请求会跑完（排空流量）";
     n.appendChild(ex);
   }
   const missing = missingFields(u);
@@ -1224,7 +1225,7 @@ function renderInline() {
       forced ? "恢复自动" : "锁定此通道",
       forced
         ? "取消手动锁定，回到自动路由（健康优先 + 会话粘性）"
-        : "手动把路由锁到这条通道；它不可用时仍会自动切走。锁定优先于「排除」。",
+        : "手动把路由锁到这条通道；它不可用时仍会自动切走。锁定与「排除」互斥，锁定会解除本通道的排除状态。",
       () => setForcedUpstream(forced ? "" : draft.id)
     );
     row2.appendChild(forceBtn);
@@ -1235,7 +1236,7 @@ function renderInline() {
       exc ? "取消排除" : "排除此通道",
       exc
         ? "这条通道目前不参与自动路由。点一下把它放回候选池。"
-        : "把这条通道移出自动路由候选池（仍会探测健康，也可再手动锁定）。",
+        : "把这条通道移出自动路由候选池（仍会探测健康）。排除与「锁定」互斥，排除会解除本通道的锁定。",
       async () => {
         const cur = ((STATE.settings || {}).excluded_upstream_ids || []).slice();
         const next = exc ? cur.filter((x) => x !== draft.id) : cur.concat([draft.id]);
@@ -1270,6 +1271,23 @@ async function setExcluded(ids) {
 
 function isExcluded(id) {
   return ((STATE.settings || {}).excluded_upstream_ids || []).includes(id);
+}
+
+// 手动锁定的通道 id
+function isForced(id) {
+  return !!id && ((STATE.settings || {}).forced_upstream_id || "") === id;
+}
+
+// 一条上游边的流量性质：
+//   locked   —— 手动锁定，钉死走这条
+//   residual —— 已被排除，但还有请求在途（排空流量）
+//   normal   —— 正常参与自动路由
+// 锁定与排除互斥，同一条通道不会同时是两种状态。
+function upFlowKind(ownerId) {
+  if (!ownerId) return "normal";
+  if (isForced(ownerId)) return "locked";
+  if (isExcluded(ownerId)) return "residual";
+  return "normal";
 }
 
 function healthColor(u) {
@@ -2051,6 +2069,21 @@ const flowSystem = (() => {
     ball.onComplete = null;
     ball.node.setAttribute("opacity", "0");
     ball.node.style.display = "none";
+    ball.node.setAttribute("class", "flow-ball");
+  }
+
+  // 一条边当前的流量性质。排除状态可能在球跑的中途才发生，
+  // 所以每帧都重新判定，不在生成时定死。
+  function edgeFlowKind(edge) {
+    if (!edge) return "normal";
+    if (edge.kind === "up") return upFlowKind(edge.owner);
+    return "down";
+  }
+
+  function ballClass(kind) {
+    if (kind === "residual") return "flow-ball is-active flow-ball-residual";
+    if (kind === "locked") return "flow-ball is-active flow-ball-locked";
+    return "flow-ball is-active";
   }
 
   function positionOnPath(ball) {
@@ -2124,7 +2157,7 @@ const flowSystem = (() => {
     ball.onComplete = typeof onComplete === "function" ? onComplete : null;
     ball.node.style.display = "";
     ball.node.setAttribute("opacity", "0.95");
-    ball.node.setAttribute("class", "flow-ball is-active");
+    ball.node.setAttribute("class", ballClass(edgeFlowKind(edge)));
     updatePosition(ball);
     ensureRunning();
     return ball;
@@ -2170,22 +2203,34 @@ const flowSystem = (() => {
   function updateHeat(force) {
     if (!edges.length) return;
     const hot = new Set();
+    const residual = new Set();
     for (const b of balls) {
-      if (b.state === "active" && b.edgeId) hot.add(b.edgeId);
+      if (b.state !== "active" || !b.edgeId) continue;
+      const e = edges.find((x) => x.id === b.edgeId);
+      const kind = edgeFlowKind(e);
+      if (kind === "residual") residual.add(b.edgeId);
+      else hot.add(b.edgeId);
     }
+    // 球可能是在"排除"生效之前生成的，这里逐帧重新着色
+    refreshBallKinds();
     let upHot = 0;
+    let upResidual = 0;
     const levels = new Map();
     for (const e of edges) {
       if (e.kind === "up") {
-        const lv = hot.has(e.id) ? 1 : 0;
+        // 3 = 排空流量（已排除但还有请求在途），不计入正常亮线
+        const lv = hot.has(e.id) ? 1 : residual.has(e.id) ? 3 : 0;
         levels.set(e.id, lv);
-        if (lv) upHot++;
+        if (lv === 1) upHot++;
+        else if (lv === 3) upResidual++;
       }
     }
     for (const e of edges) {
       if (e.kind === "down") {
         // 上面只要有一条在传，下游就在传；两条以上同时传，下游更亮
-        levels.set(e.id, upHot === 0 ? 0 : upHot > 1 ? 2 : 1);
+        if (upHot > 0) levels.set(e.id, upHot > 1 ? 2 : 1);
+        else if (upResidual > 0) levels.set(e.id, 3);
+        else levels.set(e.id, 0);
       }
     }
     for (const e of edges) {
@@ -2196,6 +2241,32 @@ const flowSystem = (() => {
       if (!p || !p.classList) continue;
       p.classList.toggle("wire-hot", lv === 1);
       p.classList.toggle("wire-hot2", lv === 2);
+      p.classList.toggle("wire-residual", lv === 3);
+    }
+  }
+
+  // 给正在跑的球重新定性：排空流量用独立颜色，不伪装成正常流量
+  function refreshBallKinds() {
+    const upNormal = new Set();
+    const upResidual = new Set();
+    for (const b of balls) {
+      if (b.state !== "active" || !b.edgeId) continue;
+      const e = edges.find((x) => x.id === b.edgeId);
+      if (!e || e.kind !== "up") continue;
+      if (edgeFlowKind(e) === "residual") upResidual.add(b.edgeId);
+      else upNormal.add(b.edgeId);
+    }
+    for (const b of balls) {
+      if (b.state !== "active" || !b.edgeId) continue;
+      const e = edges.find((x) => x.id === b.edgeId);
+      if (!e) continue;
+      let kind = edgeFlowKind(e);
+      if (e.kind === "down") {
+        // 下游：上面有正常流量就是正常；只有排空流量时才跟着显示排空
+        kind = upNormal.size ? "normal" : upResidual.size ? "residual" : "normal";
+      }
+      const cls = ballClass(kind);
+      if (b.node.getAttribute("class") !== cls) b.node.setAttribute("class", cls);
     }
   }
 
@@ -2308,7 +2379,11 @@ const decorativeFlow = (() => {
   }
 
   function upEdges() {
-    const usable = wireEdges.filter((e) => e.kind === "up" && e.health !== "down");
+    // 排除且在途请求已排空的通道，不再生成装饰性流量；
+    // 锁定通道即使被排除也仍然可用（锁定优先）
+    const usable = wireEdges.filter(
+      (e) => e.kind === "up" && e.health !== "down" && upFlowKind(e.owner) !== "residual"
+    );
     const active = usable.filter((e) => e.owner === activeUpstream);
     // 没有明确的活跃通道时，就在所有可用通道里挑一条，别让动画空转
     return active.length ? active : usable;

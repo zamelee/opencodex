@@ -427,6 +427,18 @@ main {
   stroke: #b6bcc6;
   stroke-width: 1.5;
 }
+
+/* 排空流量：通道已排除，但排除前发出的请求还在跑完。
+   用暖铜色区别于正常蓝、降级琥珀和故障红。 */
+.wire-flow.wire-residual,
+.wire-flow-excluded.wire-residual,
+.wire-flow-dim.wire-residual {
+  stroke: #b97a5c;
+  stroke-width: 2.2;
+  stroke-dasharray: 3 6;
+  animation: wire-dash-flow calc(6s / var(--anim-speed, 1)) linear infinite;
+  opacity: 0.9;
+}
 /* 旁路即使有残留流量，也保持"没在用"的淡红，不跟着变亮 */
 .wire-flow-dim.wire-hot,
 .wire-flow-dim.wire-hot2 {
@@ -488,6 +500,13 @@ main {
 }
 .flow-ball.is-active {
   opacity: 0.95;
+}
+.flow-ball.flow-ball-residual {
+  fill: #bd8064;
+  stroke: #fff2ea;
+}
+.flow-ball.flow-ball-locked {
+  fill: #cfe2fb;
 }
 
 /* 用户在系统里关掉了动效：静态虚线，不画球 */

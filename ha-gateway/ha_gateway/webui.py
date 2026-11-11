@@ -211,15 +211,31 @@ def build_web_app(app) -> web.Application:
             if not any(u.id == uid for u in app.upstreams()):
                 raise web.HTTPNotFound()
         s = app.settings
+        excluded_before = list(getattr(s, "excluded_upstream_ids", []) or [])
         s.forced_upstream_id = uid
+        # 锁定与排除互斥：锁定一条通道，同时把它从排除名单里摘掉
+        if uid:
+            s.excluded_upstream_ids = [x for x in excluded_before if x != uid]
         app.save_settings(s)
         name = next((u.name for u in app.upstreams() if u.id == uid), "")
+        released = uid and uid in excluded_before
         app._log(
             "info",
             "route",
-            f"手动锁定通道 {name or uid}" if uid else "恢复自动路由",
+            (
+                f"手动锁定通道 {name or uid}"
+                + ("（已解除该通道的排除状态）" if released else "")
+            )
+            if uid
+            else "恢复自动路由",
         )
-        return web.json_response({"ok": True, "forced_upstream_id": uid})
+        return web.json_response(
+            {
+                "ok": True,
+                "forced_upstream_id": uid,
+                "excluded_upstream_ids": list(s.excluded_upstream_ids),
+            }
+        )
 
     async def set_excluded(request):
         """排除模式：把指定通道移出自动路由候选池。"""
@@ -237,15 +253,31 @@ def build_web_app(app) -> web.Application:
         known = {u.id for u in app.upstreams()}
         ids = [x for x in ids if x in known]
         s = app.settings
+        # 锁定与排除互斥：被排除的若是当前锁定的通道，就解除锁定
+        unlocked = ""
+        if s.forced_upstream_id and s.forced_upstream_id in ids:
+            unlocked = s.forced_upstream_id
+            s.forced_upstream_id = ""
         s.excluded_upstream_ids = ids
         app.save_settings(s)
         names = [u.name for u in app.upstreams() if u.id in ids]
         app._log(
             "info",
             "route",
-            f"排除通道：{'、'.join(names)}" if names else "清除排除，恢复全部通道参与路由",
+            (
+                f"排除通道：{'、'.join(names)}"
+                + (f"（已解除锁定）" if unlocked else "")
+            )
+            if names
+            else "清除排除，恢复全部通道参与路由",
         )
-        return web.json_response({"ok": True, "excluded_upstream_ids": ids})
+        return web.json_response(
+            {
+                "ok": True,
+                "excluded_upstream_ids": ids,
+                "forced_upstream_id": s.forced_upstream_id,
+            }
+        )
 
     async def put_rules(request):
         data = await request.json()

@@ -59,6 +59,19 @@ def test_routes_and_migration():
             assert s.get_session_route("k1") is None
 
 
+def test_loaded_settings_normalize_lock_vs_exclude():
+    """历史脏数据：同一条既锁定又被排除，加载时以锁定为准自动归一。"""
+    with tempfile.TemporaryDirectory() as d:
+        with Storage(os.path.join(d, "t.db")) as s:
+            cfg = Settings()
+            cfg.forced_upstream_id = "u1"
+            cfg.excluded_upstream_ids = ["u1", "u2"]
+            s.save_settings(cfg)
+            got = s.load_settings()
+            assert got.forced_upstream_id == "u1"
+            assert got.excluded_upstream_ids == ["u2"]
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):
