@@ -122,6 +122,14 @@ def build_web_app(app) -> web.Application:
         limit = int(request.query.get("limit", 200))
         return web.json_response(app.events.recent(limit))
 
+    async def get_usage(request):
+        """用量历史统计（按天 / 按上游）。"""
+        try:
+            days = max(1, min(365, int(request.query.get("days", 7))))
+        except ValueError:
+            days = 7
+        return web.json_response(app.storage.usage_summary(days))
+
     async def add_upstream(request):
         from .models import Upstream
 
@@ -315,6 +323,7 @@ def build_web_app(app) -> web.Application:
     routes.get("/{name}")(static_file)
     routes.get("/api/state")(get_state)
     routes.get("/api/events")(get_events)
+    routes.get("/api/usage")(get_usage)
     routes.post("/api/upstreams")(add_upstream)
     routes.put("/api/upstreams/{id}")(update_upstream)
     routes.delete("/api/upstreams/{id}")(delete_upstream)

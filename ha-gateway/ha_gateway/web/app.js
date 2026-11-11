@@ -15,6 +15,8 @@ let logSeen = 0;
 let nodePos = {};             // 节点 id -> {x,y}
 let lastStateSig = "";        // 上一次 /api/state 的指纹，用于跳过无谓重绘
 let pendingPanel = false;     // 编辑中状态变了，等用户松手后再刷新右侧面板
+let usageCache = null;        // 用量统计（拉取有间隔，不必每次状态轮询都问）
+let usageFetchedAt = 0;
 
 const RULE_LABELS = {
   connect_fail: "连接失败 / DNS 失败",
@@ -219,6 +221,16 @@ async function loadState() {
     }
   } else if (changed) {
     pendingPanel = true;
+  }
+  // 用量统计单独拉：15 秒一次就够，不必跟着 2 秒一次的状态轮询
+  if (!usageCache || Date.now() - usageFetchedAt > 15000) {
+    usageFetchedAt = Date.now();
+    api("/api/usage?days=7")
+      .then((u) => {
+        usageCache = u;
+        if (!draft) renderPanels();
+      })
+      .catch(() => {});
   }
 }
 
@@ -1727,6 +1739,27 @@ function renderDock() {
     gw.appendChild(el("div", "po-line", `自动切换　${on.length ? on.map((k) => RULE_LABELS[k]).join("、") : "关闭"}`));
     gw.appendChild(el("div", "po-line", `已提交后仍重试　${s.retry_after_commit ? "开启（危险）" : "关闭"}`));
     body.appendChild(gw);
+
+    // 用量统计：来自 SQLite 的历史记录（近 7 天）
+    if (usageCache && usageCache.total) {
+      const t = usageCache.total || {};
+      const us = el("div", "sec");
+      us.appendChild(el("h3", null, `用量（近 ${usageCache.days} 天）`));
+      us.appendChild(el("div", "po-line", `请求数　${t.requests || 0}`));
+      us.appendChild(el("div", "po-line", `输入 token　${t.input_tokens || 0}`));
+      us.appendChild(el("div", "po-line", `输出 token　${t.output_tokens || 0}`));
+      us.appendChild(el("div", "po-line", `合计 token　${t.total_tokens || 0}`));
+      (usageCache.by_upstream || []).forEach((u) => {
+        us.appendChild(
+          el(
+            "div",
+            "po-line",
+            `${u.name || "未命名"}　${u.requests || 0} 次 ｜ ${u.total_tokens || 0} token`
+          )
+        );
+      });
+      body.appendChild(us);
+    }
 
     const up = el("div", "sec");
     up.appendChild(el("h3", null, `上游（${STATE.upstreams.length}）`));

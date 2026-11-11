@@ -325,7 +325,8 @@ main {
 
 /* 日志里的通道名，用与通道框相同的颜色 */
 .log-body .ch-tag {
-  font-weight: 700;
+  /* 只要颜色，不要加粗：日志里加粗的片段太多，看着像警报 */
+  font-weight: 400;
 }
 
 /* 对账字段：rid / resp_id / request_id，暗色等宽，不抢正文 */

@@ -261,6 +261,33 @@ class Gateway:
         h = hashlib.sha256(raw.encode("utf-8")).hexdigest()
         return self.storage.client_key_id_by_hash(h) or h[:12]
 
+    def _record_usage(
+        self,
+        *,
+        rid: str,
+        upstream_id: str,
+        upstream_name: str,
+        model: str,
+        status: int,
+        usage: dict | None,
+        ttfb_ms: float | None,
+    ) -> None:
+        """把一次请求的用量写进 SQLite（用于历史统计）。写库失败不影响主流程。"""
+        try:
+            self.storage.add_usage_record(
+                rid=rid,
+                upstream_id=upstream_id,
+                upstream_name=upstream_name,
+                model=model,
+                status=status,
+                input_tokens=(usage or {}).get("in"),
+                output_tokens=(usage or {}).get("out"),
+                total_tokens=(usage or {}).get("total"),
+                ttfb_ms=ttfb_ms,
+            )
+        except Exception:
+            pass
+
     def build_headers(self, request: web.Request, upstream) -> dict[str, str]:
         headers = {}
         for k, v in request.headers.items():
@@ -313,8 +340,8 @@ class Gateway:
         self.log(
             "info",
             "request",
-            f"请求 rid={rid} {request.method} {path} "
-            f"model={model_name or '-'} body={len(body)}B",
+            f"请求 ｜ rid={rid} ｜ {request.method} {path} ｜ "
+            f"model={model_name or '-'} ｜ body={len(body)}B",
         )
 
         plan = self.selector.plan(upstreams, skey)
@@ -323,7 +350,7 @@ class Gateway:
         self.log(
             "info",
             "plan",
-            f"候选 rid={rid} 顺序 {'→'.join(cand) if cand else '无'} 粘性={sticky or '无'}",
+            f"候选 ｜ 顺序 {'→'.join(cand) if cand else '无'} ｜ 粘性={sticky or '无'}",
         )
         last_body = b""
         last_code = "upstream_unavailable"
@@ -358,8 +385,8 @@ class Gateway:
                 self.log(
                     "warn",
                     "upstream",
-                    f"✗ {labels.get(upstream.id, upstream.name)} rid={rid} "
-                    f"连接失败 rule=connect_fail: {exc}",
+                    f"✗ {labels.get(upstream.id, upstream.name)} ｜ rid={rid} ｜ "
+                    f"连接失败 ｜ rule=connect_fail ｜ {exc}",
                 )
                 if self.selector.should_switch(plan, rule, phase):
                     plan.mark_failed(upstream.id)
@@ -368,7 +395,7 @@ class Gateway:
                     self.log(
                         "info",
                         "switch",
-                        f"切换 rid={rid} {labels.get(upstream.id, upstream.name)}"
+                        f"切换 ｜ rid={rid} ｜ {labels.get(upstream.id, upstream.name)}"
                         + (f" → {labels.get(nxt.id, nxt.name)}" if nxt else " → 无候选"),
                     )
                     continue
@@ -392,9 +419,9 @@ class Gateway:
                     self.log(
                         "warn",
                         "upstream",
-                        f"✗ {labels.get(upstream.id, upstream.name)} rid={rid} "
-                        f"预提交等待超过 {self.settings.precommit_budget_s}s，判定过慢 "
-                        f"rule=connect_fail",
+                        f"✗ {labels.get(upstream.id, upstream.name)} ｜ rid={rid} ｜ "
+                        f"预提交等待超过 {self.settings.precommit_budget_s}s ｜ "
+                        f"判定过慢 ｜ rule=connect_fail",
                     )
                     if self.selector.should_switch(plan, Rule.CONNECT_FAIL, phase):
                         plan.mark_failed(upstream.id)
@@ -425,11 +452,20 @@ class Gateway:
                         f"/出{usage_box.get('out', '-')}"
                         f"/总{usage_box.get('total', '-')}"
                     )
+                self._record_usage(
+                    rid=rid,
+                    upstream_id=upstream.id,
+                    upstream_name=labels.get(upstream.id, upstream.name),
+                    model=model_name,
+                    status=status,
+                    usage=usage_box,
+                    ttfb_ms=ttfb_ms,
+                )
                 self.log(
                     "info",
                     "route",
-                    f"✓ {labels.get(upstream.id, upstream.name)} rid={rid} {status} "
-                    f"ttfb={ttfb_ms:.0f}ms 总={total_ms:.0f}ms "
+                    f"✓ {labels.get(upstream.id, upstream.name)} ｜ rid={rid} ｜ {status} ｜ "
+                    f"ttfb={ttfb_ms:.0f}ms ｜ 总={total_ms:.0f}ms ｜ "
                     f"resp_id={resp_id or '-'}{usage_txt}",
                 )
                 return stream
@@ -462,13 +498,22 @@ class Gateway:
             if will_switch:
                 plan.mark_failed(upstream.id)
                 nxt = plan.next_upstream()
+            self._record_usage(
+                rid=rid,
+                upstream_id=upstream.id,
+                upstream_name=labels.get(upstream.id, upstream.name),
+                model=model_name,
+                status=status,
+                usage=None,
+                ttfb_ms=(time.monotonic() - attempt_started) * 1000,
+            )
             self.log(
                 "warn",
                 "upstream",
-                f"✗ {labels.get(upstream.id, upstream.name)} rid={rid} {status} "
-                f"规则={last_code} request_id={req_id or '-'}"
-                + (" 提示=疑似提示词超长" if too_long else "")
-                + (f" → {labels.get(nxt.id, nxt.name)}" if nxt else ""),
+                f"✗ {labels.get(upstream.id, upstream.name)} ｜ rid={rid} ｜ {status} ｜ "
+                f"规则={last_code} ｜ request_id={req_id or '-'}"
+                + (" ｜ 提示=疑似提示词超长" if too_long else "")
+                + (f" ｜ → {labels.get(nxt.id, nxt.name)}" if nxt else ""),
             )
             if will_switch:
                 self.selector.note_switch(plan)

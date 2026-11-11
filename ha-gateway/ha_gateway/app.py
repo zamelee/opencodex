@@ -94,7 +94,7 @@ class HaApp:
 
     def _route_hit(self, upstream_id: str) -> None:
         self.events.publish(
-            "info", "route_active", f"命中上游 {self.upstream_label(upstream_id)}", upstream_id
+            "info", "route_active", f"命中 ｜ {self.upstream_label(upstream_id)}", upstream_id
         )
 
     def upstream_label(self, upstream_id: str) -> str:
@@ -113,8 +113,8 @@ class HaApp:
         self._log(
             "warn" if state.health.value == "down" else "info",
             "health",
-            f"上游 {self.upstream_label(state.upstream_id)} 状态 -> {state.health.value}"
-            + (f" ({state.last_error})" if state.last_error else ""),
+            f"上游 ｜ {self.upstream_label(state.upstream_id)} ｜ 状态 -> {state.health.value}"
+            + (f" ｜ {state.last_error}" if state.last_error else ""),
         )
 
     # ---------- 生命周期 ----------
@@ -136,6 +136,11 @@ class HaApp:
         )
         await site.start()
         await self._start_web()
+        # 用量记录只保留 90 天，防止库无限长
+        try:
+            self.storage.prune_usage(90)
+        except Exception:
+            pass
         self._started.set()
         self._probe_stop = asyncio.Event()
         self._probe_tasks: dict[str, asyncio.Task] = {}

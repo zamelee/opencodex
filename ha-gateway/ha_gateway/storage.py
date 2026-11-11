@@ -62,6 +62,20 @@ CREATE TABLE IF NOT EXISTS events (
     detail TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
+CREATE TABLE IF NOT EXISTS usage_records (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL,
+    rid TEXT NOT NULL DEFAULT '',
+    upstream_id TEXT NOT NULL DEFAULT '',
+    upstream_name TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    status INTEGER NOT NULL DEFAULT 0,
+    input_tokens INTEGER,
+    output_tokens INTEGER,
+    total_tokens INTEGER,
+    ttfb_ms REAL
+);
+CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage_records(ts);
 """
 
 
@@ -386,6 +400,93 @@ class Storage:
             "SELECT * FROM events ORDER BY id DESC LIMIT ?", (limit,)
         ).fetchall()
         return [dict(r) for r in reversed(rows)]
+
+    # ---------- usage ----------
+
+    def add_usage_record(
+        self,
+        *,
+        rid: str,
+        upstream_id: str,
+        upstream_name: str,
+        model: str,
+        status: int,
+        input_tokens: int | None,
+        output_tokens: int | None,
+        total_tokens: int | None,
+        ttfb_ms: float | None,
+    ) -> None:
+        """记一条用量。失败请求也记（status 非 0），token 为空。"""
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO usage_records(ts,rid,upstream_id,upstream_name,model,status,"
+                "input_tokens,output_tokens,total_tokens,ttfb_ms) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (
+                    time.time(),
+                    rid,
+                    upstream_id,
+                    upstream_name,
+                    model,
+                    status,
+                    input_tokens,
+                    output_tokens,
+                    total_tokens,
+                    ttfb_ms,
+                ),
+            )
+            self._conn.commit()
+
+    def usage_summary(self, days: int = 7) -> dict:
+        """按天 + 按上游汇总用量。"""
+        since = time.time() - days * 86400
+        with self._lock:
+            by_day = [
+                dict(r)
+                for r in self._conn.execute(
+                    "SELECT date(ts,'unixepoch','localtime') AS day, "
+                    "COUNT(*) AS requests, "
+                    "SUM(COALESCE(input_tokens,0)) AS input_tokens, "
+                    "SUM(COALESCE(output_tokens,0)) AS output_tokens, "
+                    "SUM(COALESCE(total_tokens,0)) AS total_tokens "
+                    "FROM usage_records WHERE ts >= ? GROUP BY day ORDER BY day",
+                    (since,),
+                )
+            ]
+            by_upstream = [
+                dict(r)
+                for r in self._conn.execute(
+                    "SELECT upstream_name AS name, COUNT(*) AS requests, "
+                    "SUM(COALESCE(input_tokens,0)) AS input_tokens, "
+                    "SUM(COALESCE(output_tokens,0)) AS output_tokens, "
+                    "SUM(COALESCE(total_tokens,0)) AS total_tokens "
+                    "FROM usage_records WHERE ts >= ? AND upstream_name != '' "
+                    "GROUP BY upstream_name ORDER BY total_tokens DESC",
+                    (since,),
+                )
+            ]
+            total = self._conn.execute(
+                "SELECT COUNT(*) AS requests, "
+                "SUM(COALESCE(input_tokens,0)) AS input_tokens, "
+                "SUM(COALESCE(output_tokens,0)) AS output_tokens, "
+                "SUM(COALESCE(total_tokens,0)) AS total_tokens "
+                "FROM usage_records WHERE ts >= ?",
+                (since,),
+            ).fetchone()
+        return {
+            "days": days,
+            "total": dict(total) if total else {},
+            "by_day": by_day,
+            "by_upstream": by_upstream,
+        }
+
+    def prune_usage(self, keep_days: int = 90) -> int:
+        """清掉太老的用量记录，避免库无限长。"""
+        cutoff = time.time() - keep_days * 86400
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM usage_records WHERE ts < ?", (cutoff,))
+            self._conn.commit()
+            return cur.rowcount or 0
 
     def export_json(self) -> str:
         return json.dumps(
