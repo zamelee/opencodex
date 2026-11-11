@@ -23,6 +23,8 @@ def _state(app) -> dict:
                 "provider": u.provider,
                 "base_url": u.base_url,
                 "protocol": u.protocol,
+                # 只回传"有没有填"，不回传明文密钥
+                "has_key": bool(u.api_key),
                 "enabled": u.enabled,
                 "health": st.health.value,
                 "last_error": st.last_error,

@@ -13,6 +13,8 @@ let selected = null;          // {kind:"upstream"|"key"|"gw", id}
 let draft = null;             // 当前对象的草稿
 let logSeen = 0;
 let nodePos = {};             // 节点 id -> {x,y}
+let lastStateSig = "";        // 上一次 /api/state 的指纹，用于跳过无谓重绘
+let pendingPanel = false;     // 编辑中状态变了，等用户松手后再刷新右侧面板
 
 const RULE_LABELS = {
   connect_fail: "连接失败 / DNS 失败",
@@ -57,12 +59,25 @@ function jsonH() {
 // ---------- 状态 ----------
 
 async function loadState() {
-  STATE = await api("/api/state");
-  renderTop();
-  renderTopology();
+  const next = await api("/api/state");
+  // 状态没变就别重绘：避免每 2 秒把 DOM 拆一遍
+  // （这会让元素拾取抓不到目标、界面闪烁、输入焦点丢失）
+  const sig = JSON.stringify(next);
+  const changed = sig !== lastStateSig;
+  lastStateSig = sig;
+  STATE = next;
+  if (changed) {
+    renderTop();
+    renderTopology();
+  }
   if (!isEditing()) {
-    rebuildDraft();
-    renderPanels();
+    if (changed || pendingPanel) {
+      pendingPanel = false;
+      rebuildDraft();
+      renderPanels();
+    }
+  } else if (changed) {
+    pendingPanel = true;
   }
 }
 
@@ -245,12 +260,145 @@ function healthClass(u) {
   return "";
 }
 
+// ---------- 拓扑（增量渲染） ----------
+// 关键约束：节点元素按 key 复用，只有内容真的变了才重建。
+// 之前每 2 秒轮询都把 #nodes 全量清空重建，导致
+//   1) 元素抓取（DevTools 拾取器 / 自动化点击）拿到正在被销毁的壳，表现为「空白框」
+//   2) 界面每 2 秒闪一次
+const SVG_NS = "http://www.w3.org/2000/svg";
+const nodeEls = new Map(); // key -> 元素
+let wirePool = []; // 连线 path 池
+
+function renderWires(svg, edges) {
+  while (wirePool.length < edges.length) {
+    wirePool.push(document.createElementNS(SVG_NS, "path"));
+  }
+  edges.forEach((e, i) => {
+    const p = wirePool[i];
+    const dy = (e.y2 - e.y1) * 0.55;
+    p.setAttribute(
+      "d",
+      `M ${e.x1} ${e.y1} C ${e.x1} ${e.y1 + dy}, ${e.x2} ${e.y2 - dy}, ${e.x2} ${e.y2}`
+    );
+    const isActive = e.kind === "up" && e.owner === activeUpstream;
+    p.setAttribute("stroke", isActive ? "#1a73e8" : e.kind === "ghost" ? "#dfe3e8" : "#d5d9e0");
+    p.setAttribute("stroke-width", "2");
+    p.setAttribute("fill", "none");
+    if (e.kind === "ghost") p.setAttribute("stroke-dasharray", "4 4");
+    else p.removeAttribute("stroke-dasharray");
+    svg.appendChild(p); // 已存在的子节点只是移动，不重建
+  });
+  for (let i = edges.length; i < wirePool.length; i++) wirePool[i].remove();
+}
+
+function buildUpstreamNode(u, i) {
+  const n = el("div", "node");
+  n.appendChild(el("div", "slot-tag", SLOT_NAMES[i] || `通道 ${i + 1}`));
+  n.appendChild(el("div", "n-title", u.name));
+  n.appendChild(el("div", "n-sub", u.health === "down" ? u.provider + " · 不可用" : u.provider));
+  const missing = missingFields(u);
+  if (missing.length) {
+    const badge = el("div", "node-badge", "!");
+    badge.title = "信息未填完：" + missing.join("、");
+    n.appendChild(badge);
+  }
+  n.onclick = (ev) => {
+    ev.stopPropagation();
+    selectObject("upstream", u.id);
+  };
+  return n;
+}
+
+// 上游还缺哪些必填项（has_key 只表示"填没填"，不回传明文）
+function missingFields(u) {
+  const miss = [];
+  if (!u.name || !u.name.trim()) miss.push("名称");
+  if (!u.base_url || !u.base_url.trim()) miss.push("Base URL");
+  if (u.has_key === false) miss.push("API Key");
+  return miss;
+}
+
+function buildGhostSlot(tag) {
+  const n = el("div", "node ghost");
+  n.appendChild(el("div", "slot-tag", tag));
+  n.appendChild(el("div", "n-title", "未配置"));
+  n.appendChild(el("div", "n-sub", "点击添加上游"));
+  n.onclick = (ev) => {
+    ev.stopPropagation();
+    newUpstream();
+  };
+  return n;
+}
+
+function buildAddUp() {
+  const n = el("div", "node ghost");
+  n.appendChild(el("div", "slot-tag", "新增"));
+  n.appendChild(el("div", "n-title", "＋"));
+  n.appendChild(el("div", "n-sub", "新增上游通道"));
+  n.onclick = (ev) => {
+    ev.stopPropagation();
+    newUpstream();
+  };
+  return n;
+}
+
+function buildGwNode() {
+  const n = el("div", "node gateway");
+  const s = STATE.settings || {};
+  n.appendChild(el("div", "n-title", "HA Gateway"));
+  n.appendChild(el("div", "n-sub mono", s.protocol || "—"));
+  n.appendChild(el("div", "n-sub mono", `${s.listen_host || "—"}:${s.listen_port || "—"}`));
+  n.onclick = (ev) => {
+    ev.stopPropagation();
+    selectObject("gw", "gw");
+  };
+  return n;
+}
+
+function buildKeyNode(k) {
+  const n = el("div", "node down");
+  n.appendChild(el("div", "n-title", k.label));
+  n.appendChild(el("div", "n-sub mono", maskKey(k.key)));
+  const acts = el("div", "node-actions");
+  const cp = el("button", null, "复制");
+  cp.title = "复制 Key";
+  cp.onclick = (ev) => {
+    ev.stopPropagation();
+    navigator.clipboard.writeText(k.key);
+    cp.textContent = "已复制";
+    setTimeout(() => (cp.textContent = "复制"), 1200);
+  };
+  const del = el("button", "danger", "删除");
+  del.title = "删除该 Key";
+  del.onclick = (ev) => {
+    ev.stopPropagation();
+    deleteKey(k);
+  };
+  acts.appendChild(cp);
+  acts.appendChild(del);
+  n.appendChild(acts);
+  n.onclick = (ev) => {
+    ev.stopPropagation();
+    selectObject("key", k.id);
+  };
+  return n;
+}
+
+function buildAddKey() {
+  const n = el("div", "node ghost");
+  n.appendChild(el("div", "n-title", "＋"));
+  n.appendChild(el("div", "n-sub", "新增下游 Key"));
+  n.onclick = (ev) => {
+    ev.stopPropagation();
+    newKey();
+  };
+  return n;
+}
+
 function renderTopology() {
   const L = layout();
   const nodes = $("#nodes");
   const svg = $("#wires");
-  nodes.innerHTML = "";
-  svg.innerHTML = "";
   nodePos = {};
   nodePos.__gw = { x: L.gw.x, y: L.gw.y };
   $("#emptyHint").classList.toggle("hidden", L.ups.length > 0);
@@ -260,6 +408,7 @@ function renderTopology() {
     const u = L.ups[i];
     edges.push({
       kind: u ? "up" : "ghost",
+      owner: u ? u.id : null,
       x1: L.upX[i],
       y1: L.topY + 26,
       x2: L.gw.x,
@@ -269,124 +418,108 @@ function renderTopology() {
   L.keys.forEach((k, i) => {
     edges.push({ kind: "down", x1: L.gw.x, y1: L.gw.y, x2: L.keyX[i], y2: L.botY - 26 });
   });
+  renderWires(svg, edges);
 
-  edges.forEach((e) => {
-    const dy = (e.y2 - e.y1) * 0.55;
-    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    path.setAttribute(
-      "d",
-      `M ${e.x1} ${e.y1} C ${e.x1} ${e.y1 + dy}, ${e.x2} ${e.y2 - dy}, ${e.x2} ${e.y2}`
-    );
-    const isActive = e.kind === "up" && e.owner === activeUpstream;
-    path.setAttribute("stroke", isActive ? "#1a73e8" : e.kind === "ghost" ? "#dfe3e8" : "#d5d9e0");
-    path.setAttribute("stroke-width", "2");
-    path.setAttribute("fill", "none");
-    if (e.kind === "ghost") path.setAttribute("stroke-dasharray", "4 4");
-    svg.appendChild(path);
-  });
-
-  // 上游节点（含空槽位）
+  // 描述这一帧想要的节点
+  const want = [];
   for (let i = 0; i < L.slotCount; i++) {
     const u = L.ups[i];
     const x = L.upX[i];
-    const n = el("div", "node");
-    n.style.left = x + "px";
-    n.style.top = L.topY + "px";
+    const tag = SLOT_NAMES[i] || `通道 ${i + 1}`;
     if (u) {
       nodePos[u.id] = { x, y: L.topY };
-      if (selected && selected.kind === "upstream" && selected.id === u.id) n.classList.add("sel");
       const hc = healthClass(u);
-      if (hc) n.classList.add(hc);
-      n.appendChild(el("div", "slot-tag", SLOT_NAMES[i] || `通道 ${i + 1}`));
-      n.appendChild(el("div", "n-title", u.name));
-      n.appendChild(el("div", "n-sub", u.health === "down" ? u.provider + " · 不可用" : u.provider));
-      n.onclick = (ev) => {
-        ev.stopPropagation();
-        selectObject("upstream", u.id);
-      };
+      const sel = selected && selected.kind === "upstream" && selected.id === u.id ? " sel" : "";
+      const sub = u.health === "down" ? u.provider + " · 不可用" : u.provider;
+      const miss = missingFields(u).join(",");
+      want.push({
+        key: "up:" + u.id,
+        cls: "node" + (hc ? " " + hc : "") + sel,
+        x,
+        y: L.topY,
+        sig: JSON.stringify([tag, u.name, sub, u.base_url, miss]),
+        build: () => buildUpstreamNode(u, i),
+      });
     } else {
-      n.classList.add("ghost");
-      n.appendChild(el("div", "slot-tag", SLOT_NAMES[i] || `通道 ${i + 1}`));
-      n.appendChild(el("div", "n-title", "未配置"));
-      n.appendChild(el("div", "n-sub", "点击添加上游"));
-      n.onclick = (ev) => {
-        ev.stopPropagation();
-        newUpstream();
-      };
+      want.push({
+        key: "slot:" + i,
+        cls: "node ghost",
+        x,
+        y: L.topY,
+        sig: JSON.stringify([tag, "未配置", "点击添加上游"]),
+        build: () => buildGhostSlot(tag),
+      });
     }
-    nodes.appendChild(n);
   }
 
-  // 行末：新增上游通道的虚线方块
   const addX = L.addX;
   nodePos.__new__ = { x: addX, y: L.topY };
-  const addU = el("div", "node ghost");
-  addU.style.left = addX + "px";
-  addU.style.top = L.topY + "px";
-  addU.appendChild(el("div", "slot-tag", "新增"));
-  addU.appendChild(el("div", "n-title", "＋"));
-  addU.appendChild(el("div", "n-sub", "新增上游通道"));
-  addU.onclick = (ev) => {
-    ev.stopPropagation();
-    newUpstream();
-  };
-  nodes.appendChild(addU);
-
-  // 网关
-  const gw = el("div", "node gateway");
-  gw.style.left = L.gw.x + "px";
-  gw.style.top = L.gw.y + "px";
-  if (selected && selected.kind === "gw") gw.classList.add("sel");
-  gw.appendChild(el("div", "n-title", "HA Gateway"));
-  gw.appendChild(el("div", "n-sub", "HA 高可用网关"));
-  gw.onclick = (ev) => {
-    ev.stopPropagation();
-    selectObject("gw", "gw");
-  };
-  nodes.appendChild(gw);
-
-  // 下游 key
-  L.keys.forEach((k, i) => {
-    const n = el("div", "node down");
-    n.style.left = L.keyX[i] + "px";
-    n.style.top = L.botY + "px";
-    if (selected && selected.kind === "key" && selected.id === k.id) n.classList.add("sel");
-    n.appendChild(el("div", "n-title", k.label));
-    n.appendChild(el("div", "n-sub mono", k.key.slice(0, 16) + "…"));
-    const acts = el("div", "node-actions");
-    const cp = el("button", null, "复制");
-    cp.title = "复制 Key";
-    cp.onclick = (ev) => {
-      ev.stopPropagation();
-      navigator.clipboard.writeText(k.key);
-      cp.textContent = "已复制";
-      setTimeout(() => (cp.textContent = "复制"), 1200);
-    };
-    const del = el("button", "danger", "删除");
-    del.title = "删除该 Key";
-    del.onclick = (ev) => {
-      ev.stopPropagation();
-      deleteKey(k);
-    };
-    acts.appendChild(cp);
-    acts.appendChild(del);
-    n.appendChild(acts);
-    n.onclick = (ev) => {
-      ev.stopPropagation();
-      selectObject("key", k.id);
-    };
-    nodes.appendChild(n);
+  want.push({
+    key: "add",
+    cls: "node ghost",
+    x: addX,
+    y: L.topY,
+    sig: JSON.stringify(["新增", "＋", "新增上游通道"]),
+    build: buildAddUp,
   });
-  const addK = el("div", "node ghost");
-  addK.style.left = L.keyX[L.keyX.length - 1] + "px";
-  addK.style.top = L.botY + "px";
-  addK.appendChild(el("div", "n-title", "＋"));
-  addK.appendChild(el("div", "n-sub", "新增下游 Key"));
-  addK.onclick = (ev) => {
-    ev.stopPropagation();
-    newKey();
-  };
-  nodes.appendChild(addK);
+
+  const gs = STATE.settings || {};
+  want.push({
+    key: "gw",
+    cls: "node gateway" + (selected && selected.kind === "gw" ? " sel" : ""),
+    x: L.gw.x,
+    y: L.gw.y,
+    sig: JSON.stringify(["HA Gateway", gs.protocol, gs.listen_host, gs.listen_port]),
+    build: buildGwNode,
+  });
+
+  L.keys.forEach((k, i) => {
+    want.push({
+      key: "key:" + k.id,
+      cls: "node down" + (selected && selected.kind === "key" && selected.id === k.id ? " sel" : ""),
+      x: L.keyX[i],
+      y: L.botY,
+      sig: JSON.stringify([k.label, maskKey(k.key)]),
+      build: () => buildKeyNode(k),
+    });
+  });
+
+  want.push({
+    key: "addkey",
+    cls: "node ghost",
+    x: L.keyX[L.keyX.length - 1],
+    y: L.botY,
+    sig: JSON.stringify(["＋", "新增下游 Key"]),
+    build: buildAddKey,
+  });
+
+  // 归并：能复用就复用，只改 class / 位置
+  const alive = new Set();
+  const ordered = [];
+  for (const d of want) {
+    alive.add(d.key);
+    let e = nodeEls.get(d.key);
+    if (!e || e.__sig !== d.sig) {
+      const ne = d.build();
+      ne.__sig = d.sig;
+      if (e) nodes.replaceChild(ne, e);
+else nodes.appendChild(ne);
+      e = ne;
+      nodeEls.set(d.key, e);
+    }
+    e.className = d.cls;
+    e.style.left = d.x + "px";
+    e.style.top = d.y + "px";
+    ordered.push(e);
+  }
+  for (const [k, e] of nodeEls) {
+    if (!alive.has(k)) {
+      e.remove();
+      nodeEls.delete(k);
+    }
+  }
+  // 统一叠放顺序（appendChild 移动已有节点，不重建）
+  for (const e of ordered) nodes.appendChild(e);
 }
 
 // ---------- 面板渲染 ----------
@@ -595,6 +728,13 @@ function healthColor(u) {
   return "#2e7d32";
 }
 
+// 节点上只显示 首 + *** + 尾，完整值在右侧详情里看
+function maskKey(key) {
+  if (!key) return "";
+  if (key.length <= 12) return key.slice(0, 3) + "***" + key.slice(-2);
+  return key.slice(0, 6) + "***" + key.slice(-4);
+}
+
 function renderGwConsole() {
   const box = $("#gwConsole");
   box.innerHTML = "";
@@ -689,9 +829,42 @@ function gwControls(mode) {
 }
 
 // 当前显示的卡片背后，画一根指向它所属节点的提示线
-function renderLinks() {
+// 提示线元素同样复用，避免每次重建导致目标元素被销毁
+let linkEls = null;
+
+function ensureLinkEls() {
+  if (linkEls) return linkEls;
   const svg = $("#overlay");
-  svg.innerHTML = "";
+  const defs = document.createElementNS(SVG_NS, "defs");
+  const marker = document.createElementNS(SVG_NS, "marker");
+  marker.setAttribute("id", "linkArrow");
+  marker.setAttribute("viewBox", "0 0 10 10");
+  marker.setAttribute("refX", "8");
+  marker.setAttribute("refY", "5");
+  marker.setAttribute("markerWidth", "11");
+  marker.setAttribute("markerHeight", "11");
+  marker.setAttribute("orient", "auto-start-reverse");
+  const head = document.createElementNS(SVG_NS, "path");
+  head.setAttribute("d", "M 0 0 L 10 5 L 0 10 z");
+  head.setAttribute("fill", "#1a73e8");
+  head.setAttribute("stroke", "#ffffff");
+  head.setAttribute("stroke-width", "1");
+  marker.appendChild(head);
+  defs.appendChild(marker);
+  const path = document.createElementNS(SVG_NS, "path");
+  path.setAttribute("stroke-width", "1.5");
+  path.setAttribute("stroke-dasharray", "5 4");
+  path.setAttribute("fill", "none");
+  path.setAttribute("marker-end", "url(#linkArrow)");
+  svg.appendChild(defs);
+  svg.appendChild(path);
+  linkEls = { defs, marker, head, path };
+  return linkEls;
+}
+
+function renderLinks() {
+  const L = ensureLinkEls();
+  L.path.style.display = "none";
   const inline = $("#inline");
   if (draft && draft.kind === "upstream" && !inline.classList.contains("hidden")) {
     const pos = nodePos[draft.id];
@@ -709,7 +882,7 @@ function renderLinks() {
 
 // 从卡片中心画一条指向节点中心的虚线，箭头停在节点边框外
 function drawLink(box, tx, ty, color, hw, hh) {
-  const svg = $("#overlay");
+  const L = ensureLinkEls();
   const stage = $("#stage");
   const sb = stage.getBoundingClientRect();
   const cb = box.getBoundingClientRect();
@@ -718,34 +891,10 @@ function drawLink(box, tx, ty, color, hw, hh) {
   const t = rectEnterT(x1, y1, tx, ty, tx, ty, hw, hh);
   const x2 = x1 + (tx - x1) * Math.max(0, t - 0.02);
   const y2 = y1 + (ty - y1) * Math.max(0, t - 0.02);
-  const mid = "linkArrow" + Math.floor(performance.now() % 100000);
-
-  const defs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
-  const marker = document.createElementNS("http://www.w3.org/2000/svg", "marker");
-  marker.setAttribute("id", mid);
-  marker.setAttribute("viewBox", "0 0 10 10");
-  marker.setAttribute("refX", "8");
-  marker.setAttribute("refY", "5");
-  marker.setAttribute("markerWidth", "11");
-  marker.setAttribute("markerHeight", "11");
-  marker.setAttribute("orient", "auto-start-reverse");
-  const head = document.createElementNS("http://www.w3.org/2000/svg", "path");
-  head.setAttribute("d", "M 0 0 L 10 5 L 0 10 z");
-  head.setAttribute("fill", color);
-  head.setAttribute("stroke", "#ffffff");
-  head.setAttribute("stroke-width", "1");
-  marker.appendChild(head);
-  defs.appendChild(marker);
-  svg.appendChild(defs);
-
-  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-  path.setAttribute("d", `M ${x1} ${y1} L ${x2} ${y2}`);
-  path.setAttribute("stroke", color);
-  path.setAttribute("stroke-width", "1.5");
-  path.setAttribute("stroke-dasharray", "5 4");
-  path.setAttribute("fill", "none");
-  path.setAttribute("marker-end", `url(#${mid})`);
-  svg.appendChild(path);
+  L.head.setAttribute("fill", color);
+  L.path.setAttribute("d", `M ${x1} ${y1} L ${x2} ${y2}`);
+  L.path.setAttribute("stroke", color);
+  L.path.style.display = "";
 }
 
 // 求从 (x1,y1) 指向 (x2,y2) 的射线进入矩形（中心 cx,cy，半宽 hw，半高 hh）时的参数 t
@@ -770,6 +919,12 @@ function rectEnterT(x1, y1, x2, y2, cx, cy, hw, hh) {
 
 function focusGwConsole() {
   const box = $("#gwConsole");
+  // 抽屉打开时，网关配置在右侧抽屉里；画布上的控制台必须保持隐藏，
+  // 否则会留下一个空壳（蓝框）压在 HA Gateway 节点上，还会挡住点击
+  if (!$("#drawer").classList.contains("hidden")) {
+    box.classList.add("hidden");
+    return;
+  }
   box.classList.remove("hidden");
 }
 
