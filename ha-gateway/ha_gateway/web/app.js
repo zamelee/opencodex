@@ -181,22 +181,34 @@ async function deselect() {
 
 function layout() {
   const stage = $("#stage");
-  const w = stage.clientWidth;
+  const sw = stage.clientWidth;
   const h = stage.clientHeight;
   const ups = STATE.upstreams;
   const keys = STATE.keys;
   const slotCount = Math.max(2, ups.length);
 
+  // 网关控制台打开时，给它留出位置，拓扑在剩余区域里居中，避免遮挡
+  const drawerOpen = !$("#drawer").classList.contains("hidden");
+  const gwOpen = !!(draft && draft.kind === "gw");
+  // 控制台只在画布上出现（抽屉关闭时），此时它占左侧，画布整体右移
+  const compact = sw < 760;
+  const off = gwOpen && !drawerOpen && !compact ? 344 : 0;
+  const w = sw - off;
+
   const spread = (n, width) => {
     if (!n) return [];
     const step = Math.max(150, Math.min(200, (width - 40) / n));
     const span = Math.min(width - 30, step * n);
-    return Array.from({ length: n }, (_, i) => (width - span) / 2 + step * i + step / 2);
+    return Array.from({ length: n }, (_, i) => off + (width - span) / 2 + step * i + step / 2);
   };
 
   const upX = spread(slotCount + 1, w);
-  const keyX = spread(keys.length + 1, w);
-  const gw = { x: w / 2, y: h / 2 };
+  // 下游只有一个 Key 时居中放置，多个时才平铺
+  let keyX;
+  if (keys.length === 0) keyX = [off + w / 2];
+  else if (keys.length === 1) keyX = [off + w / 2, Math.min(off + w / 2 + 190, off + w - 90)];
+  else keyX = spread(keys.length + 1, w);
+  const gw = { x: off + w / 2, y: h / 2 };
   const topY = 64;
   const botY = h - 76;
   return { w, h, ups, keys, slotCount, upX, keyX, gw, topY, botY, addX: upX[slotCount] };
@@ -215,6 +227,7 @@ function renderTopology() {
   nodes.innerHTML = "";
   svg.innerHTML = "";
   nodePos = {};
+  nodePos.__gw = { x: L.gw.x, y: L.gw.y };
   $("#emptyHint").classList.toggle("hidden", L.ups.length > 0);
 
   const edges = [];
@@ -441,6 +454,13 @@ function renderGwConsole() {
   box.innerHTML = "";
   if (!draft || draft.kind !== "gw") {
     box.classList.add("hidden");
+    renderGwLink();
+    return;
+  }
+  // 右侧抽屉打开时，配置内容搬进抽屉，画布左侧不再显示控制台
+  if (!$("#drawer").classList.contains("hidden")) {
+    box.classList.add("hidden");
+    renderGwLink();
     return;
   }
   box.classList.remove("hidden");
@@ -448,7 +468,13 @@ function renderGwConsole() {
   box.classList.toggle("compact", stage.clientWidth < 760);
   box.appendChild(el("div", "po-title", "网关控制台"));
   box.appendChild(el("div", "hint", "网关与故障转移的核心设置，改动后点「保存应用」。"));
+  box.appendChild(gwControls());
+  renderGwLink();
+}
 
+// 网关控制台的控件组（画布控制台与右侧抽屉共用）
+function gwControls() {
+  const wrap = el("div");
   const f = el("div", "form");
   f.appendChild(selectField("协议", "protocol", draft.fields.protocol, PROTOCOLS));
   f.appendChild(field("监听主机", "listen_host", draft.fields.listen_host));
@@ -456,9 +482,9 @@ function renderGwConsole() {
   f.appendChild(field("单请求最大切换", "max_switches_per_request", draft.fields.max_switches_per_request, "number"));
   f.appendChild(field("最小驻留(秒)", "min_residency_s", draft.fields.min_residency_s, "number"));
   f.appendChild(field("提交前预算(秒)", "precommit_budget_s", draft.fields.precommit_budget_s, "number"));
-  box.appendChild(f);
+  wrap.appendChild(f);
 
-  box.appendChild(el("div", "sub-title", "触发自动切换的状态"));
+  wrap.appendChild(el("div", "sub-title", "触发自动切换的状态"));
   const rules = el("div", "rules");
   Object.keys(RULE_LABELS).forEach((k) => {
     const l = el("label");
@@ -471,7 +497,7 @@ function renderGwConsole() {
     l.appendChild(el("span", null, RULE_LABELS[k]));
     rules.appendChild(l);
   });
-  box.appendChild(rules);
+  wrap.appendChild(rules);
 
   const dz = el("div", "danger-zone");
   const rl = el("label");
@@ -495,7 +521,7 @@ function renderGwConsole() {
   rl.appendChild(el("span", null, "已提交后仍重试（危险）"));
   dz.appendChild(rl);
   dz.classList.toggle("on", draft.retry);
-  box.appendChild(dz);
+  wrap.appendChild(dz);
 
   const row = el("div", "row");
   const save = el("button", "btn primary", "保存应用");
@@ -504,7 +530,51 @@ function renderGwConsole() {
   const copy = el("button", "btn", "复制 Codex 配置");
   copy.onclick = () => copyCodexSnippet();
   row.appendChild(copy);
-  box.appendChild(row);
+  wrap.appendChild(row);
+  return wrap;
+}
+
+// 控制台背后指向所属网关节点的提示线（带箭头，箭头压在节点之上不被遮挡）
+function renderGwLink() {
+  const svg = $("#overlay");
+  svg.innerHTML = "";
+  const box = $("#gwConsole");
+  const gw = nodePos.__gw;
+  if (!gw || box.classList.contains("hidden")) return;
+  const stage = $("#stage");
+  const sb = stage.getBoundingClientRect();
+  const cb = box.getBoundingClientRect();
+  const x1 = cb.left - sb.left + cb.width / 2;
+  const y1 = cb.top - sb.top + cb.height / 2;
+  const x2 = gw.x;
+  const y2 = gw.y;
+
+  const defs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
+  const marker = document.createElementNS("http://www.w3.org/2000/svg", "marker");
+  marker.setAttribute("id", "gwArrow");
+  marker.setAttribute("viewBox", "0 0 10 10");
+  marker.setAttribute("refX", "8");
+  marker.setAttribute("refY", "5");
+  marker.setAttribute("markerWidth", "11");
+  marker.setAttribute("markerHeight", "11");
+  marker.setAttribute("orient", "auto-start-reverse");
+  const head = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  head.setAttribute("d", "M 0 0 L 10 5 L 0 10 z");
+  head.setAttribute("fill", "#1a73e8");
+  head.setAttribute("stroke", "#ffffff");
+  head.setAttribute("stroke-width", "1");
+  marker.appendChild(head);
+  defs.appendChild(marker);
+  svg.appendChild(defs);
+
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", `M ${x1} ${y1} L ${x2} ${y2}`);
+  path.setAttribute("stroke", "#1a73e8");
+  path.setAttribute("stroke-width", "1.5");
+  path.setAttribute("stroke-dasharray", "5 4");
+  path.setAttribute("fill", "none");
+  path.setAttribute("marker-end", "url(#gwArrow)");
+  svg.appendChild(path);
 }
 
 function focusGwConsole() {
@@ -599,14 +669,20 @@ function renderDock() {
     const h = el("h3", null, "网关");
     if (draft.dirty) h.appendChild(el("small", null, "（未保存）"));
     sec.appendChild(h);
-    sec.appendChild(el("div", "po-line", `协议　${s.protocol}`));
-    sec.appendChild(el("div", "po-line", `监听　${s.listen_host}:${s.listen_port}`));
-    sec.appendChild(el("div", "po-line", `上游　${STATE.upstreams.length} 条`));
-    const row = el("div", "row");
-    const open = el("button", "btn primary", "在画布中打开网关控制台");
-    open.onclick = () => focusGwConsole();
-    row.appendChild(open);
-    sec.appendChild(row);
+    const drawerOpen = !$("#drawer").classList.contains("hidden");
+    if (drawerOpen) {
+      // 抽屉里直接给出完整配置，画布左侧不再出现控制台
+      sec.appendChild(gwControls());
+    } else {
+      sec.appendChild(el("div", "po-line", `协议　${s.protocol}`));
+      sec.appendChild(el("div", "po-line", `监听　${s.listen_host}:${s.listen_port}`));
+      sec.appendChild(el("div", "po-line", `上游　${STATE.upstreams.length} 条`));
+      const row = el("div", "row");
+      const open = el("button", "btn primary", "在画布中打开网关控制台");
+      open.onclick = () => focusGwConsole();
+      row.appendChild(open);
+      sec.appendChild(row);
+    }
     body.appendChild(sec);
   }
 }
@@ -723,12 +799,16 @@ function openDrawer() {
   $("#drawer").classList.remove("hidden");
   $("#toggleDrawer").textContent = "◀";
   $("#toggleDrawer").title = "收起管理面板";
+  renderTopology();
+  renderPanels();
 }
 
 function closeDrawer() {
   $("#drawer").classList.add("hidden");
   $("#toggleDrawer").textContent = "▶";
   $("#toggleDrawer").title = "管理面板";
+  renderTopology();
+  renderPanels();
 }
 
 // ---------- 日志 ----------
@@ -783,7 +863,7 @@ $("#logBody").addEventListener("scroll", (e) => {
 });
 
 $("#stage").addEventListener("click", (ev) => {
-  const ignore = [".node", ".inline-card", ".gw-console", ".dirty-bar"];
+  const ignore = [".node", ".inline-card", ".gw-console", ".dirty-bar", ".drawer-toggle"];
   if (ignore.some((s) => ev.target.closest(s))) return;
   deselect();
 });
