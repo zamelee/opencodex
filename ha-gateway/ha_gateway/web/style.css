@@ -181,6 +181,26 @@ main {
 .node .n-title { font-weight: 700; }
 .node .n-sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
 .node .n-sub.mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 键值行（网关节点：协议 / 服务接口） */
+.node .n-kv {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  margin-top: 3px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.node .n-k { color: var(--muted); flex: 0 0 auto; }
+.node .n-v {
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.node .n-v.mono { font-family: Consolas, monospace; }
+.node.gateway { width: 188px; }
 /* 信息未填完的提示徽标 */
 .node-badge {
   position: absolute;

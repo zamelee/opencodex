@@ -571,9 +571,15 @@ function buildGwNode() {
   const n = el("div", "node gateway");
   const s = STATE.settings || {};
   n.appendChild(el("div", "n-title", "乾坤机枢"));
-  n.appendChild(el("div", "n-sub", "HA Gateway · 双路高可用"));
-  n.appendChild(el("div", "n-sub mono", s.protocol || "—"));
-  n.appendChild(el("div", "n-sub mono", `${s.listen_host || "—"}:${s.listen_port || "—"}`));
+  n.appendChild(el("div", "n-sub", "一主一备 · 自动接管"));
+  const kv = (label, value, cls) => {
+    const row = el("div", "n-kv");
+    row.appendChild(el("span", "n-k", label));
+    row.appendChild(el("span", "n-v " + (cls || ""), value));
+    return row;
+  };
+  n.appendChild(kv("协议", s.protocol || "—", "mono"));
+  n.appendChild(kv("网关监听", `${s.listen_host || "—"}:${s.listen_port || "—"}`, "mono"));
   n.onclick = (ev) => {
     ev.stopPropagation();
     selectObject("gw", "gw");
@@ -806,7 +812,7 @@ function renderTopology() {
     cls: "node gateway" + (selected && selected.kind === "gw" ? " sel" : ""),
     x: L.gw.x,
     y: L.gw.y,
-    sig: JSON.stringify(["乾坤机枢", gs.protocol, gs.listen_host, gs.listen_port]),
+    sig: JSON.stringify(["乾坤机枢", gs.protocol, gs.listen_host, gs.listen_port, "kv2"]),
     build: buildGwNode,
   });
 
