@@ -62,6 +62,7 @@ body {
 .btn:hover { background: #f0f2f5; }
 .btn.primary { background: var(--blue); border-color: var(--blue); color: #fff; }
 .btn.primary:hover { background: #1667d6; }
+.btn.dirty::after { content: " *"; color: var(--amber); }
 .btn.danger { color: var(--red); }
 .btn.ghost { color: var(--muted); }
 .btn.icon { padding: 2px 8px; }
@@ -415,12 +416,9 @@ input:focus, select:focus { outline: 2px solid rgba(26, 115, 232, 0.35); border-
   padding: 12px 14px;
   border: 2px solid var(--blue);
 }
-.gw-console.expanded {
-  max-height: calc(100% - 32px);
-  overflow: auto;
-}
-.gw-console .gw-quick { margin: 6px 0 2px; }
-.gw-console .gw-quick .po-line { margin: 3px 0; }
+.gw-console .form label { grid-template-columns: 64px 1fr; margin-bottom: 5px; }
+.gw-console .form input { padding: 3px 8px; }
+.gw-console .row { margin-top: 8px; }
 .gw-console.right { left: auto; right: 14px; transform: none; }
 .gw-console .sub-title { font-weight: 600; margin: 10px 0 4px; }
 .gw-console.compact {
@@ -429,12 +427,10 @@ input:focus, select:focus { outline: 2px solid rgba(26, 115, 232, 0.35); border-
   left: auto;
   right: 12px;
   width: min(320px, calc(100% - 24px));
-  max-height: 58%;
   background: rgba(255, 255, 255, 0.92);
   backdrop-filter: blur(3px);
 }
 .gw-console.compact.right { right: 12px; }
-.gw-console.compact:not(.expanded) { max-height: none; }
 
 /* 节点内小按钮（复制 / 删除） */
 .node-actions {

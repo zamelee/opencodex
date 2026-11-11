@@ -15,7 +15,6 @@ let logSeen = 0;
 let nodePos = {};             // 节点 id -> {x,y}
 let lastStateSig = "";        // 上一次 /api/state 的指纹，用于跳过无谓重绘
 let pendingPanel = false;     // 编辑中状态变了，等用户松手后再刷新右侧面板
-let gwExpanded = false;       // 画布上的网关控制台是否展开完整配置
 
 const RULE_LABELS = {
   connect_fail: "连接失败 / DNS 失败",
@@ -141,6 +140,13 @@ function setField(name, value) {
   draft.fields[name] = value;
   draft.dirty = true;
   syncField(name, value);
+  refreshDirtyMarks();
+}
+
+// 未保存标记：给带 data-dirty-mark 的按钮加一个橙色星号
+function refreshDirtyMarks() {
+  const dirty = !!(draft && draft.dirty);
+  $$("[data-dirty-mark]").forEach((b) => b.classList.toggle("dirty", dirty));
 }
 
 function syncField(name, value) {
@@ -162,6 +168,7 @@ function syncRule(name, value) {
   $$(`[data-rule="${name}"]`).forEach((i) => {
     if (i !== document.activeElement) i.checked = !!value;
   });
+  refreshDirtyMarks();
 }
 
 // ---------- 脏数据拦截 ----------
@@ -586,8 +593,10 @@ function radioBlock(label, name, value, options, opts) {
   l.appendChild(el("span", null, label));
   const group = el("div", "seg");
   options.forEach((o) => {
-    const b = el("button", "seg-btn" + (o === value ? " on" : ""), o);
+    const text = (opts.labels && opts.labels[o]) || o;
+    const b = el("button", "seg-btn" + (o === value ? " on" : ""), text);
     b.type = "button";
+    b.title = o;
     b.dataset.field = name;
     b.dataset.value = o;
     b.onclick = () => {
@@ -753,42 +762,45 @@ function renderGwConsole() {
   box.classList.remove("hidden");
   const stage = $("#stage");
   box.classList.toggle("compact", stage.clientWidth < 760);
-  box.classList.toggle("expanded", gwExpanded);
   box.appendChild(el("div", "po-title", "网关控制台"));
-  if (!gwExpanded) {
-    // 精简版：只读三行核心信息，不堆控件、不出滚动条
-    const s = STATE.settings;
-    const info = el("div", "gw-quick");
-    info.appendChild(el("div", "po-line", `协议　${s.protocol}`));
-    info.appendChild(el("div", "po-line", `监听 IP　${s.listen_host}`));
-    info.appendChild(el("div", "po-line", `端口　${s.listen_port}`));
-    box.appendChild(info);
-    const row = el("div", "row");
-    const more = el("button", "btn", "更多…");
-    more.title = "展开完整网关配置：切换预算、故障转移规则等";
-    more.onclick = (ev) => {
-      // 重绘会摘掉当前按钮，必须阻止冒泡，否则画布会当成"点空白"取消选中
-      ev.stopPropagation();
-      gwExpanded = true;
-      renderPanels();
-      renderTopology();
-    };
-    row.appendChild(more);
-    box.appendChild(row);
-  } else {
-    const row = el("div", "row");
-    const less = el("button", "btn ghost", "收起");
-    less.title = "收起，只显示协议、IP 和端口";
-    less.onclick = (ev) => {
-      ev.stopPropagation();
-      gwExpanded = false;
-      renderPanels();
-      renderTopology();
-    };
-    row.appendChild(less);
-    box.appendChild(row);
-    box.appendChild(gwControls("tooltip"));
-  }
+  // 快速设置：协议 / 监听 IP / 端口 三项就地可改，改完点「保存」
+  const form = el("div", "form");
+  form.appendChild(
+    radioBlock("协议", "protocol", draft.fields.protocol, PROTOCOLS, {
+      hint: HINTS.protocol,
+      mode: "tooltip",
+      labels: { "openai-responses": "responses", "openai-chat": "chat", anthropic: "anthropic" },
+    })
+  );
+  form.appendChild(
+    fieldBlock("监听 IP", "listen_host", draft.fields.listen_host, { hint: HINTS.listen_host, mode: "tooltip" })
+  );
+  form.appendChild(
+    fieldBlock("端口", "listen_port", draft.fields.listen_port, {
+      type: "number",
+      hint: HINTS.listen_port,
+      mode: "tooltip",
+    })
+  );
+  box.appendChild(form);
+  const row = el("div", "row");
+  const save = el("button", "btn primary", "保存");
+  save.dataset.dirtyMark = "1";
+  save.title = "把协议、监听地址写入配置";
+  save.onclick = (ev) => {
+    ev.stopPropagation();
+    saveDraft();
+  };
+  row.appendChild(save);
+  const more = el("button", "btn", "更多…");
+  more.title = "在右侧面板调整全部参数：切换预算、故障转移规则等";
+  more.onclick = (ev) => {
+    // 重绘会摘掉当前按钮，必须阻止冒泡，否则画布会当成"点空白"取消选中
+    ev.stopPropagation();
+    openDrawer();
+  };
+  row.appendChild(more);
+  box.appendChild(row);
   renderLinks();
 }
 
@@ -848,25 +860,13 @@ function gwControls(mode) {
 
   const row = el("div", "row");
   const save = el("button", "btn primary", "保存应用");
+  save.dataset.dirtyMark = "1";
   save.title = "把协议、监听、切换预算与故障转移规则写入配置";
   save.onclick = () => saveDraft();
   row.appendChild(save);
-  const copy = el("button", "btn", "复制 Codex 配置");
-  copy.title =
-    "生成一段 model_providers 配置片段，贴进 ~/.codex/config.toml，Codex 就会通过本网关转发";
-  copy.onclick = () => copyCodexSnippet(copy);
-  row.appendChild(copy);
   wrap.appendChild(row);
   if (mode === "inline") {
-    wrap.appendChild(
-      el(
-        "div",
-        "f-hint",
-        "「保存应用」写入协议、监听、切换预算与故障转移规则。" +
-          "「复制 Codex 配置」生成一段 config.toml 片段，把 Codex 指向本网关；" +
-          "片段里的 env_key = HA_GATEWAY_KEY，需要你把下游 Key 放进这个同名环境变量。"
-      )
-    );
+    wrap.appendChild(el("div", "f-hint", "「保存应用」写入协议、监听、切换预算与故障转移规则。"));
   }
   return wrap;
 }
@@ -1202,19 +1202,6 @@ async function newKey() {
   } catch (e) {}
   alert("已生成并复制：\n" + res.key);
   await loadState();
-}
-
-function copyCodexSnippet(btn) {
-  const s = STATE.settings;
-  const wire = { "openai-responses": "responses", "openai-chat": "chat", anthropic: "anthropic" }[s.protocol];
-  const snippet =
-    `[model_providers.ha_gateway]\nname = "HA Gateway"\nbase_url = "http://${s.listen_host}:${s.listen_port}/v1/"\nenv_key = "HA_GATEWAY_KEY"\nwire_api = "${wire}"\n`;
-  navigator.clipboard.writeText(snippet);
-  if (btn) {
-    const old = btn.textContent;
-    btn.textContent = "已复制";
-    setTimeout(() => (btn.textContent = old), 1400);
-  }
 }
 
 // ---------- 抽屉 ----------
