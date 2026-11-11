@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS upstreams (
     protocol TEXT NOT NULL,
     enabled INTEGER NOT NULL DEFAULT 1,
     weight INTEGER NOT NULL DEFAULT 1,
+    model TEXT NOT NULL DEFAULT '',
     created_at REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS client_keys (
@@ -76,6 +77,12 @@ CREATE TABLE IF NOT EXISTS usage_records (
     ttfb_ms REAL
 );
 CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage_records(ts);
+CREATE TABLE IF NOT EXISTS upstream_models (
+    upstream_id TEXT NOT NULL,
+    model TEXT NOT NULL,
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (upstream_id, model)
+);
 """
 
 
@@ -96,6 +103,11 @@ class Storage:
         if "key_enc" not in cols:
             self._conn.execute(
                 "ALTER TABLE client_keys ADD COLUMN key_enc TEXT NOT NULL DEFAULT ''"
+            )
+        up_cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(upstreams)")}
+        if "model" not in up_cols:
+            self._conn.execute(
+                "ALTER TABLE upstreams ADD COLUMN model TEXT NOT NULL DEFAULT ''"
             )
 
     # ---------- settings ----------
@@ -217,6 +229,7 @@ class Storage:
                     protocol=r["protocol"],
                     enabled=bool(r["enabled"]),
                     weight=r["weight"],
+                    model=r["model"] if "model" in r.keys() else "",
                 )
             )
         return out
@@ -227,7 +240,7 @@ class Storage:
         with self._lock:
             self._conn.execute(
                 "INSERT INTO upstreams(id,name,provider,base_url,api_key_enc,protocol,"
-                "enabled,weight,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                "enabled,weight,model,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (
                     u.id,
                     u.name,
@@ -237,6 +250,7 @@ class Storage:
                     u.protocol,
                     1 if u.enabled else 0,
                     u.weight,
+                    u.model or "",
                     time.time(),
                 ),
             )
@@ -247,7 +261,7 @@ class Storage:
         with self._lock:
             self._conn.execute(
                 "UPDATE upstreams SET name=?,provider=?,base_url=?,api_key_enc=?,"
-                "protocol=?,enabled=?,weight=? WHERE id=?",
+                "protocol=?,enabled=?,weight=?,model=? WHERE id=?",
                 (
                     u.name,
                     u.provider,
@@ -256,6 +270,7 @@ class Storage:
                     u.protocol,
                     1 if u.enabled else 0,
                     u.weight,
+                    u.model or "",
                     u.id,
                 ),
             )
@@ -487,6 +502,33 @@ class Storage:
             cur = self._conn.execute("DELETE FROM usage_records WHERE ts < ?", (cutoff,))
             self._conn.commit()
             return cur.rowcount or 0
+
+    # ---------- 上游模型清单 ----------
+
+    def add_upstream_models(self, upstream_id: str, models: list[str]) -> None:
+        """记下这条上游支持哪些模型（用户手动拉取时写入）。"""
+        now = time.time()
+        with self._lock:
+            self._conn.executemany(
+                "INSERT INTO upstream_models(upstream_id,model,updated_at) VALUES(?,?,?) "
+                "ON CONFLICT(upstream_id,model) DO UPDATE SET updated_at=excluded.updated_at",
+                [(upstream_id, m, now) for m in models],
+            )
+            self._conn.commit()
+
+    def known_models(self) -> list[str]:
+        """所有已知模型的并集（上游不支持 /v1/models 时的兜底）。"""
+        rows = self._conn.execute(
+            "SELECT DISTINCT model FROM upstream_models ORDER BY model"
+        ).fetchall()
+        return [r["model"] for r in rows]
+
+    def models_of(self, upstream_id: str) -> list[str]:
+        rows = self._conn.execute(
+            "SELECT model FROM upstream_models WHERE upstream_id=? ORDER BY model",
+            (upstream_id,),
+        ).fetchall()
+        return [r["model"] for r in rows]
 
     def export_json(self) -> str:
         return json.dumps(

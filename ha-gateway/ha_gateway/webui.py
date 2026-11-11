@@ -47,6 +47,9 @@ def _state(app) -> dict:
                 "provider": u.provider,
                 "base_url": u.base_url,
                 "protocol": u.protocol,
+                "model": u.model,
+                # 上次拉到的模型清单（缓存），点开就能选，不必每次都去拉
+                "models": app.storage.models_of(u.id),
                 # 只回传"有没有填"，不回传明文密钥
                 "has_key": bool(u.api_key),
                 "enabled": u.enabled,
@@ -148,6 +151,7 @@ def build_web_app(app) -> web.Application:
                 base_url=base_url,
                 api_key=data.get("api_key") or "",
                 protocol=app.settings.protocol,
+                model=str(data.get("model") or "").strip(),
             )
         )
         app.storage.migrate_routes({x.id for x in app.upstreams()})
@@ -175,6 +179,8 @@ def build_web_app(app) -> web.Application:
             u.api_key = data["api_key"]
         if "enabled" in data:
             u.enabled = bool(data["enabled"])
+        if "model" in data:
+            u.model = str(data["model"] or "").strip()
         app.storage.update_upstream(u)
         return web.json_response(
             {
@@ -191,7 +197,17 @@ def build_web_app(app) -> web.Application:
 
     async def probe_upstream(request):
         uid = request.match_info["id"]
-        res = await app.probe_upstream_async(uid)
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        model = str((data or {}).get("model") or "").strip()
+        res = await app.probe_upstream_async(uid, model)
+        return web.json_response(res)
+
+    async def list_upstream_models(request):
+        uid = request.match_info["id"]
+        res = await app.list_models_async(uid)
         return web.json_response(res)
 
     async def add_key(request):
@@ -328,6 +344,7 @@ def build_web_app(app) -> web.Application:
     routes.put("/api/upstreams/{id}")(update_upstream)
     routes.delete("/api/upstreams/{id}")(delete_upstream)
     routes.post("/api/upstreams/{id}/probe")(probe_upstream)
+    routes.post("/api/upstreams/{id}/models")(list_upstream_models)
     routes.post("/api/keys")(add_key)
     routes.put("/api/keys/{id}")(update_key)
     routes.delete("/api/keys/{id}")(delete_key)

@@ -165,9 +165,11 @@ def _extract_usage(chunk: bytes) -> dict | None:
     """
     if not chunk or len(chunk) > 1024 * 1024:
         return None
-    m = _USAGE_RE.search(chunk)
-    if not m:
+    matches = list(_USAGE_RE.finditer(chunk))
+    if not matches:
         return None
+    # 取最后一个：同一个块里若出现多次 usage，最后一个才是最新的计数
+    m = matches[-1]
     try:
         obj = json.loads(m.group(1))
     except (ValueError, TypeError):
@@ -193,6 +195,83 @@ def _merge_usage(acc: dict | None, part: dict | None) -> dict | None:
         if v is not None:
             acc[k] = v
     return acc
+
+
+def _probe_payload(protocol: str, model: str) -> dict:
+    """按协议拼一个最小的探测请求体。
+
+    之前三种协议都用 chat 的 messages 格式，openai-responses 那边认不出来，
+    会报"找不到 provider"这种看起来像通道坏了的错。
+    """
+    if protocol == "anthropic":
+        return {
+            "model": model,
+            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "ping"}],
+        }
+    if protocol == "openai-chat":
+        return {
+            "model": model,
+            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "ping"}],
+        }
+    # openai-responses：用 input
+    return {
+        "model": model,
+        "max_output_tokens": 16,
+        "input": "ping",
+    }
+
+
+def _parse_models(body: str) -> list[str]:
+    """从 /v1/models 的响应里抽出模型名列表。"""
+    try:
+        data = json.loads(body)
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    items = data.get("data")
+    if not isinstance(items, list):
+        items = data.get("models")
+    if not isinstance(items, list):
+        return []
+    out: list[str] = []
+    for it in items:
+        if isinstance(it, str):
+            name = it
+        elif isinstance(it, dict):
+            name = str(it.get("id") or it.get("name") or "")
+        else:
+            continue
+        name = name.strip()
+        if name and name not in out:
+            out.append(name)
+    return out
+
+
+class UsageCollector:
+    """跨块收集 usage。
+
+    usage 往往出现在流的最后一块（openai-responses 的 response.completed、
+    anthropic 的 message_delta），而 SSE 的分块边界经常把 "usage" 这个词切成
+    两半，单块正则匹配不到。这里留一个尾巴缓冲，跨块再匹配一次。
+    """
+
+    def __init__(self, keep: int = 8192) -> None:
+        self.keep = keep
+        self.tail = b""
+        self.usage: dict = {}
+
+    def feed(self, chunk: bytes) -> None:
+        if not chunk:
+            return
+        buf = self.tail + chunk
+        _merge_usage(self.usage, _extract_usage(buf))
+        self.tail = buf[-self.keep :]
+
+    def snapshot(self) -> dict:
+        return dict(self.usage)
 
 
 class Gateway:
@@ -307,6 +386,10 @@ class Gateway:
 
         self.metrics.downstream_start()
         path = request.path
+        # 下游（Codex 等）拉模型列表：按路由转发到这次该走的那条上游，
+        # 拿它真实的清单；上游不支持时用本地缓存兜底。
+        if request.method == "GET" and path.rstrip("/") == "/v1/models":
+            return await self._handle_models(request)
         upstream_desc = resolve_endpoint(self.settings.protocol, request.method, path)
         if upstream_desc is None:
             self.metrics.downstream_end()
@@ -539,18 +622,21 @@ class Gateway:
         stream = web.StreamResponse(status=resp.status, headers=headers)
         await stream.prepare(request)
         ttfb_ms = None
+        collector = UsageCollector()
         try:
             if first:
                 ttfb_ms = 0.0
                 if resp_id:
                     self.session_router.bind_response(resp_id, upstream_id)
                 if usage_box is not None:
-                    _merge_usage(usage_box, _extract_usage(first))
+                    collector.feed(first)
+                    usage_box.update(collector.snapshot())
                 await stream.write(first)
             async for chunk in resp.content.iter_any():
                 if chunk:
                     if usage_box is not None:
-                        _merge_usage(usage_box, _extract_usage(chunk))
+                        collector.feed(chunk)
+                        usage_box.update(collector.snapshot())
                     await stream.write(chunk)
             await stream.write_eof()
         except (ConnectionResetError, asyncio.CancelledError):
@@ -562,14 +648,111 @@ class Gateway:
             self.metrics.downstream_end(ttfb_ms)
         return stream
 
+    async def _handle_models(self, request: web.Request) -> web.StreamResponse:
+        """下游的 GET /v1/models。
+
+        语义要跟真实请求一致：这次会走哪条上游，就给哪条上游的模型清单。
+        （各上游清单可能不同，给并集反而会让下游选到别的通道才有的模型。）
+        """
+        skey = make_session_key(
+            self.settings.protocol,
+            dict(request.headers),
+            self.client_key_id(request),
+            request.headers.get("authorization", ""),
+        )
+        upstreams = self.storage.list_upstreams()
+        plan = self.selector.plan(upstreams, skey)
+        client = await self.ensure_client()
+        while True:
+            upstream = plan.next_upstream()
+            if upstream is None:
+                break
+            for path in ("/v1/models", "/models"):
+                try:
+                    resp = await client.get(
+                        upstream.base_url.rstrip("/") + path,
+                        headers={
+                            "authorization": f"Bearer {upstream.api_key}",
+                            "accept": "application/json",
+                        },
+                    )
+                    body = await resp.read()
+                    await resp.release()
+                except Exception as exc:  # noqa: BLE001
+                    # 读操作失败只记日志，不计入通道健康度（上游可能只是没这个端点）
+                    self.log(
+                        "warn",
+                        "models",
+                        f"下游 /v1/models ｜ {self._up_label(upstream.id, upstream.name)} ｜ {path} 失败 ｜ {str(exc)[:120]}",
+                    )
+                    continue
+                if 200 <= resp.status < 300:
+                    self.metrics.upstream_end(upstream.id, 0.0, ok=True)
+                    self.health.record_success(upstream.id)
+                    self.log(
+                        "info",
+                        "models",
+                        f"下游 /v1/models ｜ {self._up_label(upstream.id, upstream.name)} ｜ 转发成功 ｜ {path}",
+                    )
+                    return web.Response(
+                        body=body,
+                        status=200,
+                        content_type="application/json",
+                        headers={"Cache-Control": "no-cache"},
+                    )
+                self.log(
+                    "warn",
+                    "models",
+                    f"下游 /v1/models ｜ {self._up_label(upstream.id, upstream.name)} ｜ {path} HTTP {resp.status}",
+                )
+            # 这条上游不支持清单端点：本次请求跳过它，但不计入健康度
+            plan.mark_failed(upstream.id)
+
+        # 兜底：网关本地缓存的模型清单（用户手动拉取时记下的）
+        known: list[str] = []
+        try:
+            known = self.storage.known_models()
+        except Exception:
+            known = []
+        if known:
+            self.log("info", "models", f"下游 /v1/models ｜ 本地缓存兜底 ｜ {len(known)} 个")
+            return web.json_response(
+                {
+                    "object": "list",
+                    "data": [{"id": m, "object": "model"} for m in known],
+                }
+            )
+        return web.json_response(
+            {
+                "error": {
+                    "type": "upstream_error",
+                    "message": "no upstream can serve /v1/models",
+                    "code": "models_unavailable",
+                }
+            },
+            status=502,
+        )
+
+    def _up_label(self, upstream_id: str, fallback: str = "") -> str:
+        """「槽位 通道名」，取不到就退回原名。"""
+        try:
+            ups = self.storage.list_upstreams()
+        except Exception:
+            ups = []
+        return upstream_label(ups, upstream_id) or fallback
+
     async def manual_probe(self, upstream, model: str = "gpt-4o-mini") -> dict:
         """手动探测：发一个最小请求。可能计费，UI 需明示。"""
         client = await self.ensure_client()
-        payload = {
-            "model": model,
-            "messages": [{"role": "user", "content": "ping"}],
-            "max_tokens": 1,
-        }
+        model = (model or upstream.model or "").strip()
+        if not model:
+            return {
+                "ok": False,
+                "status": None,
+                "ms": 0,
+                "body": "先从上游拉取模型列表并选择一个模型，再探测",
+            }
+        payload = _probe_payload(self.settings.protocol, model)
         path = {
             "openai-responses": "/v1/responses",
             "openai-chat": "/v1/chat/completions",
@@ -599,6 +782,66 @@ class Gateway:
                 "ms": int((time.monotonic() - started) * 1000),
                 "body": str(exc)[:400],
             }
+
+    async def list_models(self, upstream) -> dict:
+        """从上游拉模型清单。只读、不计费。
+
+        路径容错：先试标准的 /v1/models，再试 /models
+        （部分中转把清单挂在后者）。任一路径 2xx 即停。
+        """
+        client = await self.ensure_client()
+        started = time.monotonic()
+        last: dict = {
+            "ok": False,
+            "status": None,
+            "ms": 0,
+            "models": [],
+            "body": "",
+            "path": None,
+        }
+        for path in ("/v1/models", "/models"):
+            url = upstream.base_url.rstrip("/") + path
+            try:
+                resp = await client.get(
+                    url,
+                    headers={
+                        "authorization": f"Bearer {upstream.api_key}",
+                        "accept": "application/json",
+                    },
+                )
+                body = await resp.text()
+            except Exception as exc:  # noqa: BLE001
+                last = {
+                    "ok": False,
+                    "status": None,
+                    "ms": int((time.monotonic() - started) * 1000),
+                    "models": [],
+                    "body": str(exc)[:400],
+                    "path": path,
+                }
+                continue
+            ms = int((time.monotonic() - started) * 1000)
+            if resp.status >= 400:
+                last = {
+                    "ok": False,
+                    "status": resp.status,
+                    "ms": ms,
+                    "models": [],
+                    "body": body[:400],
+                    "path": path,
+                }
+                continue
+            models = _parse_models(body)
+            return {
+                "ok": True,
+                "status": resp.status,
+                "ms": ms,
+                "models": models,
+                "body": body[:200] if not models else "",
+                "path": path,
+            }
+        last["ms"] = int((time.monotonic() - started) * 1000)
+        return last
 
     async def tcp_probe(self, upstream) -> bool:
         """主动探活：只测 TCP 可达性，不发请求、不计费。"""

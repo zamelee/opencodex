@@ -7,6 +7,7 @@ from ha_gateway.server import (
     _extract_request_id,
     _extract_response_id,
     _merge_usage,
+    UsageCollector,
 )
 
 
@@ -81,3 +82,18 @@ def test_merge_usage_keeps_partial_fields():
     acc = _merge_usage({}, {"in": 10, "out": 2})
     acc = _merge_usage(acc, {"out": 7})
     assert acc == {"in": 10, "out": 7}
+
+
+def test_usage_collector_across_chunk_boundary():
+    """SSE 分块把 "usage" 切成两半时也要抓得到。"""
+    c = UsageCollector()
+    c.feed(b'{"type":"response.completed","response":{"usage":{"input_to')
+    c.feed(b'kens":1234,"output_tokens":56,"total_tokens":1290}}')
+    assert c.snapshot() == {"in": 1234, "out": 56, "total": 1290}
+
+
+def test_usage_collector_later_value_wins():
+    c = UsageCollector()
+    c.feed(b'{"usage":{"input_tokens":10,"output_tokens":1}}')
+    c.feed(b'{"usage":{"output_tokens":9}}')
+    assert c.snapshot() == {"in": 10, "out": 9}

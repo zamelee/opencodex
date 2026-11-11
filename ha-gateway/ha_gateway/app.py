@@ -295,7 +295,7 @@ class HaApp:
         return crypto.data_dir()
 
     async def probe_upstream_async(
-        self, upstream_id: str, model: str = "gpt-4o-mini"
+        self, upstream_id: str, model: str = ""
     ) -> dict:
         """手动探测的异步版本。
 
@@ -310,7 +310,27 @@ class HaApp:
         self._log(
             "info" if res.get("ok") else "warn",
             "probe",
-            f"手动探测 {up.name}: HTTP {res.get('status')} {res.get('ms')}ms",
+            f"手动探测 ｜ {up.name} ｜ HTTP {res.get('status')} ｜ {res.get('ms')}ms"
+            + (f" ｜ model={model or up.model or '-'}" if (model or up.model) else ""),
+        )
+        return res
+
+    async def list_models_async(self, upstream_id: str) -> dict:
+        """拉取某条上游的模型清单（只读，不计费）。"""
+        up = next((u for u in self.storage.list_upstreams() if u.id == upstream_id), None)
+        if up is None:
+            return {"ok": False, "status": None, "ms": 0, "models": [], "body": "upstream not found"}
+        res = await self.gateway.list_models(up)
+        if res.get("ok") and res.get("models"):
+            try:
+                self.storage.add_upstream_models(up.id, res["models"])
+            except Exception:
+                pass
+        self._log(
+            "info" if res.get("ok") else "warn",
+            "models",
+            f"拉取模型 ｜ {up.name} ｜ HTTP {res.get('status')} ｜ {res.get('ms')}ms ｜ "
+            f"{len(res.get('models') or [])} 个",
         )
         return res
 

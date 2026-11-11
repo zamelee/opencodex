@@ -18,6 +18,33 @@ let pendingPanel = false;     // 编辑中状态变了，等用户松手后再�
 let usageCache = null;        // 用量统计（拉取有间隔，不必每次状态轮询都问）
 let usageFetchedAt = 0;
 
+// 图标与按钮工厂（顶层共享：内嵌弹框和右侧面板都要用）
+const ICONS = {
+  save: '<path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8"/><path d="M7 3v5h8"/>',
+  probe: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>',
+  trash: '<path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/>',
+  lock: '<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+  ban: '<circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/>',
+  refresh: '<path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/>',
+};
+const icon = (name) => {
+  const s = el("span", "ico");
+  s.innerHTML =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
+    'stroke-linecap="round" stroke-linejoin="round">' +
+    (ICONS[name] || "") +
+    "</svg>";
+  return s;
+};
+const mkBtn = (cls, ico, label, title, onclick) => {
+  const b = el("button", "btn " + cls);
+  b.appendChild(icon(ico));
+  b.appendChild(el("span", "bt", label));
+  b.title = title;
+  b.onclick = onclick;
+  return b;
+};
+
 const RULE_LABELS = {
   connect_fail: "连接失败 / DNS 失败",
   upstream_5xx: "上游 5xx",
@@ -294,7 +321,14 @@ function rebuildDraft() {
       kind: "upstream",
       id: u.id,
       isNew: false,
-      fields: { name: u.name, provider: u.provider, base_url: u.base_url, api_key: "" },
+      fields: {
+        name: u.name,
+        provider: u.provider,
+        base_url: u.base_url,
+        api_key: "",
+        model: u.model || "",
+      },
+      models: u.models || [],
       dirty: false,
     };
   } else if (selected.kind === "key") {
@@ -1072,6 +1106,168 @@ function applyHint(wrap, labelEl, inputEl, hint, mode) {
   }
 }
 
+// ---------- 探测模型 ----------
+// 探测必须先知道上游到底支持哪些模型，否则就是拿臆想的模型名去问，
+// 必然得到一个和真实可用性无关的假失败。
+function modelField(draft, opts) {
+  opts = opts || {};
+  const wrap = el("div", "f");
+  const l = el("label");
+  l.appendChild(el("span", null, "探测模型"));
+  const holder = el("div", "picker");
+  const btn = el("button", "picker-btn");
+  btn.type = "button";
+  btn.dataset.field = "model";
+  btn.textContent = draft.fields.model || "未选择模型";
+  btn.title = "探测时用哪个模型。先点右边「拉取模型」拿上游真实支持的清单";
+  const inp = el("input", "picker-input");
+  inp.type = "text";
+  inp.dataset.field = "model";
+  inp.value = draft.fields.model || "";
+  inp.placeholder = "模型名";
+  inp.style.display = "none";
+  // 模型名不走通用 setField：那个 syncField 是给监听 IP 用的，
+  // 会把模型名套上「本机回环 / 全部 IP」的样式和文案。
+  inp.oninput = () => {
+    draft.fields.model = inp.value;
+    draft.dirty = true;
+    btn.textContent = inp.value || "未选择模型";
+    refreshDirtyMarks();
+  };
+  holder.appendChild(btn);
+  holder.appendChild(inp);
+  l.appendChild(holder);
+  wrap.appendChild(l);
+
+  const row = el("div", "row");
+  const fetchBtn = mkBtn(
+    "",
+    "refresh",
+    "拉取模型",
+    "向上游 GET /v1/models 拉一份它真正支持的模型清单（只读，不计费）",
+    async () => {
+      if (draft.isNew) {
+        toast("先保存这条通道，再拉模型", "warn");
+        return;
+      }
+      fetchBtn.disabled = true;
+      fetchBtn.querySelector(".bt").textContent = "拉取中…";
+      try {
+        const res = await api("/api/upstreams/" + draft.id + "/models", { method: "POST" });
+        if (!res.ok) {
+          toast("拉取模型失败：" + (res.body || "HTTP " + res.status), "warn");
+          pushLog("warn", `拉取模型失败 ${draft.id}：HTTP ${res.status} ${res.body || ""}`);
+          return;
+        }
+        draft.models = res.models || [];
+        toast(`拉到 ${draft.models.length} 个模型`, "info");
+        pushLog("info", `拉取模型 ${draft.id}：${draft.models.length} 个（${draft.models.slice(0, 5).join("、")}${draft.models.length > 5 ? "…" : ""}）`);
+        renderPanels();
+      } finally {
+        fetchBtn.disabled = false;
+        fetchBtn.querySelector(".bt").textContent = "拉取模型";
+      }
+    }
+  );
+  row.appendChild(fetchBtn);
+  wrap.appendChild(row);
+
+  btn.onclick = (ev) => {
+    ev.stopPropagation();
+    openModelMenu(btn, holder, draft);
+  };
+  applyHint(
+    wrap,
+    l,
+    null,
+    "探测用的模型。选好之后「探测」才会发请求（只发极短的一条，可能计费）。",
+    opts.mode
+  );
+  return wrap;
+}
+
+function openModelMenu(btn, holder, draft) {
+  if (openPickerMenu) {
+    openPickerMenu.remove();
+    openPickerMenu = null;
+    return;
+  }
+  const menu = el("div", "picker-menu");
+  const models = draft.models || [];
+  const closeMenu = () => {
+    menu.remove();
+    if (openPickerMenu === menu) openPickerMenu = null;
+  };
+  if (!models.length) {
+    const tip = el("div", "picker-item pi-custom", "还没有模型清单，点「拉取模型」");
+    menu.appendChild(tip);
+  }
+  models.forEach((m) => {
+    const b = el(
+      "button",
+      "picker-item" + (m === draft.fields.model ? " on" : ""),
+      m
+    );
+    b.type = "button";
+    b.onclick = (ev) => {
+      ev.stopPropagation();
+      closeMenu();
+      draft.fields.model = m;
+      draft.dirty = true;
+      btn.textContent = m;
+      refreshDirtyMarks();
+      renderPanels();
+    };
+    menu.appendChild(b);
+  });
+  const custom = el("button", "picker-item pi-custom", "手动输入…");
+  custom.type = "button";
+  custom.onclick = (ev) => {
+    ev.stopPropagation();
+    closeMenu();
+    const inp = holder.querySelector("input.picker-input");
+    inp.style.display = "";
+    inp.focus();
+    inp.select();
+  };
+  menu.appendChild(custom);
+  menu.style.position = "fixed";
+  document.body.appendChild(menu);
+  const r = btn.getBoundingClientRect();
+  const mh = Math.min(menu.offsetHeight, 260);
+  const below = window.innerHeight - r.bottom;
+  const top = below < mh + 12 ? Math.max(8, r.top - mh - 4) : r.bottom + 4;
+  menu.style.left = r.left + "px";
+  menu.style.top = top + "px";
+  menu.style.minWidth = r.width + "px";
+  openPickerMenu = menu;
+  setTimeout(() => document.addEventListener("click", closeOnOutside, true), 0);
+  function closeOnOutside(e) {
+    if (holder.contains(e.target) || menu.contains(e.target)) return;
+    closeMenu();
+    document.removeEventListener("click", closeOnOutside, true);
+  }
+}
+
+// 探测按钮单独一行：没选模型就禁用，并说明为什么
+function probeRow(draft) {
+  const row = el("div", "row");
+  const probe = mkBtn(
+    "",
+    "probe",
+    "探测",
+    draft.fields.model
+      ? `用「${draft.fields.model}」发一次最小请求，检查连通性与凭据（可能计费）`
+      : "先选一个探测模型：点「拉取模型」拿上游真实支持的清单，或手动输入",
+    async () => {
+      await probeUpstream(draft.id, draft.fields.model);
+    }
+  );
+  probe.disabled = !draft.fields.model;
+  row.appendChild(probe);
+  return row;
+}
+
 // 分段单选（不用原生 select，避免重绘时残留空白弹层）
 function radioBlock(label, name, value, options, opts) {
   opts = opts || {};
@@ -1320,33 +1516,9 @@ function renderInline() {
       mode: "tooltip",
     })
   );
+  f.appendChild(modelField(draft, { mode: "tooltip" }));
   box.appendChild(f);
   // 图示：按钮文字前面的小图标（内联 SVG，无外部依赖）
-  const ICONS = {
-    save: '<path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8"/><path d="M7 3v5h8"/>',
-    probe: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>',
-    trash: '<path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/>',
-    lock: '<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
-    ban: '<circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/>',
-  };
-  const icon = (name) => {
-    const s = el("span", "ico");
-    s.innerHTML =
-      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
-      'stroke-linecap="round" stroke-linejoin="round">' +
-      (ICONS[name] || "") +
-      "</svg>";
-    return s;
-  };
-  const mkBtn = (cls, ico, label, title, onclick) => {
-    const b = el("button", "btn " + cls);
-    b.appendChild(icon(ico));
-    b.appendChild(el("span", "bt", label));
-    b.title = title;
-    b.onclick = onclick;
-    return b;
-  };
-
   const row = el("div", "row");
   const save = el("button", "btn primary");
   if (!draft.isNew) save.appendChild(icon("save"));
@@ -1355,15 +1527,12 @@ function renderInline() {
   save.onclick = () => saveDraft();
   row.appendChild(save);
   if (!draft.isNew) {
-    row.appendChild(
-      mkBtn("", "probe", "探测", "对这条上游发一次实际请求，检查连通性与凭据是否有效", () =>
-        probeUpstream(draft.id)
-      )
-    );
     const del = mkBtn("danger", "trash", "删除", "移除这条上游通道", () => deleteUpstream(draft.id));
     row.appendChild(del);
   }
   box.appendChild(row);
+  // 探测单独一行：要先选好模型才有意义
+  if (!draft.isNew) box.appendChild(probeRow(draft));
 
   if (!draft.isNew) {
     const row2 = el("div", "row");
@@ -1826,6 +1995,7 @@ function renderDock() {
         mode: "inline",
       })
     );
+    f.appendChild(modelField(draft, { mode: "inline" }));
     sec.appendChild(f);
     const row = el("div", "row");
     const save = el("button", "btn primary", draft.isNew ? "添加" : "保存");
@@ -1833,16 +2003,14 @@ function renderDock() {
     save.onclick = () => saveDraft();
     row.appendChild(save);
     if (!draft.isNew) {
-      const probe = el("button", "btn", "探测");
-      probe.title = "对这条上游发一次实际请求，检查连通性与凭据是否有效";
-      probe.onclick = () => probeUpstream(draft.id);
-      row.appendChild(probe);
       const del = el("button", "btn danger", "删除");
       del.title = "移除这条上游通道";
       del.onclick = () => deleteUpstream(draft.id);
       row.appendChild(del);
     }
     sec.appendChild(row);
+    // 探测单独一行：要先选好模型才有意义
+    if (!draft.isNew) sec.appendChild(probeRow(draft));
     sec.appendChild(
       el(
         "div",
@@ -1919,6 +2087,7 @@ async function saveDraft() {
       name: (draft.fields.name || "").trim() || draft.defaultName || "",
       provider: (draft.fields.provider || "").trim() || providerFromBaseUrl(norm.url),
       base_url: norm.url,
+      model: (draft.fields.model || "").trim(),
     };
     if (norm.note) toast("Base URL 已自动纠正：" + norm.note, "warn");
     if (draft.fields.api_key) body.api_key = draft.fields.api_key;
@@ -1969,7 +2138,8 @@ async function newUpstream() {
     id: "__new__",
     isNew: true,
     defaultName: defName,
-    fields: { name: defName, provider: "", base_url: "", api_key: "" },
+    fields: { name: defName, provider: "", base_url: "", api_key: "", model: "" },
+    models: [],
     dirty: false,
   };
   renderTopology();
@@ -1985,10 +2155,19 @@ async function deleteUpstream(id) {
   renderPanels();
 }
 
-async function probeUpstream(id) {
-  const res = await api("/api/upstreams/" + id + "/probe", { method: "POST" });
+async function probeUpstream(id, modelArg) {
+  const res = await api("/api/upstreams/" + id + "/probe", {
+    method: "POST",
+    headers: jsonH(),
+    body: JSON.stringify({ model: modelArg || (draft && draft.fields.model) || "" }),
+  });
   const detail = `HTTP ${res.status} · ${res.ms}ms`;
-  pushLog(res.status >= 200 && res.status < 300 ? "info" : "warn", `探测上游 ${id}：${detail} ${res.body || ""}`);
+  const up = (STATE.upstreams || []).find((x) => x.id === id);
+  const who = up ? up.name : id;
+  pushLog(
+    res.status >= 200 && res.status < 300 ? "info" : "warn",
+    `探测上游 ${who}：${detail} ${res.body || ""}`
+  );
   toast("探测完成 " + detail, res.status >= 200 && res.status < 300 ? "" : "warn");
 }
 

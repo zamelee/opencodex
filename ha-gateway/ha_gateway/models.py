@@ -61,6 +61,7 @@ class Upstream:
     protocol: str = "openai-responses"
     enabled: bool = True
     weight: int = 1
+    model: str = ""  # 探测用的模型名（探测前先从上游拉模型列表选一个）
 
 
 @dataclass
