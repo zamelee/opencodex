@@ -114,14 +114,18 @@ main {
   flex: 1;
   display: flex;
   min-height: 0;
+  /* 兜底：画布再挤也不许画到日志面板上去 */
+  overflow: hidden;
 }
 
 .stage {
   position: relative;
   flex: 1;
   min-width: 0;
-  /* 窗口太矮时不要把上下游挤到一起，页面整体滚动 */
-  min-height: 460px;
+  /* 画布高度由分隔条决定，别再撑一个 min-height：
+     之前 min-height:460px 会让画布溢出 main，
+     下半截（下游那一带）直接画到日志面板上面去。 */
+  min-height: 0;
   overflow: hidden;
   background-image: radial-gradient(circle, #e6eaf0 1px, transparent 1px);
   background-size: 26px 26px;

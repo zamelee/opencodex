@@ -494,12 +494,17 @@ function layout() {
   if (keys.length === 0) keyX = [off + w / 2];
   else if (keys.length === 1) keyX = [off + w / 2, Math.min(off + w / 2 + 190, off + w - 90)];
   else keyX = spread(keys.length + 1, w);
-  const gw = { x: off + w / 2, y: h / 2 };
+  // 三行（上游 / 网关 / 下游）的高度要跟着画布走：
+  // 画布被分隔条压矮时收紧行距，否则下面的行会溢出画布、
+  // 画到日志面板上面去。
+  const tight = h < 430;
   // 上游这一行往下留点空间：左上角要放"路由模式"按钮和"上游"区标签，
   // 贴着画布顶边会压到第一个通道框。
-  const topY = 88;
-  const botY = h - 76;
-  return { w, h, ups, keys, slotCount, upX, keyX, gw, topY, botY, addX: upX[slotCount] };
+  const topY = tight ? 58 : 88;
+  const botY = h - (tight ? 40 : 76);
+  // 网关夹在两行之间（原来用 h/2，画布一矮就压到上游行上）
+  const gw = { x: off + w / 2, y: (topY + botY) / 2 };
+  return { w, h, ups, keys, slotCount, upX, keyX, gw, topY, botY, tight, addX: upX[slotCount] };
 }
 
 function healthClass(u) {
@@ -917,10 +922,12 @@ function renderTopology() {
   // 上游 / 下游 区域底色
   const zoneUp = $("#zoneUp");
   const zoneDown = $("#zoneDown");
-  zoneUp.style.top = L.topY - 50 + "px";
-  zoneUp.style.height = "100px";
-  zoneDown.style.top = L.botY - 50 + "px";
-  zoneDown.style.height = "100px";
+  const zoneH = L.tight ? 86 : 100;
+  const zoneOff = L.tight ? 40 : 50;
+  zoneUp.style.top = L.topY - zoneOff + "px";
+  zoneUp.style.height = zoneH + "px";
+  zoneDown.style.top = L.botY - zoneOff + "px";
+  zoneDown.style.height = zoneH + "px";
 
   const edges = [];
   for (let i = 0; i < L.slotCount; i++) {
@@ -2314,8 +2321,25 @@ window.addEventListener("keydown", async (ev) => {
 (() => {
   const sp = $("#splitter");
   if (!sp) return;
+  // 画布最小高度：上游 / 网关 / 下游三行至少要放得下，
+  // 再矮就会挤到日志面板上面去。
+  const MIN_STAGE = 360;
+  function chromeH() {
+    const tb = document.querySelector(".topbar");
+    const desc = document.querySelector(".topbar-desc");
+    return (tb ? tb.offsetHeight : 0) + (desc ? desc.offsetHeight : 0) + sp.offsetHeight;
+  }
+  function maxLogH() {
+    return Math.max(80, window.innerHeight - chromeH() - MIN_STAGE);
+  }
+  function setLogH(h) {
+    const v = Math.round(Math.max(80, Math.min(h, maxLogH())));
+    document.documentElement.style.setProperty("--log-h", v + "px");
+    localStorage.setItem("ha.logH", String(v));
+    return v;
+  }
   const saved = localStorage.getItem("ha.logH");
-  if (saved) document.documentElement.style.setProperty("--log-h", saved + "px");
+  if (saved) setLogH(Number(saved));
   let dragging = false;
   let pending = false;
   sp.addEventListener("pointerdown", (e) => {
@@ -2329,11 +2353,7 @@ window.addEventListener("keydown", async (ev) => {
   sp.addEventListener("pointermove", (e) => {
     if (!dragging) return;
     const rect = $("#logpane").getBoundingClientRect();
-    const h = Math.round(
-      Math.max(80, Math.min(rect.bottom - e.clientY, window.innerHeight - 260))
-    );
-    document.documentElement.style.setProperty("--log-h", h + "px");
-    localStorage.setItem("ha.logH", String(h));
+    setLogH(rect.bottom - e.clientY);
     if (!pending) {
       pending = true;
       requestAnimationFrame(() => {
@@ -2352,6 +2372,14 @@ window.addEventListener("keydown", async (ev) => {
   };
   sp.addEventListener("pointerup", stop);
   sp.addEventListener("pointercancel", stop);
+  // 窗口变了，之前存的高度可能已经超出上限，收回来
+  window.addEventListener("resize", () => {
+    const cur = parseInt(
+      getComputedStyle(document.documentElement).getPropertyValue("--log-h"),
+      10
+    );
+    if (Number.isFinite(cur)) setLogH(cur);
+  });
 })();
 
 // ---------- 连线动画（流动虚线 + 请求数据球） ----------
