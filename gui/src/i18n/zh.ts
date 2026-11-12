@@ -538,6 +538,15 @@ export const zh: Record<TKey, string> = {
   "logs.detailTokenGap": "估算与上游计数的差额",
   "logs.detailTokenGapNote": "上游按它自己的口径数这个请求；倍数越大，我们的刹车就越早动手。",
 
+  "debug.memory": "内存",
+  "debug.memoryOver": "已超限",
+  "debug.memoryRss": "常驻内存 / 上限",
+  "debug.memoryHeap": "JS 堆",
+  "debug.memoryReplay": "重放缓存（条目 / 占用 / 预算）",
+  "debug.memoryUsageLog": "usage 日志",
+  "debug.memoryRequestLog": "请求日志",
+  "debug.memoryUptime": "运行时长",
+
   "debug.title": "调试",
   "debug.subtitle": "可选的 provider transport 与 usage 提取诊断。请求错误和 502 在 Logs 页面。",
   "debug.debug": "Provider debug",

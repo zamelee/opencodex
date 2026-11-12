@@ -29,6 +29,7 @@ import { gateLimitSettings } from "../providers/gate-limit";
 import { readUsageEntries } from "../usage/log";
 import { getUsageDebugLogEntries } from "../usage/debug";
 import { getConsoleLogEntries } from "../lib/console-log-buffer";
+import { memorySnapshot } from "../lib/memory-guard";
 import { parseRange, summarizeUsage } from "../usage/summary";
 import { stripCodexRuntimeProviderFields } from "../codex/auth-context";
 import { getDebugLogEntries } from "../lib/debug-log-buffer";
@@ -345,6 +346,10 @@ export async function handleManagementAPI(req: Request, url: URL, config: OcxCon
   if (url.pathname === "/api/debug/console-logs" && req.method === "GET") {
     const { after, limit, levels } = parseConsoleLogQuery(url);
     return jsonResponse(getConsoleLogEntries({ after, limit, levels }));
+  }
+
+  if (url.pathname === "/api/debug/memory" && req.method === "GET") {
+    return jsonResponse(memorySnapshot());
   }
 
   if (url.pathname === "/api/debug" && req.method === "PUT") {

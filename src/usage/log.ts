@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, appendFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, appendFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getConfigDir } from "../config";
 import { usageDisplayTotalTokens } from "./totals";
@@ -21,6 +21,27 @@ export interface PersistedUsageEntry {
 
 export function usageLogPath(): string {
   return join(getConfigDir(), "usage.jsonl");
+}
+
+/**
+ * The usage log never grows past this.
+ *
+ * The request log has been capped by file size for a while; the usage log did not,
+ * so it grew without bound (22.8 MB on the dev box after a few days) and every
+ * dashboard read pulled the whole file into memory and parsed it line by line.
+ * Same policy as the request log: cap by SIZE, drop the OLDEST lines.
+ */
+export const USAGE_LOG_MAX_BYTES = 8 * 1024 * 1024;
+
+/** After a trim we keep this fraction of the bytes, so trimming is amortized. */
+const USAGE_LOG_KEEP_RATIO = 0.8;
+
+/** The cap in bytes, overridable for small boxes and for tests. */
+export function usageLogMaxBytes(): number {
+  const raw = process.env["OPENCODEX_USAGE_LOG_MAX_BYTES"]?.trim();
+  const parsed = raw ? Number(raw) : Number.NaN;
+  if (Number.isFinite(parsed) && parsed > 0) return Math.floor(parsed);
+  return USAGE_LOG_MAX_BYTES;
 }
 
 export function usageTotalTokens(usage: OcxUsage | undefined): number | undefined {
@@ -82,6 +103,52 @@ export function appendUsageEntry(entry: PersistedUsageEntry): void {
   const path = usageLogPath();
   appendFileSync(path, `${JSON.stringify(normalizeUsageEntry(entry))}\n`, { encoding: "utf-8", mode: 0o600 });
   try { chmodSync(path, 0o600); } catch { /* best-effort on platforms that ignore chmod */ }
+  enforceUsageLogLimit(path);
+}
+
+/** Current size of the usage log in bytes (0 when it does not exist). */
+export function usageLogBytes(): number {
+  try {
+    return statSync(usageLogPath()).size;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Keep the usage log under its cap by dropping the oldest lines.
+ * Runs only when the file is over the cap, and keeps KEEP_RATIO of the bytes,
+ * so trimming is amortized instead of happening on every write.
+ */
+function enforceUsageLogLimit(path: string, limit = usageLogMaxBytes()): void {
+  let size: number;
+  try {
+    size = statSync(path).size;
+  } catch {
+    return;
+  }
+  if (size <= limit) return;
+  const budget = Math.floor(limit * USAGE_LOG_KEEP_RATIO);
+  let text: string;
+  try {
+    text = readFileSync(path, "utf-8");
+  } catch {
+    return;
+  }
+  const lines = text.split(/\r?\n/).filter(line => line.trim() !== "");
+  const kept: string[] = [];
+  let bytes = 0;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const sizeOfLine = Buffer.byteLength(lines[i]!, "utf-8") + 1;
+    if (bytes + sizeOfLine > budget) break;
+    bytes += sizeOfLine;
+    kept.unshift(lines[i]!);
+  }
+  try {
+    writeFileSync(path, kept.length > 0 ? `${kept.join("\n")}\n` : "", { encoding: "utf-8", mode: 0o600 });
+  } catch {
+    /* leave the oversized file alone rather than losing it entirely */
+  }
 }
 
 export function readUsageEntries(): PersistedUsageEntry[] {

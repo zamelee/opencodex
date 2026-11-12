@@ -24,6 +24,18 @@ interface ConsoleLogEntry {
   line: string;
 }
 
+interface MemorySnapshot {
+  rssBytes: number;
+  heapUsedBytes: number;
+  externalBytes: number;
+  uptimeSeconds: number;
+  limitBytes: number;
+  overLimit: boolean;
+  responseState: { entries: number; bytes: number; maxBytes: number };
+  usageLogBytes: number;
+  requestLogBytes: number;
+}
+
 type LogStream = "provider" | "usage" | "console";
 
 /** Console-log level filter. "all" keeps every level. */
@@ -35,6 +47,24 @@ const DEBUG_FLAGS = [
   { flag: "usage", hint: "debug.hintUsage", sensitivity: "debug.sensitivityHigh", note: "debug.sensitivityHighNote" },
   { flag: "injection", hint: "debug.hintInjection", sensitivity: "debug.sensitivityLow", note: "debug.sensitivityLowNote" },
 ] as const;
+
+/** Bytes as a short human string (MB / GB). */
+function mb(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 MB";
+  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+  return `${Math.round(bytes / 1024 / 1024)} MB`;
+}
+
+/** Seconds as a short human duration. */
+function formatUptime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 0) return "0m";
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  return `${minutes}m`;
+}
 
 export default function Debug({ apiBase }: { apiBase: string }) {
   const { t } = useI18n();
@@ -53,6 +83,10 @@ export default function Debug({ apiBase }: { apiBase: string }) {
   const dragOrigin = useRef<{ x: number; y: number } | null>(null);
   const stopFollowing = useCallback(() => setFollow(prev => (prev ? false : prev)), []);
   const [refreshing, setRefreshing] = useState(false);
+  // The memory panel is what makes an RSS blowup visible: the previous_response_id
+  // replay cache used to be capped by entry count only, so it could grow for hours
+  // before anything on screen said so.
+  const [memory, setMemory] = useState<MemorySnapshot | null>(null);
   const afterRef = useRef(0);
   const logRef = useRef<HTMLPreElement | null>(null);
 
@@ -65,6 +99,18 @@ export default function Debug({ apiBase }: { apiBase: string }) {
     };
     void fetchDebug();
     const interval = setInterval(() => void fetchDebug(), 2000);
+    return () => clearInterval(interval);
+  }, [apiBase]);
+
+  useEffect(() => {
+    const fetchMemory = async () => {
+      try {
+        const res = await fetch(`${apiBase}/api/debug/memory`);
+        if (res.ok) setMemory(await res.json());
+      } catch { /* ignore */ }
+    };
+    void fetchMemory();
+    const interval = setInterval(() => void fetchMemory(), 2000);
     return () => clearInterval(interval);
   }, [apiBase]);
 
@@ -277,6 +323,41 @@ export default function Debug({ apiBase }: { apiBase: string }) {
           </div>
 
           <p className="debug-remote-hint">{t("debug.hintRemote")}</p>
+        </div>
+      )}
+
+      {memory && (
+        <div className="card debug-memory">
+          <div className="debug-switch-legend">
+            <span className="muted">{t("debug.memory")}</span>
+            {memory.overLimit && <span className="badge badge-red">{t("debug.memoryOver")}</span>}
+          </div>
+          <div className="debug-memory-grid">
+            <div className="debug-memory-item">
+              <span className="muted">{t("debug.memoryRss")}</span>
+              <b>{mb(memory.rssBytes)} / {mb(memory.limitBytes)}</b>
+            </div>
+            <div className="debug-memory-item">
+              <span className="muted">{t("debug.memoryHeap")}</span>
+              <b>{mb(memory.heapUsedBytes)}</b>
+            </div>
+            <div className="debug-memory-item">
+              <span className="muted">{t("debug.memoryReplay")}</span>
+              <b>{memory.responseState.entries} · {mb(memory.responseState.bytes)} / {mb(memory.responseState.maxBytes)}</b>
+            </div>
+            <div className="debug-memory-item">
+              <span className="muted">{t("debug.memoryUsageLog")}</span>
+              <b>{mb(memory.usageLogBytes)}</b>
+            </div>
+            <div className="debug-memory-item">
+              <span className="muted">{t("debug.memoryRequestLog")}</span>
+              <b>{mb(memory.requestLogBytes)}</b>
+            </div>
+            <div className="debug-memory-item">
+              <span className="muted">{t("debug.memoryUptime")}</span>
+              <b>{formatUptime(memory.uptimeSeconds)}</b>
+            </div>
+          </div>
         </div>
       )}
 

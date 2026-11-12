@@ -25,6 +25,7 @@ import { loadLearnedLimits } from "../lib/upstream-prompt-budget";
 import { loadLearnedScales } from "../lib/upstream-token-scale";
 import { loadGateCircuit } from "../lib/upstream-gate-circuit";
 import { installConsoleLogCapture } from "../lib/console-log-capture";
+import { installMemoryGuard } from "../lib/memory-guard";
 import { collectConsoleLogHistory, resolveConsoleLogPaths } from "../lib/console-log-history";
 import { seedConsoleLogHistory } from "../lib/console-log-buffer";
 import { hydrateRequestLog } from "./request-log";
@@ -161,6 +162,17 @@ export function startServer(port?: number) {
   // it. Installed FIRST, before anything logs, so the earliest startup lines
   // are captured too. The original console still runs — this only mirrors.
   installConsoleLogCapture();
+  // Memory ceiling: when RSS crosses the limit (env override, else half the
+  // machine's RAM), the previous_response_id replay cache is trimmed so the
+  // process gives the memory back instead of being OOM-killed. See
+  // lib/memory-guard.ts for why this exists.
+  installMemoryGuard((dropped, snapshot) => {
+    console.warn(
+      `[memory] RSS ${Math.round(snapshot.rssBytes / 1024 / 1024)}MB 超过上限 `
+      + `${Math.round(snapshot.limitBytes / 1024 / 1024)}MB，释放重放缓存 ${dropped} 条，`
+      + `当前缓存 ${Math.round(snapshot.responseState.bytes / 1024 / 1024)}MB`,
+    );
+  });
   // Restore the previous run's console output from the launcher's rotated log files so
   // a restart does not erase the story the operator was reading.
   try {

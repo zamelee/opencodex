@@ -539,6 +539,15 @@ export const en = {
   "logs.detailTokenGapNote": "The upstream counts this request on its own scale; the bigger the factor, the earlier our brake acts.",
 
   // debug page
+  "debug.memory": "Memory",
+  "debug.memoryOver": "Over limit",
+  "debug.memoryRss": "Resident / limit",
+  "debug.memoryHeap": "JS heap",
+  "debug.memoryReplay": "Replay cache (entries / used / budget)",
+  "debug.memoryUsageLog": "Usage log",
+  "debug.memoryRequestLog": "Request log",
+  "debug.memoryUptime": "Uptime",
+
   "debug.title": "Debug",
   "debug.subtitle": "Opt-in provider transport and usage-extraction diagnostics. Request errors and 502s stay on Logs.",
   "debug.debug": "Provider debug",

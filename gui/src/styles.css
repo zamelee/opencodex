@@ -2367,6 +2367,23 @@ select.input { appearance: none; }
   letter-spacing: 0.06em;
   margin-bottom: 10px;
 }
+/* 内存面板：RSS / 上限 / 重放缓存 / 日志文件，一眼看出谁在涨 */
+.debug-memory-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 10px 22px;
+}
+.debug-memory-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.debug-memory-item b {
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
 .debug-switch-list {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));

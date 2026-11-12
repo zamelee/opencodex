@@ -538,6 +538,15 @@ export const ko: Record<TKey, string> = {
   "logs.detailTokenGap": "예상과 업스트림 카운트의 차이",
   "logs.detailTokenGapNote": "업스트림은 자체 기준으로 이 요청을 계산합니다. 배수가 클수록 브레이크가 더 일찍 동작합니다.",
 
+  "debug.memory": "메모리",
+  "debug.memoryOver": "한도 초과",
+  "debug.memoryRss": "상주 / 한도",
+  "debug.memoryHeap": "JS 힙",
+  "debug.memoryReplay": "리플레이 캐시(항목 / 사용 / 예산)",
+  "debug.memoryUsageLog": "사용량 로그",
+  "debug.memoryRequestLog": "요청 로그",
+  "debug.memoryUptime": "실행 시간",
+
   "debug.title": "디버그",
   "debug.subtitle": "선택적 provider transport 및 usage 추출 진단. 요청 오류와 502는 Logs에 표시됩니다.",
   "debug.debug": "Provider debug",
