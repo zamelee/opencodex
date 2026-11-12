@@ -303,6 +303,25 @@ main {
   right: auto;
 }
 
+/* 健康状态文字徽标：「断」= 不可用，「降」= 降级。
+   颜色之外再给一个字，灰度截图或色弱时也读得出来。 */
+.node .n-marks .n-status {
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 15px;
+  font-weight: 600;
+  color: #fff;
+  cursor: help;
+  white-space: nowrap;
+}
+.node .n-marks .n-status.down {
+  background: var(--red, #b3261e);
+}
+.node .n-marks .n-status.degraded {
+  background: var(--amber, #c58a00);
+}
+
 /* 通道配色：顶条用通道色，标题也跟着染。
    边框仍由健康状态（绿/黄/红）决定，两套语义不打架。 */
 .node.ch-colored::before {

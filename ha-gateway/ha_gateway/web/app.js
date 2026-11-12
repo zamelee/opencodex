@@ -586,7 +586,17 @@ function buildUpstreamNode(u, i) {
   }
   const marks = el("div", "n-marks");
   n.appendChild(el("div", "n-title", u.name));
-  n.appendChild(el("div", "n-sub", u.health === "down" ? u.provider + " · 不可用" : u.provider));
+  n.appendChild(el("div", "n-sub", u.provider));
+  // 健康状态文字徽标：颜色之外再给一个字，
+  // 灰度截图、色弱、远距离盯着屏幕时才不至于把「断」看成「降」。
+  if (u.health === "down" || u.health === "degraded") {
+    const down = u.health === "down";
+    const chip = el("div", "n-status " + (down ? "down" : "degraded"), down ? "断" : "降");
+    chip.title = down
+      ? "不可用：探测或真实请求失败，已退出自动路由候选"
+      : "降级：最近有失败但仍可用，自动路由会优先绕开它";
+    marks.appendChild(chip);
+  }
   if ((STATE.settings || {}).forced_upstream_id === u.id) {
     const lock = el("div", "node-lock", "锁");
     lock.title = "已手动锁定到这条通道";
@@ -950,7 +960,7 @@ function renderTopology() {
       nodePos[u.id] = { x, y: L.topY };
       const hc = healthClass(u);
       const sel = selected && selected.kind === "upstream" && selected.id === u.id ? " sel" : "";
-      const sub = u.health === "down" ? u.provider + " · 不可用" : u.provider;
+      const sub = u.provider;
       const miss = missingFields(u).join(",");
       want.push({
         key: "up:" + u.id,
@@ -962,6 +972,9 @@ function renderTopology() {
           tag,
           u.name,
           sub,
+          // 健康状态进签名：徽标「断 / 降」是靠它出现的，
+          // 不进签名的话状态变化时节点不会重建
+          u.health || "",
           u.base_url,
           miss,
           (STATE.settings || {}).forced_upstream_id === u.id ? "locked" : "",
