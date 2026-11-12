@@ -501,7 +501,9 @@ function layout() {
   // 上游这一行往下留点空间：左上角要放"路由模式"按钮和"上游"区标签，
   // 贴着画布顶边会压到第一个通道框。
   const topY = tight ? 58 : 88;
-  const botY = h - (tight ? 40 : 76);
+  // 节点是按中心定位的（transform: translate(-50%,-50%)），
+  // 下游节点高约 84px，中心留 48px 刚好贴着画布底边不越界。
+  const botY = h - (tight ? 48 : 76);
   // 网关夹在两行之间（原来用 h/2，画布一矮就压到上游行上）
   const gw = { x: off + w / 2, y: (topY + botY) / 2 };
   return { w, h, ups, keys, slotCount, upX, keyX, gw, topY, botY, tight, addX: upX[slotCount] };
