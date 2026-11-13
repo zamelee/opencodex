@@ -25,7 +25,8 @@ import { loadLearnedLimits } from "../lib/upstream-prompt-budget";
 import { loadLearnedScales } from "../lib/upstream-token-scale";
 import { loadGateCircuit } from "../lib/upstream-gate-circuit";
 import { installConsoleLogCapture } from "../lib/console-log-capture";
-import { installMemoryGuard } from "../lib/memory-guard";
+import { installMemoryGuard, memoryLimits } from "../lib/memory-guard";
+import { memoryProfile } from "../lib/memory-profile";
 import { collectConsoleLogHistory, resolveConsoleLogPaths } from "../lib/console-log-history";
 import { seedConsoleLogHistory } from "../lib/console-log-buffer";
 import { hydrateRequestLog } from "./request-log";
@@ -162,17 +163,46 @@ export function startServer(port?: number) {
   // it. Installed FIRST, before anything logs, so the earliest startup lines
   // are captured too. The original console still runs — this only mirrors.
   installConsoleLogCapture();
-  // Memory ceiling: when RSS crosses the limit (env override, else half the
-  // machine's RAM), the previous_response_id replay cache is trimmed so the
-  // process gives the memory back instead of being OOM-killed. See
-  // lib/memory-guard.ts for why this exists.
-  installMemoryGuard((dropped, snapshot) => {
+  // Memory ceiling: PRIVATE COMMIT is the main signal (the working set is
+  // auxiliary), and when it crosses the line the previous_response_id replay
+  // cache is trimmed so the process gives the memory back instead of being
+  // OOM-killed. See lib/memory-guard.ts for why this exists.
+  installMemoryGuard((check, snapshot) => {
+    const mb = (bytes: number) => Math.round(bytes / 1024 / 1024);
     console.warn(
-      `[memory] RSS ${Math.round(snapshot.rssBytes / 1024 / 1024)}MB 超过上限 `
-      + `${Math.round(snapshot.limitBytes / 1024 / 1024)}MB，释放重放缓存 ${dropped} 条，`
-      + `当前缓存 ${Math.round(snapshot.responseState.bytes / 1024 / 1024)}MB`,
+      `[memory] 状态=${check.state} 私有提交 ${mb(check.privateBytes)}MB `
+      + `(告警 ${mb(check.warnBytes)}MB / 硬线 ${mb(check.hardBytes)}MB) `
+      + `工作集 ${mb(check.workingSetBytes)}MB，释放重放缓存 ${check.dropped} 条，`
+      + `当前缓存 ${mb(snapshot.responseState.bytes)}MB / ${mb(snapshot.responseState.maxBytes)}MB`,
     );
+    // Trimming the replay cache is the first response. If that freed nothing,
+    // the memory is held elsewhere (a leak we do not own yet) and the only
+    // clean cure is a fresh process — but only when the operator asked for it.
+    if (
+      check.state === "critical"
+      && check.dropped === 0
+      && process.env["OPENCODEX_RSS_EXIT_ON_LIMIT"] === "1"
+    ) {
+      console.error(
+        "[memory] 裁剪后仍超硬线（内存不在重放缓存里），按 OPENCODEX_RSS_EXIT_ON_LIMIT 退出，交给守护进程重启",
+      );
+      void drainAndShutdown(undefined, 15_000).then(() => process.exit(1));
+    }
   });
+  // Print the effective memory configuration ONCE at startup. Two boxes running the
+  // same build can end up with different budgets (the profile scales with RAM),
+  // and a limit nobody can see is a limit nobody can debug.
+  {
+    const limits = memoryLimits();
+    const profile = memoryProfile();
+    console.log(
+      `[memory] 机器内存 ${Math.round(profile.ramBytes / 1024 / 1024 / 1024)}GB 档位=${profile.tier} `
+      + `来源=${limits.source} 重放缓存预算=${Math.round(profile.replayBudgetBytes / 1024 / 1024)}MB `
+      + `私有提交告警=${Math.round(limits.warnBytes / 1024 / 1024)}MB `
+      + `硬线=${Math.round(limits.hardBytes / 1024 / 1024)}MB `
+      + `工作集告警=${Math.round(limits.workingSetWarnBytes / 1024 / 1024)}MB`,
+    );
+  }
   // Restore the previous run's console output from the launcher's rotated log files so
   // a restart does not erase the story the operator was reading.
   try {

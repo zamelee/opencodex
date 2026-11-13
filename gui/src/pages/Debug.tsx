@@ -25,13 +25,23 @@ interface ConsoleLogEntry {
 }
 
 interface MemorySnapshot {
-  rssBytes: number;
+  workingSetBytes: number;
+  privateBytes: number;
+  pagefileBytes: number;
+  precise: boolean;
   heapUsedBytes: number;
   externalBytes: number;
   uptimeSeconds: number;
+  warnBytes: number;
   limitBytes: number;
+  workingSetWarnBytes: number;
+  limitsSource: "env" | "profile";
+  tier: string;
+  ramBytes: number;
+  availablePhysicalBytes: number;
+  state: "normal" | "warning" | "critical";
   overLimit: boolean;
-  responseState: { entries: number; bytes: number; maxBytes: number };
+  responseState: { entries: number; bytes: number; maxBytes: number; sessions: number; evicted: number };
   usageLogBytes: number;
   requestLogBytes: number;
 }
@@ -331,11 +341,18 @@ export default function Debug({ apiBase }: { apiBase: string }) {
           <div className="debug-switch-legend">
             <span className="muted">{t("debug.memory")}</span>
             {memory.overLimit && <span className="badge badge-red">{t("debug.memoryOver")}</span>}
+            {memory.state === "warning" && !memory.overLimit && (
+              <span className="badge badge-warn">{t("debug.memoryWarning")}</span>
+            )}
           </div>
           <div className="debug-memory-grid">
             <div className="debug-memory-item">
-              <span className="muted">{t("debug.memoryRss")}</span>
-              <b>{mb(memory.rssBytes)} / {mb(memory.limitBytes)}</b>
+              <span className="muted">{t("debug.memoryPrivate")}</span>
+              <b>{mb(memory.privateBytes)} / {mb(memory.warnBytes)} · {mb(memory.limitBytes)}</b>
+            </div>
+            <div className="debug-memory-item">
+              <span className="muted">{t("debug.memoryWorkingSet")}</span>
+              <b>{mb(memory.workingSetBytes)} / {mb(memory.workingSetWarnBytes)}</b>
             </div>
             <div className="debug-memory-item">
               <span className="muted">{t("debug.memoryHeap")}</span>
@@ -343,7 +360,7 @@ export default function Debug({ apiBase }: { apiBase: string }) {
             </div>
             <div className="debug-memory-item">
               <span className="muted">{t("debug.memoryReplay")}</span>
-              <b>{memory.responseState.entries} · {mb(memory.responseState.bytes)} / {mb(memory.responseState.maxBytes)}</b>
+              <b>{memory.responseState.entries} · {memory.responseState.sessions} · {mb(memory.responseState.bytes)} / {mb(memory.responseState.maxBytes)}</b>
             </div>
             <div className="debug-memory-item">
               <span className="muted">{t("debug.memoryUsageLog")}</span>
@@ -356,6 +373,10 @@ export default function Debug({ apiBase }: { apiBase: string }) {
             <div className="debug-memory-item">
               <span className="muted">{t("debug.memoryUptime")}</span>
               <b>{formatUptime(memory.uptimeSeconds)}</b>
+            </div>
+            <div className="debug-memory-item">
+              <span className="muted">{t("debug.memoryMachine")}</span>
+              <b>{mb(memory.ramBytes)} · {memory.tier} · {memory.limitsSource}</b>
             </div>
           </div>
         </div>

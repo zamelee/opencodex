@@ -7,7 +7,13 @@ import {
 import { parseRequest } from "../responses/parser";
 import { buildCompactV1Output, COMPACT_PROMPT, decodeCompactionSummary, extractCompactUserMessages } from "../responses/compaction";
 import { FORWARD_HEADERS } from "../adapters/openai-responses";
-import { expandPreviousResponseInput, previousResponseConversationId, rememberResponseState } from "../responses/state";
+import {
+  expandPreviousResponseInput,
+  previousResponseConversationId,
+  rememberResponseState,
+  replayStateLookup,
+} from "../responses/state";
+import { checkMemoryPressure } from "../lib/memory-guard";
 import { routeModel } from "../router";
 import { isInjectionDebugEnabled } from "../lib/debug-settings";
 import { modelInList, namespacedToolName } from "../types";
@@ -507,6 +513,19 @@ export async function handleResponses(
   const originalBody = body;
   body = expandPreviousResponseInput(body);
   const previousResponseInputExpanded = body !== originalBody;
+  // Memory check on the request path, not only on the 30 s timer: a single turn
+  // can allocate hundreds of megabytes of base64 images and finish between two
+  // ticks, so the timer alone is a monitor, not a guard.
+  {
+    const check = checkMemoryPressure();
+    if (check.changed) {
+      console.warn(
+        `[memory] 状态=${check.state} 私有提交 ${Math.round(check.privateBytes / 1024 / 1024)}MB `
+        + `(告警 ${Math.round(check.warnBytes / 1024 / 1024)}MB / 硬线 ${Math.round(check.hardBytes / 1024 / 1024)}MB)`
+        + `，释放重放缓存 ${check.dropped} 条`,
+      );
+    }
+  }
 
   // Spawn-message compatibility (both directions): agent_message task payloads ride in
   // encrypted_content slots as plaintext. Rewrite them to input_text on the RAW body BEFORE
@@ -530,6 +549,18 @@ export async function handleResponses(
     parsed._cursorConversationId = previousResponseConversationId(parsed.previousResponseId);
   } catch (err) {
     return formatErrorResponse(400, "invalid_request_error", err instanceof Error ? err.message : String(err));
+  }
+  // Diagnostics for a previous_response_id the local replay cache could not
+  // expand. A local miss is NOT a failure by itself -- the upstream keeps its own
+  // response store and may resolve the id on its own -- but we want to know which
+  // kind of miss it was when the upstream refuses the chain.
+  const replayLookup = parsed.previousResponseId ? replayStateLookup(parsed.previousResponseId) : null;
+  if (replayLookup && !replayLookup.found) {
+    console.warn(
+      `[responses] previous_response_id ${parsed.previousResponseId} 不在本地重放缓存中`
+      + `${replayLookup.evictedByUs ? "（本代理此前因内存预算淘汰了它）" : "（本代理从未缓存过它）"}`
+      + `；本轮交给上游解析`,
+    );
   }
   logCtx.requestedModel = parsed.modelId;
   logCtx.requestedEffort = parsed.options.reasoning;
@@ -1479,6 +1510,26 @@ export async function handleResponses(
           "upstream_error",
           `上游转发时请求体损坏（upstream received a malformed request body）：`
           + `已重试 ${malformedBodyRetries} 次仍未成功。原始信息: ${redactSecretString(upstreamMessage.slice(0, 300))}`,
+        );
+      }
+      // The upstream could not resolve the chain either. If the local replay cache
+      // had also dropped that id, say so: a silent "context got shorter" is much
+      // harder to diagnose than a named cause.
+      if (
+        parsed.previousResponseId
+        && replayLookup
+        && !replayLookup.found
+        && /previous_response_id|previous response|response_id.*not found/i.test(errorText)
+      ) {
+        return formatErrorResponse(
+          upstreamResponse.status,
+          "upstream_error",
+          `Provider error ${upstreamResponse.status}: 上游也无法解析 previous_response_id `
+          + `${parsed.previousResponseId}；`
+          + (replayLookup.evictedByUs
+            ? "本代理的本地重放缓存此前因内存预算淘汰了该轮次（上下文只能由客户端重新发送）。"
+            : "本代理本地也没有该轮次的缓存。")
+          + ` 原始信息: ${redactSecretString(upstreamMessage.slice(0, 300))}`,
         );
       }
       return formatErrorResponse(upstreamResponse.status, "upstream_error", `Provider error ${upstreamResponse.status}: ${redactSecretString(upstreamMessage.slice(0, 500))}`);

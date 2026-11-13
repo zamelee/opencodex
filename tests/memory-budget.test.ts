@@ -9,6 +9,7 @@ import {
   clearResponseStateMemoryForTests,
   expandPreviousResponseInput,
   rememberResponseState,
+  replayStateLookup,
   responseStateStats,
 } from "../src/responses/state";
 import { appendUsageEntry, readUsageEntries, usageLogBytes } from "../src/usage/log";
@@ -116,10 +117,13 @@ describe("memory budgets", () => {
       { id: "resp_snapshot", output: [{ type: "message", content: "hi" }], status: "completed" },
     );
     const snapshot = memorySnapshot();
-    expect(snapshot.rssBytes).toBeGreaterThan(0);
+    expect(snapshot.privateBytes).toBeGreaterThan(0);
+    expect(snapshot.workingSetBytes).toBeGreaterThan(0);
     expect(snapshot.responseState.entries).toBeGreaterThan(0);
     expect(snapshot.responseState.bytes).toBeGreaterThan(0);
     expect(snapshot.limitBytes).toBeGreaterThan(0);
+    expect(snapshot.warnBytes).toBeGreaterThan(0);
+    expect(snapshot.state).toBe("normal");
   });
 
   test("explicit RSS limit wins over the machine-share default", () => {
@@ -127,5 +131,84 @@ describe("memory budgets", () => {
     expect(memoryLimitBytes()).toBe(512 * 1024 * 1024);
     delete process.env["OPENCODEX_RSS_LIMIT_MB"];
     expect(memoryLimitBytes()).toBeGreaterThan(0);
+  });
+
+  test("the newest entry does not get to exceed the budget on its own", () => {
+    process.env["OPENCODEX_RESPONSE_STATE_MAX_BYTES"] = "20000";
+    // One turn that alone is bigger than the whole budget.
+    const huge = "x".repeat(40000);
+    rememberResponseState(
+      { input: [{ role: "user", content: huge }] },
+      { id: "resp_huge", output: [{ type: "message", content: huge }], status: "completed" },
+    );
+    const stats = responseStateStats();
+    expect(stats.bytes).toBeLessThanOrEqual(stats.maxBytes);
+    // It must not be silently kept: the chain is gone, but it is GONE, and the
+    // tombstone says so instead of the turn looking like it never happened.
+    expect(stats.entries).toBe(0);
+    expect(replayStateLookup("resp_huge").evictedByUs).toBe(true);
+  });
+
+  test("eviction drops whole sessions, not slices of them", () => {
+    process.env["OPENCODEX_RESPONSE_STATE_MAX_BYTES"] = "30000";
+    const chunk = "y".repeat(2000);
+    // session A: two chained turns
+    rememberResponseState(
+      { input: [{ role: "user", content: chunk }] },
+      { id: "a1", output: [{ type: "message", content: chunk }], status: "completed" },
+    );
+    rememberResponseState(
+      { previous_response_id: "a1", input: [{ role: "user", content: chunk }] },
+      { id: "a2", output: [{ type: "message", content: chunk }], status: "completed" },
+    );
+    // session B: three more turns
+    for (const id of ["b1", "b2", "b3"]) {
+      const prev = id === "b1" ? undefined : `b${Number(id[1]) - 1}`;
+      rememberResponseState(
+        { previous_response_id: prev, input: [{ role: "user", content: chunk }] },
+        { id, output: [{ type: "message", content: chunk }], status: "completed" },
+      );
+    }
+    const stats = responseStateStats();
+    expect(stats.sessions).toBe(2);
+    // Both turns of session A are present: a chain is never cut in half.
+    expect(replayStateLookup("a1").found).toBe(true);
+    expect(replayStateLookup("a2").found).toBe(true);
+  });
+
+  test("a session that does not fit is dropped whole and leaves tombstones", () => {
+    process.env["OPENCODEX_RESPONSE_STATE_MAX_BYTES"] = "12000";
+    const chunk = "z".repeat(3000);
+    rememberResponseState(
+      { input: [{ role: "user", content: chunk }] },
+      { id: "s1", output: [{ type: "message", content: chunk }], status: "completed" },
+    );
+    rememberResponseState(
+      { previous_response_id: "s1", input: [{ role: "user", content: chunk }] },
+      { id: "s2", output: [{ type: "message", content: chunk }], status: "completed" },
+    );
+    rememberResponseState(
+      { input: [{ role: "user", content: chunk }] },
+      { id: "other", output: [{ type: "message", content: chunk }], status: "completed" },
+    );
+    const stats = responseStateStats();
+    expect(stats.bytes).toBeLessThanOrEqual(stats.maxBytes);
+    // Whatever got dropped is remembered, so a later miss can be explained.
+    for (const id of ["s1", "s2", "other"]) {
+      const lookup = replayStateLookup(id);
+      if (!lookup.found) expect(lookup.evictedByUs).toBe(true);
+    }
+  });
+
+  test("byte accounting uses UTF-8 bytes, so base64 is not counted twice", () => {
+    process.env["OPENCODEX_RESPONSE_STATE_MAX_BYTES"] = "100000";
+    const ascii = "a".repeat(50_000);
+    rememberResponseState(
+      { input: [{ role: "user", content: ascii }] },
+      { id: "resp_ascii", output: [{ type: "message", content: "" }], status: "completed" },
+    );
+    const stats = responseStateStats();
+    // UTF-16 counting would say ~100 kB for a 50 kB ASCII string.
+    expect(stats.bytes).toBeLessThan(70_000);
   });
 });
