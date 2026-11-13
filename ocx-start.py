@@ -31,6 +31,14 @@ Phase 5 launcher-mode flag 透传：
   python ocx-start.py --launcher-mode=false           # 等价于 --preset=proxy-only 一部分
   python ocx-start.py --launcher-mode=true            # 强制 launcher 模式（即便 config.json 已关）
 
+config.json 的 env 透传（没有 CLI flag 的设置只能走这里）：
+
+  {
+    "env": { "OPENCODEX_RSS_EXIT_ON_LIMIT": "1" }
+  }
+
+  键值原样传给 bun 子进程；PATH / TEMP 等系统变量被忽略（防止手滑写坏环境）。
+
 后台日志：项目根目录下 ocx.out.log / ocx.err.log
 """
 
@@ -836,7 +844,49 @@ def launcher_env(cfg: dict, cli_overrides: dict | None = None) -> dict:
         env["OCX_SYNC_NATIVE_OPENAI_MODELS"] = "true" if sync_native else "false"
     if overrides.get("hostname"):
         env["OCX_HOSTNAME"] = str(overrides["hostname"])
+    env.update(config_env(cfg))
     return env
+
+
+# Variables the launcher owns. A config.json that overwrites them would break the
+# child process in ways the operator cannot see from the GUI (a broken PATH means
+# bun is not found; a rewritten TEMP means the logs land somewhere unexpected).
+_PROTECTED_ENV_KEYS = {
+    "PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "SYSTEMDRIVE", "COMSPEC",
+    "TEMP", "TMP", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "APPDATA",
+    "LOCALAPPDATA", "PROGRAMDATA", "PROGRAMFILES",
+}
+
+
+def config_env(cfg: dict) -> dict:
+    """Extra environment variables from config.json's "env" object.
+
+    WHY: some knobs have no CLI flag and no GUI switch -- the memory guard's
+    OPENCODEX_RSS_EXIT_ON_LIMIT is one of them. On an 8 GB host the operator
+    wants the proxy to restart itself instead of sitting there until the
+    runtime dies, but there is no way to say that without a file the launcher
+    reads. config.json is already that file, so "env" is the missing channel.
+
+    Values are stringified; non-string keys and protected system variables are
+    dropped with a warning instead of being passed through.
+    """
+    raw = cfg.get("env")
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, str] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str) or not key.strip():
+            continue
+        if key.upper() in _PROTECTED_ENV_KEYS:
+            print(f"[warn] config.json env: 忽略受保护的系统变量 {key}", file=sys.stderr)
+            continue
+        if isinstance(value, bool):
+            out[key] = "true" if value else "false"
+        elif isinstance(value, (str, int, float)):
+            out[key] = str(value)
+        else:
+            print(f"[warn] config.json env: 忽略 {key}（值类型不支持）", file=sys.stderr)
+    return out
 
 
 # --- launcher mode helpers (Phase 6 redesign) -------------------------------
@@ -1069,6 +1119,9 @@ def run_background(port: int, cli_overrides: dict | None = None, no_bootstrap: b
     launcher_env_vars = launcher_env(cfg, cli_overrides)
     if launcher_env_vars:
         print(f"[bg] launcher-mode env: {launcher_env_vars}", file=sys.stderr)
+    extra_env = config_env(cfg)
+    if extra_env:
+        print(f"[bg] config.json env: {extra_env}", file=sys.stderr)
 
     out_log = ROOT / "ocx.out.log"
     err_log = ROOT / "ocx.err.log"
