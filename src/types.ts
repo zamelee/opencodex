@@ -388,6 +388,21 @@ export interface OcxConfig {
    * runaway compaction. Undefined = follow what we know (learned gate, else the declared window).
    */
   modelGateLimits?: Record<string, number | "upstream">;
+  /**
+   * Optional LLM assist for classifying upstream refusals our own patterns cannot name.
+   *
+   * Off by default. It may only fill a family we could not read; it never supplies a number,
+   * never writes a learned limit or scale, and never blocks the request.
+   */
+  upstreamErrorLlmAssist?: {
+    enabled?: boolean;
+    /** A provider from `providers` to take baseUrl/apiKey from. */
+    provider?: string;
+    baseUrl?: string;
+    apiKey?: string;
+    model?: string;
+    timeoutMs?: number;
+  };
   /** Vision sidecar: describe images via a gpt vision model so text-only models can "see" them. */
   visionSidecar?: OcxVisionSidecarConfig;
   /** /v1/images relay for codex's built-in image_gen tool. */

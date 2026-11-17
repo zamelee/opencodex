@@ -131,6 +131,18 @@ const configSchema = z.object({
   // Per-model manual gate: a number is the proxy-side brake ceiling, "upstream" hands the
   // decision to the upstream (no local gate).
   modelGateLimits: z.record(z.string(), z.union([z.number().int().positive(), z.literal("upstream")])).optional(),
+  // Optional LLM assist for classifying upstream refusals our own patterns cannot name.
+  // Off by default: it may only fill a family we could not read, never a number, never a
+  // learned limit, and never blocks the request (see src/lib/upstream-error-llm.ts).
+  upstreamErrorLlmAssist: z.object({
+    enabled: z.boolean().optional(),
+    /** A provider from config.json to take baseUrl/apiKey from. */
+    provider: z.string().min(1).optional(),
+    baseUrl: z.string().min(1).optional(),
+    apiKey: z.string().min(1).optional(),
+    model: z.string().min(1).optional(),
+    timeoutMs: z.number().int().min(500).max(30_000).optional(),
+  }).optional(),
 }).passthrough().transform((config) => {
   // Path C: legacy number-valued providerContextCaps entries (e.g. { anthropic: 200000 }) are
   // promoted to boolean on/off toggles, with the per-provider number absorbed into

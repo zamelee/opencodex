@@ -6,6 +6,7 @@ import { readCodexCatalogPath } from "../codex/catalog";
 import type { OcxUsage } from "../types";
 import { redactSecretString } from "../lib/redact";
 import { summarizeUpstreamErrorBody } from "../lib/upstream-error-body";
+import type { UpstreamErrorFamily } from "../lib/upstream-error-normalize";
 import { isQuotaExhaustedBody } from "../providers/quota-retry";
 import {
   appendRequestLogEntry,
@@ -73,6 +74,16 @@ export interface RequestLogContext {
    */
   upstreamTokenGap?: UpstreamTokenGap;
   /**
+   * Which family the upstream's refusal belongs to, after the body was unwrapped and read.
+   *
+   * Before this existed, a refusal was only ever "400" plus a sentence of upstream prose, and
+   * the one thing an operator needs - "was this too big, or was it a quota/plan/auth problem?"
+   * - had to be re-derived by hand from the raw body every time.
+   */
+  upstreamErrorFamily?: UpstreamErrorFamily;
+  /** Whether the family came from our own reader or from the optional LLM assist. */
+  upstreamErrorFamilySource?: "deterministic" | "llm";
+  /**
    * How the proxy recovered from an exhausted upstream balance: extra attempts,
    * how many of them switched to another key, and how many waited.
    * Zero/absent means the balance never ran out.
@@ -132,6 +143,10 @@ export interface RequestLogEntry {
   promptComposition?: PromptCompositionSummary;
   /** How far our estimate sat from the upstream's own count of the same body. */
   upstreamTokenGap?: UpstreamTokenGap;
+  /** The family the upstream's refusal belongs to (see RequestLogContext). */
+  upstreamErrorFamily?: UpstreamErrorFamily;
+  /** Whether the family came from our own reader or from the optional LLM assist. */
+  upstreamErrorFamilySource?: "deterministic" | "llm";
   /** Extra attempts spent on an exhausted upstream balance (see RequestLogContext). */
   quotaRetries?: number;
   /** How many of those attempts switched to another key in the pool. */
@@ -528,6 +543,8 @@ export function addFinalRequestLog(
     ...(totalTokens !== undefined ? { totalTokens } : {}),
     ...(logCtx.promptComposition ? { promptComposition: logCtx.promptComposition } : {}),
     ...(logCtx.upstreamTokenGap ? { upstreamTokenGap: logCtx.upstreamTokenGap } : {}),
+    ...(logCtx.upstreamErrorFamily ? { upstreamErrorFamily: logCtx.upstreamErrorFamily } : {}),
+    ...(logCtx.upstreamErrorFamilySource ? { upstreamErrorFamilySource: logCtx.upstreamErrorFamilySource } : {}),
     ...(logCtx.quotaRetries ? { quotaRetries: logCtx.quotaRetries } : {}),
     ...(logCtx.quotaKeySwitches ? { quotaKeySwitches: logCtx.quotaKeySwitches } : {}),
     ...(logCtx.quotaWaits ? { quotaWaits: logCtx.quotaWaits } : {}),

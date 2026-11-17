@@ -65,9 +65,13 @@ import {
   learnedUpstreamPromptLimit,
   noteUpstreamPromptLimit,
   saveLearnedLimits,
-  parseUpstreamPromptGate,
-  parseUpstreamRejection,
 } from "../lib/upstream-prompt-budget";
+import {
+  gateOf,
+  normalizeUpstreamError,
+  rejectionOf,
+} from "../lib/upstream-error-normalize";
+import { suggestErrorFamily } from "../lib/upstream-error-llm";
 import {
   gateCircuitState,
   gateCircuitVerdictFor,
@@ -1398,11 +1402,39 @@ export async function handleResponses(
       logCtx.upstreamStatus = upstreamResponse.status;
       logCtx.upstreamContentType = upstreamResponse.headers.get("content-type") ?? undefined;
       captureUpstreamErrorFromText(logCtx, errorText);
+      // ONE reading of the body, shared by every decision below. The body has to be unwrapped
+      // before its numbers can be read: an upstream nests its message as a JSON string and
+      // may encode that nesting twice, and a raw regex over the un-unwrapped text finds the
+      // words but not the numbers (2026-11-16: six refusals, six "no ceiling given").
+      const normalizedError = normalizeUpstreamError(errorText, { httpStatus: upstreamResponse.status });
+      logCtx.upstreamErrorFamily = normalizedError.family;
+      // Optional LLM assist (OFF by default). It may only fill a family our own patterns
+      // could not name, it never supplies a number, and it never writes a learned limit or
+      // scale. A timeout, a 429 or a disagreement ends with the deterministic reading intact.
+      const assistConfig = config.upstreamErrorLlmAssist;
+      if (assistConfig?.enabled && normalizedError.family === "unknown") {
+        const assistProvider = assistConfig.provider
+          ? config.providers[assistConfig.provider]
+          : undefined;
+        const suggestion = await suggestErrorFamily(normalizedError, {
+          config: {
+            ...assistConfig,
+            baseUrl: assistConfig.baseUrl ?? assistProvider?.baseUrl,
+            apiKey: assistConfig.apiKey ?? assistProvider?.apiKey,
+          },
+        });
+        if (suggestion) {
+          normalizedError.family = suggestion.family;
+          normalizedError.familySource = "llm";
+          logCtx.upstreamErrorFamily = suggestion.family;
+          logCtx.upstreamErrorFamilySource = "llm";
+        }
+      }
       // Record the refusal itself. "The upstream refused us for being too long, but named no
       // ceiling" is a fact worth keeping: it is the difference between "we know the gate" and
       // "we know the request is over some gate we cannot name", and it is what the circuit
       // counts to break a compaction loop.
-      const rejection = parseUpstreamRejection(errorText);
+      const rejection = rejectionOf(normalizedError);
       if (rejection.rejected) {
         noteGateRejection(route.providerName, route.modelId, {
           ...(rejection.limit !== undefined ? { limit: rejection.limit } : {}),
@@ -1420,7 +1452,7 @@ export async function handleResponses(
       // Learn the upstream's real context window from its own error, so the NEXT request for
       // this provider can be protected before it goes out. Without this the proxy only learns
       // the ceiling by killing a turn.
-      const learnedGate = parseUpstreamPromptGate(errorText);
+      const learnedGate = gateOf(normalizedError);
       if (learnedGate) {
         noteUpstreamPromptLimit(route.providerName, learnedGate.limit, {
           modelId: route.modelId,
@@ -1470,7 +1502,7 @@ export async function handleResponses(
       // HTML in a Codex error bubble is unreadable and can carry an internal
       // hostname. A JSON body keeps its own message, because that is the part
       // with the gate/limit/token detail the user actually needs.
-      const upstreamMessage = parseUpstreamRejection(errorText).rejected
+      const upstreamMessage = rejection.rejected
         ? errorText
         : summarizeUpstreamErrorBody(errorText, upstreamResponse.status, upstreamResponse.headers.get("content-type")).summary;
       // A content-policy refusal arrives as HTTP 500 from some upstreams, but it

@@ -20,6 +20,7 @@
  */
 
 import { detectWireShape, measureWireComposition } from "./token-composition";
+import { gateOf, normalizeUpstreamError, rejectionOf } from "./upstream-error-normalize";
 import { collectImageInventory } from "../image/image-inventory";
 import { downsampleImagePayload } from "../image/image-downsample";
 import { estimateImageTokens, targetMaxEdgeForFamily } from "../image/image-estimator";
@@ -215,80 +216,18 @@ export interface ParsedUpstreamRejection extends Partial<ParsedUpstreamGate> {
   rejectedWithoutLimit: boolean;
 }
 
-const UPSTREAM_GATE_SHAPES: RegExp[] = [
-  /maximum\s+context\s+length(?:\s+is|:)\s*(\d+)/i,
-  /context[_\s-]length[_\s-]exceeded[^\d]{0,60}(\d+)/i,
-  /exceed(?:s|ed)?\s+(?:the\s+)?context\s+limit[^\d]{0,20}(\d+)/i,
-  /(?:max(?:imum)?\s+)?(?:token\s+)?limit\s*(?:is|of|:)\s*(\d+)/i,
-];
-
-/** Phrases that mean "your prompt was too long", with no number attached. */
-const UPSTREAM_REJECTION_PHRASES: RegExp[] = [
-  /context\s+window\s+exceeds?\s+limit/i,
-  /prompt\s+is\s+too\s+long/i,
-  /context[_\s-]length[_\s-]exceeded/i,
-  /input\s+(?:is\s+)?too\s+long/i,
-  /too\s+many\s+tokens/i,
-  /exceeds?\s+the\s+(?:maximum|context)/i,
-  /maximum\s+context\s+length/i,
-];
-
 /**
- * Decode the JSON string escapes that hide an upstream's numbers from a regex.
+ * Parse the upstream's hard gate out of an error body.
  *
- * An upstream error body nests its message as a JSON string, so a character that matters
- * to the shapes above arrives escaped:
- *
- *   {"error":{"message":"{\"msg\":\"prompt is too long: 2010775 tokens \u003e 1048576 maximum\"}"}}
- *
- * The ">" is the six characters `\u003e`, NOT a ">". Any pattern looking for a literal ">"
- * silently fails, and the proxy concludes the upstream "refused without naming a ceiling" -
- * while the ceiling was right there. Decoding the escapes before matching is what turns
- * that error back into the fact it is.
- *
- * Only the escapes that can appear in a number-bearing message are decoded; a general
- * JSON.parse is not possible because the body is an error FRAGMENT, not a whole document.
+ * The reading itself lives in `upstream-error-normalize.ts`: the body has to be UNWRAPPED
+ * before its numbers can be read, because an upstream nests its message as a JSON string and
+ * may encode that nesting twice. Reading the raw text with a regex is what failed on
+ * 2026-11-16 (six refusals, six "no ceiling given", no learned gate). This wrapper keeps the
+ * old name and the old contract so every caller keeps working.
  */
-function decodeJsonEscapes(text: string): string {
-  if (!text.includes("\\u")) return text;
-  return text
-    .replace(/\\u003[cC]/g, "<")
-    .replace(/\\u003[eE]/g, ">")
-    .replace(/\\u0026/g, "&")
-    .replace(/\\u0027/g, "'")
-    .replace(/\\u0060/g, "`")
-    .replace(/\\u003[dD]/g, "=")
-    .replace(/\\u002[fF]/g, "/")
-    .replace(/\\u000[aA]/g, "\n")
-    .replace(/\\u000[dD]/g, "\r")
-    .replace(/\\u000[tT]/g, "\t");
-}
-
 export function parseUpstreamPromptGate(errorText: string): ParsedUpstreamGate | undefined {
   if (!errorText) return undefined;
-  // The upstream nests its message as a JSON STRING inside the error body, so the ">"
-  // arrives escaped as the six characters \u003e. A regex looking for a literal ">"
-  // never matches it, and the proxy then reports "the upstream gave no ceiling" for an
-  // error that literally said "1048576 maximum". Decode the escapes first.
-  const decoded = decodeJsonEscapes(errorText);
-  const cmp = decoded.match(/(\d+)\s*tokens?\s*>\s*(\d+)\s+maximum/i);
-  if (cmp) {
-    const limit = Number(cmp[2]);
-    const observed = Number(cmp[1]);
-    if (Number.isFinite(limit) && limit > 0) {
-      return {
-        limit,
-        ...(Number.isFinite(observed) && observed > 0 ? { observedInputTokens: observed } : {}),
-      };
-    }
-  }
-  for (const shape of UPSTREAM_GATE_SHAPES) {
-    const m = decoded.match(shape);
-    if (!m) continue;
-    const limit = Number(m[1]);
-    if (Number.isFinite(limit) && limit > 0) return { limit };
-  }
-  return undefined;
+  return gateOf(normalizeUpstreamError(errorText));
 }
 
 /**
@@ -299,21 +238,8 @@ export function parseUpstreamPromptGate(errorText: string): ParsedUpstreamGate |
  * we may store, and pretending otherwise would put a wrong number in front of the brake.
  */
 export function parseUpstreamRejection(errorText: string): ParsedUpstreamRejection {
-  const withLimit = parseUpstreamPromptGate(errorText);
-  if (withLimit?.limit) {
-    return {
-      rejected: true,
-      rejectedWithoutLimit: false,
-      limit: withLimit.limit,
-      ...(withLimit.observedInputTokens !== undefined
-        ? { observedInputTokens: withLimit.observedInputTokens }
-        : {}),
-    };
-  }
-  if (errorText && UPSTREAM_REJECTION_PHRASES.some((re) => re.test(errorText))) {
-    return { rejected: true, rejectedWithoutLimit: true };
-  }
-  return { rejected: false, rejectedWithoutLimit: false };
+  if (!errorText) return { rejected: false, rejectedWithoutLimit: false };
+  return rejectionOf(normalizeUpstreamError(errorText));
 }
 
 /** Back-compat wrapper: just the number. */
