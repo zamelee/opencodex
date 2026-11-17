@@ -13,13 +13,13 @@ LLM 只负责"发起"和"读结果"。
 用法：
   pwsh -NoProfile -File restart-ha.ps1                 # 只重启（最快）
   pwsh -NoProfile -File restart-ha.ps1 -Mode rebuild    # 重建 + 重启
-  pwsh -NoProfile -File restart-ha.ps1 -Mode restart -KeepWindow
+  pwsh -NoProfile -File restart-ha.ps1 -Background       # 静默起（只有托盘，不开窗口）
 #>
 
 param(
   [ValidateSet("restart", "rebuild")]
   [string]$Mode = "restart",
-  [switch]$KeepWindow,
+  [switch]$Background,
   [int]$TimeoutSec = 90
 )
 
@@ -93,8 +93,15 @@ if ($Mode -eq "rebuild") {
 }
 
 # ---- 4. 拉起 ----
-$env:HA_GATEWAY_NO_BROWSER = if ($KeepWindow) { "0" } else { "1" }
-Start-Process -FilePath $Exe -WorkingDirectory $Root -WindowStyle Hidden
+# 产品形态是「内嵌 WebView2 窗口 + 托盘常驻」，默认要把自己的窗口开出来；
+# 只有 -Background 才只留托盘（HA_GATEWAY_NO_BROWSER=1 会连窗口都不开）。
+if ($Background) {
+  $env:HA_GATEWAY_NO_BROWSER = "1"
+  Start-Process -FilePath $Exe -WorkingDirectory $Root -WindowStyle Hidden
+} else {
+  Remove-Item Env:\HA_GATEWAY_NO_BROWSER -ErrorAction SilentlyContinue
+  Start-Process -FilePath $Exe -WorkingDirectory $Root
+}
 Say "已拉起，等待端口就绪……"
 
 # ---- 5. 等就绪 ----
