@@ -16,6 +16,7 @@ from aiohttp import web
 from .failover import UpstreamSelector, classify_exception, classify_status
 from .labels import upstream_label
 from .metrics import Metrics
+from .model_catalog import classify_model_error, model_matches
 from .models import Phase, Rule
 from .session import session_key as make_session_key
 
@@ -297,11 +298,54 @@ class Gateway:
         self.metrics = Metrics()
         self.active = 0
         self.last_error = ""
+        # 每条上游一把锁：并发触发刷新时合并成一次拉取
+        self._catalog_locks: dict[str, asyncio.Lock] = {}
+        # 后台任务的强引用，防止被 GC 掉
+        self._bg_tasks: set[asyncio.Task] = set()
+
+    def _spawn(self, coro) -> None:
+        """起一个后台任务并持有引用（防止中途被 GC）。"""
+        try:
+            task = asyncio.create_task(coro)
+        except Exception:
+            return
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
 
     async def close(self) -> None:
         if self.client is not None:
             await self.client.close()
             self.client = None
+
+    # ---------- 模型清单 ----------
+
+    async def refresh_catalog(self, upstream) -> dict:
+        """拉一次上游的模型清单，存进缓存。
+
+        只在后台调用（定时刷新 / 出错后纠偏），请求路径上绝不拉。
+        """
+        lock = self._catalog_locks.setdefault(upstream.id, asyncio.Lock())
+        if lock.locked():
+            # 已经有一次在拉了，这次不重复打上游
+            return {"ok": False, "models": [], "skipped": True}
+        async with lock:
+            res = await self.list_models(upstream)
+            ok = bool(res.get("ok"))
+            models = res.get("models") or []
+            try:
+                if ok:
+                    self.storage.replace_upstream_models(upstream.id, models)
+                    self.storage.save_catalog(
+                        upstream.id, True, models, res.get("raw_body") or ""
+                    )
+                    # 清单里既然有了，之前"没有这个模型"的判定就该作废
+                    for m in models:
+                        self.storage.clear_model_absent(upstream.id, m)
+                else:
+                    self.storage.save_catalog(upstream.id, False, [], "")
+            except Exception:
+                pass
+            return res
 
     async def ensure_client(self) -> aiohttp.ClientSession:
         """连接池必须与当前事件循环同属一个线程，否则请求会挂死。"""
@@ -420,6 +464,31 @@ class Gateway:
         rid = os.urandom(4).hex()
         labels = {u.id: upstream_label(upstreams, u.id) for u in upstreams}
         model_name = _extract_model(body)
+        # 已知「没有这个模型」的通道：直接不进候选，一个请求都不发。
+        absent = set()
+        demoted = set()
+        if model_name:
+            try:
+                absent = self.storage.absent_upstreams_for_model(model_name)
+            except Exception:
+                absent = set()
+            # 清单是快照，可能不全：清单里查不到只降级，不排除
+            try:
+                for u in upstreams:
+                    if u.id in absent:
+                        continue
+                    cat = self.storage.get_catalog(u.id)
+                    if not cat or not cat.get("ok"):
+                        continue
+                    if cat.get("age_s", 1e9) > self.settings.model_catalog_ttl_s:
+                        continue
+                    models = self.storage.models_of(u.id)
+                    if not models:
+                        continue
+                    if not model_matches(models, model_name):
+                        demoted.add(u.id)
+            except Exception:
+                demoted = set()
         self.log(
             "info",
             "request",
@@ -427,13 +496,23 @@ class Gateway:
             f"model={model_name or '-'} ｜ body={len(body)}B",
         )
 
-        plan = self.selector.plan(upstreams, skey)
+        plan = self.selector.plan(
+            upstreams, skey, absent_models=absent, demoted_models=demoted
+        )
         cand = [labels.get(u.id, u.name) for u in plan.candidates]
         sticky = labels.get(plan.sticky_id, "") if plan.sticky_id else ""
+        skipped = [
+            labels.get(uid, uid) for uid in absent if any(u.id == uid for u in upstreams)
+        ]
+        demoted_names = [
+            labels.get(uid, uid) for uid in demoted if any(u.id == uid for u in upstreams)
+        ]
         self.log(
             "info",
             "plan",
-            f"候选 ｜ 顺序 {'→'.join(cand) if cand else '无'} ｜ 粘性={sticky or '无'}",
+            f"候选 ｜ 顺序 {'→'.join(cand) if cand else '无'} ｜ 粘性={sticky or '无'}"
+            + (f" ｜ 跳过(无此模型)={','.join(skipped)}" if skipped else "")
+            + (f" ｜ 降级(清单里没有)={','.join(demoted_names)}" if demoted_names else ""),
         )
         last_body = b""
         last_code = "upstream_unavailable"
@@ -558,14 +637,35 @@ class Gateway:
             self.metrics.upstream_end(
                 upstream.id, (time.monotonic() - attempt_started) * 1000, ok=False
             )
-            rule = classify_status(status)
-            self.health.record_failure(upstream.id, f"HTTP {status}")
-            self.selector.mark_failure(upstream.id)
+            # 「这条上游没有这个模型」跟「这条上游坏了」是两回事：
+            # 前者换条通道就行，不该进健康度、不该把它拖进冷却。
+            model_error = classify_model_error(body_bytes, status)
+            if model_error:
+                rule = Rule.MODEL_NOT_FOUND
+            else:
+                rule = classify_status(status)
+            if rule is Rule.MODEL_NOT_FOUND:
+                if model_name:
+                    try:
+                        self.storage.mark_model_absent(
+                            upstream.id, model_name, self.settings.model_absence_ttl_s
+                        )
+                    except Exception:
+                        pass
+                # 后台纠偏：拉一次清单，看看到底支持哪些模型（不阻塞本次请求）
+                try:
+                    self._spawn(self.refresh_catalog(upstream))
+                except Exception:
+                    pass
+            else:
+                self.health.record_failure(upstream.id, f"HTTP {status}")
+                self.selector.mark_failure(upstream.id)
             last_body = body_bytes
             last_code = {
                 Rule.UPSTREAM_429: "upstream_429",
                 Rule.UPSTREAM_5XX: "upstream_5xx",
                 Rule.UPSTREAM_4XX: "upstream_4xx",
+                Rule.MODEL_NOT_FOUND: "model_not_found",
             }.get(rule, "upstream_error")
             req_id = _extract_request_id(body_bytes)
             # 提示词过长这类错误，日志里点出来，省得再去翻原始报文
@@ -595,6 +695,7 @@ class Gateway:
                 "upstream",
                 f"✗ {labels.get(upstream.id, upstream.name)} ｜ rid={rid} ｜ {status} ｜ "
                 f"规则={last_code} ｜ request_id={req_id or '-'}"
+                + (f" ｜ 提示=该上游没有这个模型({model_error})" if model_error else "")
                 + (" ｜ 提示=疑似提示词超长" if too_long else "")
                 + (f" ｜ → {labels.get(nxt.id, nxt.name)}" if nxt else ""),
             )
@@ -667,6 +768,32 @@ class Gateway:
             upstream = plan.next_upstream()
             if upstream is None:
                 break
+            # 缓存优先：这条上游的清单还在有效期内就直接用缓存，
+            # 不去戳上游——否则下游每问一次清单，上游就被拉一次。
+            cat = None
+            try:
+                cat = self.storage.get_catalog(upstream.id)
+            except Exception:
+                cat = None
+            if (
+                cat
+                and cat.get("ok")
+                and cat.get("body")
+                and cat.get("age_s", 1e9) <= self.settings.model_catalog_ttl_s
+            ):
+                self.log(
+                    "info",
+                    "models",
+                    f"下游 /v1/models ｜ {self._up_label(upstream.id, upstream.name)} ｜ "
+                    f"命中缓存 ｜ {cat.get('models_count')} 个 ｜ "
+                    f"{cat.get('age_s', 0):.0f}s 前",
+                )
+                return web.Response(
+                    body=cat["body"].encode("utf-8"),
+                    status=200,
+                    content_type="application/json",
+                    headers={"Cache-Control": "no-cache"},
+                )
             for path in ("/v1/models", "/models"):
                 try:
                     resp = await client.get(
@@ -689,10 +816,23 @@ class Gateway:
                 if 200 <= resp.status < 300:
                     self.metrics.upstream_end(upstream.id, 0.0, ok=True)
                     self.health.record_success(upstream.id)
+                    # 顺手把这份清单存下来：请求路径上就不用再拉了
+                    try:
+                        text = body.decode("utf-8", "replace")
+                        models = _parse_models(text)
+                        self.storage.replace_upstream_models(upstream.id, models)
+                        self.storage.save_catalog(
+                            upstream.id, True, models, text[:1024 * 1024]
+                        )
+                        for m in models:
+                            self.storage.clear_model_absent(upstream.id, m)
+                    except Exception:
+                        pass
                     self.log(
                         "info",
                         "models",
-                        f"下游 /v1/models ｜ {self._up_label(upstream.id, upstream.name)} ｜ 转发成功 ｜ {path}",
+                        f"下游 /v1/models ｜ {self._up_label(upstream.id, upstream.name)} ｜ "
+                        f"转发成功 ｜ {path} ｜ 已缓存",
                     )
                     return web.Response(
                         body=body,
@@ -707,6 +847,10 @@ class Gateway:
                 )
             # 这条上游不支持清单端点：本次请求跳过它，但不计入健康度
             plan.mark_failed(upstream.id)
+            try:
+                self.storage.save_catalog(upstream.id, False, [], "")
+            except Exception:
+                pass
 
         # 兜底：网关本地缓存的模型清单（用户手动拉取时记下的）
         known: list[str] = []
@@ -838,6 +982,8 @@ class Gateway:
                 "ms": ms,
                 "models": models,
                 "body": body[:200] if not models else "",
+                # 原样转发用：下游 /v1/models 要的是上游这份清单本身
+                "raw_body": body[:1024 * 1024],
                 "path": path,
             }
         last["ms"] = int((time.monotonic() - started) * 1000)

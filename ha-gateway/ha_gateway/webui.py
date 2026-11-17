@@ -210,6 +210,28 @@ def build_web_app(app) -> web.Application:
         res = await app.list_models_async(uid)
         return web.json_response(res)
 
+    async def get_upstream_catalog(request):
+        """这条上游的模型清单缓存状态（不发起上游请求）。"""
+        uid = request.match_info["id"]
+        cat = None
+        try:
+            cat = app.storage.get_catalog(uid)
+        except Exception:
+            cat = None
+        models = []
+        try:
+            models = app.storage.models_of(uid)
+        except Exception:
+            models = []
+        return web.json_response(
+            {
+                "ok": True,
+                "catalog": cat,
+                "models": models,
+                "absent": app.storage.absent_models_of(uid),
+            }
+        )
+
     async def add_key(request):
         data = await request.json()
         raw = app.new_client_key(data.get("label") or "client")
@@ -345,6 +367,7 @@ def build_web_app(app) -> web.Application:
     routes.delete("/api/upstreams/{id}")(delete_upstream)
     routes.post("/api/upstreams/{id}/probe")(probe_upstream)
     routes.post("/api/upstreams/{id}/models")(list_upstream_models)
+    routes.get("/api/upstreams/{id}/catalog")(get_upstream_catalog)
     routes.post("/api/keys")(add_key)
     routes.put("/api/keys/{id}")(update_key)
     routes.delete("/api/keys/{id}")(delete_key)

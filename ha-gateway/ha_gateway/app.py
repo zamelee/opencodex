@@ -79,6 +79,7 @@ class HaApp:
         self._probe_stop: asyncio.Event | None = None
         self._probe_tasks: dict[str, asyncio.Task] = {}
         self._probe_supervisor: asyncio.Task | None = None
+        self._catalog_supervisor: asyncio.Task | None = None
         self._web_runner = None
         self._web_host = "127.0.0.1"
         self._web_port = 10111
@@ -145,6 +146,7 @@ class HaApp:
         self._probe_stop = asyncio.Event()
         self._probe_tasks: dict[str, asyncio.Task] = {}
         self._probe_supervisor = asyncio.create_task(self._supervise_probes())
+        self._catalog_supervisor = asyncio.create_task(self._supervise_catalogs())
         self._log(
             "info",
             "listen",
@@ -159,6 +161,8 @@ class HaApp:
             for t in list(self._probe_tasks.values()):
                 t.cancel()
             self._probe_tasks.clear()
+            if self._catalog_supervisor is not None:
+                self._catalog_supervisor.cancel()
             if getattr(self, "_web_runner", None) is not None:
                 await self._web_runner.cleanup()
             await self.gateway.close()
@@ -202,6 +206,60 @@ class HaApp:
                         self._probe_tasks[uid] = asyncio.create_task(
                             self.health.probe_loop(u, self.gateway.tcp_probe, self._probe_stop)
                         )
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                continue
+
+    async def _supervise_catalogs(self) -> None:
+        """后台刷新模型清单。
+
+        规矩只有一条：**请求路径上绝不拉模型清单**。
+        清单在这里按需刷新——有效期内不动手；上游压根没有 /v1/models 端点的，
+        记一次负缓存，隔很久才再试一次。这样既不会把上游拉挂，
+        也不会让每个请求都多一次网络往返。
+        """
+        while True:
+            try:
+                tick = max(15.0, min(600.0, self.settings.model_catalog_refresh_s))
+                await asyncio.sleep(tick)
+                if not self.settings.model_catalog_enabled:
+                    continue
+                now = time.time()
+                for u in self.storage.list_upstreams():
+                    if not u.enabled:
+                        continue
+                    cat = None
+                    try:
+                        cat = self.storage.get_catalog(u.id)
+                    except Exception:
+                        cat = None
+                    if cat:
+                        age = now - cat["fetched_at"]
+                        if cat["ok"] and age < self.settings.model_catalog_ttl_s:
+                            continue
+                        if not cat["ok"] and age < self.settings.model_catalog_missing_ttl_s:
+                            continue
+                    try:
+                        res = await self.gateway.refresh_catalog(u)
+                    except Exception:
+                        continue
+                    if res.get("ok"):
+                        self._log(
+                            "info",
+                            "models",
+                            f"后台刷新模型清单 ｜ {self.upstream_label(u.id)} ｜ "
+                            f"{len(res.get('models') or [])} 个",
+                        )
+                    else:
+                        self._log(
+                            "info",
+                            "models",
+                            f"后台刷新模型清单 ｜ {self.upstream_label(u.id)} ｜ "
+                            "拉取失败（记负缓存，稍后再试）",
+                        )
+                    # 错峰：别把所有上游挤在同一秒被打
+                    await asyncio.sleep(0.3)
             except asyncio.CancelledError:
                 return
             except Exception:
@@ -320,12 +378,8 @@ class HaApp:
         up = next((u for u in self.storage.list_upstreams() if u.id == upstream_id), None)
         if up is None:
             return {"ok": False, "status": None, "ms": 0, "models": [], "body": "upstream not found"}
-        res = await self.gateway.list_models(up)
-        if res.get("ok") and res.get("models"):
-            try:
-                self.storage.add_upstream_models(up.id, res["models"])
-            except Exception:
-                pass
+        # 走 refresh_catalog：顺带把清单存进缓存，后台刷新就不用再单独拉
+        res = await self.gateway.refresh_catalog(up)
         self._log(
             "info" if res.get("ok") else "warn",
             "models",

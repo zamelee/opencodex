@@ -83,6 +83,20 @@ CREATE TABLE IF NOT EXISTS upstream_models (
     updated_at REAL NOT NULL,
     PRIMARY KEY (upstream_id, model)
 );
+CREATE TABLE IF NOT EXISTS upstream_model_absent (
+    upstream_id TEXT NOT NULL,
+    model TEXT NOT NULL,
+    absent_until REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (upstream_id, model)
+);
+CREATE TABLE IF NOT EXISTS upstream_catalog (
+    upstream_id TEXT PRIMARY KEY,
+    fetched_at REAL NOT NULL,
+    ok INTEGER NOT NULL DEFAULT 0,
+    models_count INTEGER NOT NULL DEFAULT 0,
+    body TEXT NOT NULL DEFAULT ''
+);
 """
 
 
@@ -145,6 +159,10 @@ class Storage:
             "probe_interval_s",
             "probe_timeout_s",
             "sticky_ttl_s",
+            "model_absence_ttl_s",
+            "model_catalog_ttl_s",
+            "model_catalog_refresh_s",
+            "model_catalog_missing_ttl_s",
         ):
             if name in raw:
                 try:
@@ -153,6 +171,8 @@ class Storage:
                     pass
         if "retry_after_commit" in raw:
             s.retry_after_commit = raw["retry_after_commit"] == "1"
+        if "model_catalog_enabled" in raw:
+            s.model_catalog_enabled = raw["model_catalog_enabled"] == "1"
         if "excluded_upstream_ids" in raw:
             try:
                 s.excluded_upstream_ids = [
@@ -194,6 +214,11 @@ class Storage:
             "fail_threshold": str(s.fail_threshold),
             "recover_threshold": str(s.recover_threshold),
             "sticky_ttl_s": str(s.sticky_ttl_s),
+            "model_absence_ttl_s": str(s.model_absence_ttl_s),
+            "model_catalog_ttl_s": str(s.model_catalog_ttl_s),
+            "model_catalog_refresh_s": str(s.model_catalog_refresh_s),
+            "model_catalog_missing_ttl_s": str(s.model_catalog_missing_ttl_s),
+            "model_catalog_enabled": "1" if s.model_catalog_enabled else "0",
             "retry_after_commit": "1" if s.retry_after_commit else "0",
             "forced_upstream_id": s.forced_upstream_id,
             "excluded_upstream_ids": json.dumps(s.excluded_upstream_ids),
@@ -529,6 +554,126 @@ class Storage:
             (upstream_id,),
         ).fetchall()
         return [r["model"] for r in rows]
+
+    def replace_upstream_models(self, upstream_id: str, models: list[str]) -> None:
+        """整份替换这条上游的模型清单（拉到的清单是快照，不是增量）。"""
+        now = time.time()
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM upstream_models WHERE upstream_id=?", (upstream_id,)
+            )
+            self._conn.executemany(
+                "INSERT INTO upstream_models(upstream_id,model,updated_at) VALUES(?,?,?)",
+                [(upstream_id, m, now) for m in models],
+            )
+            self._conn.commit()
+
+    # ---------- 模型否定缓存（这条上游没有那个模型） ----------
+
+    def mark_model_absent(self, upstream_id: str, model: str, ttl_s: float) -> None:
+        """记下「这条上游没有这个模型」，ttl_s 内不再往它发这个模型。"""
+        if not upstream_id or not model:
+            return
+        now = time.time()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO upstream_model_absent(upstream_id,model,absent_until,updated_at)"
+                " VALUES(?,?,?,?)"
+                " ON CONFLICT(upstream_id,model) DO UPDATE SET"
+                " absent_until=excluded.absent_until, updated_at=excluded.updated_at",
+                (upstream_id, model, now + max(1.0, ttl_s), now),
+            )
+            self._conn.commit()
+
+    def clear_model_absent(self, upstream_id: str, model: str = "") -> None:
+        """模型又出现了（或清单刷新后有它了）：清掉否定记录。"""
+        with self._lock:
+            if model:
+                self._conn.execute(
+                    "DELETE FROM upstream_model_absent WHERE upstream_id=? AND model=?",
+                    (upstream_id, model),
+                )
+            else:
+                self._conn.execute(
+                    "DELETE FROM upstream_model_absent WHERE upstream_id=?",
+                    (upstream_id,),
+                )
+            self._conn.commit()
+
+    def is_model_absent(self, upstream_id: str, model: str) -> bool:
+        """这条上游是否被标记为「没有这个模型」（且没过期）。"""
+        if not model:
+            return False
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT absent_until FROM upstream_model_absent"
+                " WHERE upstream_id=? AND model=?",
+                (upstream_id, model),
+            ).fetchone()
+        return bool(row and row["absent_until"] > time.time())
+
+    def absent_upstreams_for_model(self, model: str) -> set[str]:
+        """哪些上游「没有这个模型」。"""
+        if not model:
+            return set()
+        now = time.time()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT upstream_id FROM upstream_model_absent"
+                " WHERE model=? AND absent_until>?",
+                (model, now),
+            ).fetchall()
+        return {r["upstream_id"] for r in rows}
+
+    def absent_models_of(self, upstream_id: str) -> list[dict]:
+        """这条上游被记为「没有」的那些模型（带失效时间）。"""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT model, absent_until FROM upstream_model_absent"
+                " WHERE upstream_id=? ORDER BY model",
+                (upstream_id,),
+            ).fetchall()
+        return [
+            {"model": r["model"], "absent_until": r["absent_until"], "expired": r["absent_until"] <= time.time()}
+            for r in rows
+        ]
+
+    # ---------- 模型清单缓存 ----------
+
+    def save_catalog(
+        self, upstream_id: str, ok: bool, models: list[str], body: str = ""
+    ) -> None:
+        """存下这条上游的模型清单快照（含原始 body，供下游原样转发）。"""
+        now = time.time()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO upstream_catalog(upstream_id,fetched_at,ok,models_count,body)"
+                " VALUES(?,?,?,?,?)"
+                " ON CONFLICT(upstream_id) DO UPDATE SET"
+                " fetched_at=excluded.fetched_at, ok=excluded.ok,"
+                " models_count=excluded.models_count, body=excluded.body",
+                (upstream_id, now, 1 if ok else 0, len(models), (body or "")[:1024 * 1024]),
+            )
+            self._conn.commit()
+
+    def get_catalog(self, upstream_id: str) -> dict | None:
+        row = self._conn.execute(
+            "SELECT fetched_at, ok, models_count, body FROM upstream_catalog"
+            " WHERE upstream_id=?",
+            (upstream_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "fetched_at": row["fetched_at"],
+            "ok": bool(row["ok"]),
+            "models_count": row["models_count"],
+            "body": row["body"],
+            "age_s": time.time() - row["fetched_at"],
+        }
+
+    def catalog_models(self, upstream_id: str) -> list[str]:
+        return self.models_of(upstream_id)
 
     def export_json(self) -> str:
         return json.dumps(

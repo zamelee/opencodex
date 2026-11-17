@@ -68,9 +68,30 @@ class UpstreamSelector:
         """刚失败的上下游一个最小驻留窗口内不再被选中（防横跳）。"""
         self._cool_until[upstream_id] = time.monotonic() + self.settings.min_residency_s
 
-    def plan(self, upstreams: list[Upstream], session_key: str | None) -> RequestPlan:
+    def plan(
+        self,
+        upstreams: list[Upstream],
+        session_key: str | None,
+        absent_models: set[str] | None = None,
+        demoted_models: set[str] | None = None,
+    ) -> RequestPlan:
+        """排候选顺序。
+
+        ``absent_models`` 是「已知没有这个模型」的上游 id 集合：
+        这些通道直接不进候选，请求一个都不发。
+        ``demoted_models`` 是「清单里查不到这个模型」的上游 id 集合：
+        它们排在最后——清单可能不全，所以只是降级，不是排除。
+        但如果全被排空了，就退回完整名单（fail-open）——
+        宁可多失败一次，也不能让请求无处可去。
+        """
         excluded = set(getattr(self.settings, "excluded_upstream_ids", []) or [])
         alive = [u for u in upstreams if u.enabled and u.id not in excluded]
+        absent = absent_models or set()
+        demoted = demoted_models or set()
+        if absent:
+            trimmed = [u for u in alive if u.id not in absent]
+            if trimmed:
+                alive = trimmed
         enabled_all = [u for u in upstreams if u.enabled]
         now = time.monotonic()
         cooled = {uid for uid, until in self._cool_until.items() if until > now}
@@ -87,13 +108,20 @@ class UpstreamSelector:
         # 锁定与排除在设置层互斥（webui 写入时互相摘除），这里不再需要覆盖逻辑
         forced_id = getattr(self.settings, "forced_upstream_id", "") or ""
         if forced_id:
-            for u in enabled_all:
+            # 手动锁定的通道如果已知没有这个模型，也不硬塞（除非只剩它）
+            forced_pool = [u for u in enabled_all if u.id not in absent] or enabled_all
+            for u in forced_pool:
                 if u.id == forced_id and self.health.usable(u.id):
                     ordered.append(u)
                     break
         if sticky_id:
             for u in fresh:
-                if u.id == sticky_id and self.health.usable(u.id) and u.id not in {x.id for x in ordered}:
+                if (
+                    u.id == sticky_id
+                    and self.health.usable(u.id)
+                    and u.id not in demoted
+                    and u.id not in {x.id for x in ordered}
+                ):
                     ordered.append(u)
         rest = [u for u in fresh if u.id != sticky_id and u.id not in {x.id for x in ordered}]
         # 健康优先，然后轮转，避免总是压同一台
@@ -102,7 +130,11 @@ class UpstreamSelector:
             k = self._rr % len(rest)
             self._rr += 1
             rest = rest[k:] + rest[:k]
-        ordered.extend(rest)
+        # 清单里查不到这个模型的，排到最后（降级不是排除）
+        head = [u for u in rest if u.id not in demoted]
+        tail = [u for u in rest if u.id in demoted]
+        ordered.extend(head)
+        ordered.extend(tail)
 
         return RequestPlan(
             candidates=ordered,

@@ -30,6 +30,7 @@ class Rule(str, Enum):
     UPSTREAM_5XX = "upstream_5xx"
     UPSTREAM_429 = "upstream_429"
     UPSTREAM_4XX = "upstream_4xx"
+    MODEL_NOT_FOUND = "model_not_found"
     POST_COMMIT_BREAK = "post_commit_break"
 
 
@@ -38,6 +39,8 @@ DEFAULT_RULES: dict[Rule, bool] = {
     Rule.UPSTREAM_5XX: True,
     Rule.UPSTREAM_429: True,
     Rule.UPSTREAM_4XX: False,
+    # 「这条上游没有这个模型」不是通道坏了，是选错了人——换一条就行。
+    Rule.MODEL_NOT_FOUND: True,
     Rule.POST_COMMIT_BREAK: False,
 }
 
@@ -47,6 +50,7 @@ RULE_LABELS: dict[Rule, str] = {
     Rule.UPSTREAM_5XX: "上游 5xx",
     Rule.UPSTREAM_429: "上游 429（限流）",
     Rule.UPSTREAM_4XX: "上游 4xx（除 429）",
+    Rule.MODEL_NOT_FOUND: "上游没有这个模型",
     Rule.POST_COMMIT_BREAK: "已提交后断流",
 }
 
@@ -94,6 +98,16 @@ class Settings:
     forced_upstream_id: str = ""  # 手动锁定通道；空 = 自动路由
     excluded_upstream_ids: list[str] = field(default_factory=list)
     rules: dict[Rule, bool] = field(default_factory=lambda: dict(DEFAULT_RULES))
+    # 「这条上游没有这个模型」的否定缓存时长（秒）
+    model_absence_ttl_s: float = 900.0
+    # 模型清单的可用期（秒）：超过就重新拉
+    model_catalog_ttl_s: float = 600.0
+    # 后台刷新模型清单的间隔（秒）
+    model_catalog_refresh_s: float = 300.0
+    # 上游没有 /v1/models 端点时的负缓存时长（秒）：别反复去戳
+    model_catalog_missing_ttl_s: float = 3600.0
+    # 是否启用模型清单缓存与后台刷新
+    model_catalog_enabled: bool = True
 
 
 @dataclass
