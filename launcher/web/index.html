@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>opencodex 启动器</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <div class="dot" id="dot"></div>
+      <h1 id="statusText">读取状态…</h1>
+      <span class="meta" id="metaText"></span>
+      <button class="ghost" id="refreshBtn" title="刷新状态">刷新</button>
+    </header>
+
+    <main>
+      <section class="pane left">
+        <h2>操作</h2>
+        <div id="actions" class="actions"></div>
+
+        <h2>参数</h2>
+        <form id="settings" class="form">
+          <label>
+            <span>端口</span>
+            <input name="port" type="number" min="1" max="65535" />
+          </label>
+          <label>
+            <span>监听地址</span>
+            <input name="hostname" type="text" />
+          </label>
+          <label>
+            <span>预设</span>
+            <input name="preset" type="text" placeholder="留空 = 不指定" />
+          </label>
+          <label>
+            <span>launcher-mode</span>
+            <select name="launcher_mode">
+              <option value="">（沿用配置）</option>
+              <option value="true">true</option>
+              <option value="false">false</option>
+            </select>
+          </label>
+          <label>
+            <span>git 代理</span>
+            <input name="git_proxy" type="text" placeholder="升级时用；- 表示直连" />
+          </label>
+          <div class="row">
+            <button type="submit" class="primary">保存参数</button>
+            <span class="hint" id="saveHint"></span>
+          </div>
+        </form>
+      </section>
+
+      <section class="pane right">
+        <h2>
+          运行日志
+          <select id="jobSelect" class="jobs"></select>
+          <button class="ghost" id="cancelBtn" title="终止当前任务">终止</button>
+        </h2>
+        <pre id="log" class="log"></pre>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

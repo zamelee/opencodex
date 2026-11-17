@@ -1,5 +1,8 @@
 * text=auto eol=lf
 
+# cmd.exe needs CRLF, otherwise it mangles the file (see launcher/build.bat)
+*.bat text eol=crlf
+
 *.png binary
 *.jpg binary
 *.jpeg binary

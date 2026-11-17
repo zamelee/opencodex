@@ -29,3 +29,8 @@ tsconfig.tsbuildinfo
 
 # Local scratch / transient scripts (ocx-start.py helpers, patches, etc.)
 tmp/
+
+# Launcher build artifacts (launcher/build.bat output)
+launcher/dist/
+launcher/build/
+launcher/*.spec

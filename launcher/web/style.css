@@ -1,0 +1,225 @@
+:root {
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --line: #d9dde3;
+  --text: #1d2129;
+  --muted: #6b7280;
+  --accent: #2f6feb;
+  --ok: #1e8c46;
+  --warn: #b45309;
+  --err: #b3261e;
+  --mono: "Cascadia Mono", "Consolas", "JetBrains Mono", monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.5 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  display: flex;
+  flex-direction: column;
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+
+.bar h1 {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0;
+  white-space: nowrap;
+  flex: none;
+}
+
+.bar .meta {
+  color: var(--muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #9aa1ab;
+  flex: none;
+}
+
+.dot.running {
+  background: var(--ok);
+}
+
+.dot.error {
+  background: var(--err);
+}
+
+main {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  min-height: 0;
+}
+
+.pane {
+  padding: 12px 14px;
+  min-height: 0;
+  overflow: auto;
+}
+
+.pane.left {
+  border-right: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.pane.right {
+  display: flex;
+  flex-direction: column;
+}
+
+h2 {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0;
+  color: var(--muted);
+  margin: 4px 0 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+h2 .jobs {
+  margin-left: auto;
+}
+
+.actions {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 18px;
+}
+
+button {
+  font: inherit;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: #fbfcfd;
+  color: var(--text);
+  padding: 7px 10px;
+  cursor: pointer;
+}
+
+button:hover {
+  background: #eef1f5;
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+button.primary:hover {
+  background: #2a5fcc;
+}
+
+button.ghost {
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+button.danger {
+  color: var(--err);
+  border-color: #e7c6c4;
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.act {
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.act small {
+  color: var(--muted);
+}
+
+.form {
+  display: grid;
+  gap: 8px;
+}
+
+.form label {
+  display: grid;
+  grid-template-columns: 92px 1fr;
+  align-items: center;
+  gap: 8px;
+}
+
+.form span {
+  color: var(--muted);
+}
+
+input,
+select {
+  font: inherit;
+  padding: 5px 7px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--text);
+  width: 100%;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.hint {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.log {
+  flex: 1;
+  margin: 0;
+  min-height: 0;
+  overflow: auto;
+  background: #12161c;
+  color: #d7dde5;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 10px 12px;
+  font: 12px/1.55 var(--mono);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+select.jobs {
+  width: auto;
+  max-width: 260px;
+}

@@ -464,16 +464,28 @@ def prompt_with_echo_and_timeout(prompt: str, default: str, timeout_sec: int = 3
         return None
 
 
-def resolve_runtime_port(port: int, max_attempts: int = 3, timeout_sec: int = 30) -> int:
+def resolve_runtime_port(port: int, max_attempts: int = 3, timeout_sec: int = 30,
+                         conflict: str = "prompt") -> int:
     """Probe-and-prompt loop. If `port` is busy, walk user through re-probing
     until they pick a free one, type "n" to bail, or max_attempts is hit.
     On bail/timeout/max_attempts, returns the original `port` so bun's own
     port-hop fallback (src/cli/index.ts:97 chooseListenPort) can rescue.
+
+    `conflict` 让 GUI 之类的非交互调用方不必喂 stdin：
+      - "prompt"（默认）：老样子，问人
+      - "auto"：直接换到建议的空闲端口，不问
+      - "abort"：不换，把原端口交回 bun（bun 自己会兜底/报错）
     """
     target = port
     attempts = 0
     while is_port_busy(target):
         suggested = suggest_next_free_port(target) or (target + 1 if target < 65535 else target)
+        if conflict == "auto":
+            print(f"[port] {target} 被占用 → 自动改用 {suggested}（非交互模式）", file=sys.stderr)
+            return suggested
+        if conflict == "abort":
+            print(f"[port] {target} 被占用 → 非交互模式不自动换端口，交给 bun 兜底", file=sys.stderr)
+            return port
         print(file=sys.stderr)
         print(f"⚠️  端口 {target} 被占用", file=sys.stderr)
         print(f"   建议 fallback : {suggested}  ({target}+{suggested - target}, 按递增扫描)", file=sys.stderr)
@@ -1093,16 +1105,18 @@ def rotate_log(path: Path) -> None:
         print(f"[bg] 日志轮转失败（{path.name}）：{exc}", file=sys.stderr)
 
 
-def run_start(port: int, cli_overrides: dict | None = None, no_bootstrap: bool = False) -> int:
+def run_start(port: int, cli_overrides: dict | None = None, no_bootstrap: bool = False,
+              conflict: str = "prompt") -> int:
     print("[start] 前台启动（Ctrl+C 停）。", file=sys.stderr)
     cfg = load_opencodex_config()
     warn_if_proxy_mode(cfg)
     # Phase-6A: probe-and-prompt loop pre-spawn
-    effective_port = resolve_runtime_port(port)
+    effective_port = resolve_runtime_port(port, conflict=conflict)
     return run_cli("start", "--port", str(effective_port), env_overrides=launcher_env(cfg, cli_overrides), no_bootstrap=no_bootstrap)
 
 
-def run_background(port: int, cli_overrides: dict | None = None, no_bootstrap: bool = False) -> int:
+def run_background(port: int, cli_overrides: dict | None = None, no_bootstrap: bool = False,
+                   conflict: str = "prompt") -> int:
     print("[bg] 后台启动中...", file=sys.stderr)
     # Config is OPTIONAL. The proxy itself can run with an empty ~/.opencodex/config.json;
     # providers / API keys / launcher-mode are managed via the web GUI (http://localhost:<port>).
@@ -1111,7 +1125,7 @@ def run_background(port: int, cli_overrides: dict | None = None, no_bootstrap: b
         print("[bg] 未发现 config.json：以空配置启动，请到 http://localhost:<port> 的网页设置 provider / env。", file=sys.stderr)
 
     # Phase-6A: probe-and-prompt loop pre-spawn; on bail returns original port
-    effective_port = resolve_runtime_port(port)
+    effective_port = resolve_runtime_port(port, conflict=conflict)
     print(f"[bg] resolved port: {effective_port}", file=sys.stderr)
 
     cfg = load_opencodex_config()
@@ -1366,7 +1380,8 @@ def _build_gui(force: bool = False) -> bool:
     return ensure_gui_built()
 
 
-def run_upgrade(port: int) -> int:
+def run_upgrade(port: int, target_choice: str | None = None,
+                git_proxy: str | None = None) -> int:
     """Upgrade this checkout to the newest tag published on the GitHub remote.
 
     Flow: fetch tags -> pick target -> back up local edits as a patch -> hard checkout
@@ -1397,12 +1412,16 @@ def run_upgrade(port: int) -> int:
         print(f"[upgrade] 直连拉取失败：{out.strip()[:200]}", file=sys.stderr)
         print("         （git 不跟随 Windows 系统代理；代理只在本次命令里临时生效，不写全局配置）", file=sys.stderr)
         default_proxy = os.environ.get("OCX_GIT_PROXY", "").strip() or DEFAULT_GIT_PROXY
-        try:
-            answer = input(
-                f"  有代理就填地址（回车用默认 {default_proxy}，输入 - 直连）> "
-            ).strip()
-        except (EOFError, KeyboardInterrupt):
-            answer = ""
+        if git_proxy is not None:
+            # 非交互：调用方已经决定了用哪个代理
+            answer = "" if git_proxy == "-" else str(git_proxy)
+        else:
+            try:
+                answer = input(
+                    f"  有代理就填地址（回车用默认 {default_proxy}，输入 - 直连）> "
+                ).strip()
+            except (EOFError, KeyboardInterrupt):
+                answer = ""
         if answer == "-":
             proxy = None
         elif answer:
@@ -1444,12 +1463,18 @@ def run_upgrade(port: int) -> int:
     target = latest
     if latest and branch_sha:
         print(f"[upgrade] origin/main 最新提交: {branch_sha}", file=sys.stderr)
-        try:
-            ans = input(
-                f"  升级到哪个？[1]=最新 tag {latest}  [2]=origin/main 最新提交  [回车=1] > "
-            ).strip()
-        except (EOFError, KeyboardInterrupt):
-            ans = ""
+        if target_choice == "main":
+            # 非交互：调用方直接点名要 origin/main
+            ans = "2"
+        elif target_choice == "tag":
+            ans = "1"
+        else:
+            try:
+                ans = input(
+                    f"  升级到哪个？[1]=最新 tag {latest}  [2]=origin/main 最新提交  [回车=1] > "
+                ).strip()
+            except (EOFError, KeyboardInterrupt):
+                ans = ""
         if ans == "2":
             follow_branch = True
         elif ans == "1" or not ans:
@@ -1984,6 +2009,14 @@ def main() -> int:
                         help="首次装机（克隆 repo + 装依赖 + init + 后台启动）")
     parser.add_argument("--bootstrap-repo", help="覆盖默认 repo URL（仅 --bootstrap 生效）")
     parser.add_argument("--bootstrap-dir", help="覆盖默认目标目录（仅 --bootstrap 生效）")
+    # --- 非交互开关（给 GUI 启动器用：没有 stdin 可喂） ---
+    parser.add_argument("--port-conflict", choices=("prompt", "auto", "abort"),
+                        default="prompt",
+                        help="端口被占时怎么办：prompt=问人(默认) / auto=自动换 / abort=交给 bun")
+    parser.add_argument("--upgrade-target", choices=("tag", "main"),
+                        help="--upgrade 的目标：tag=最新 tag / main=origin/main（不指定则交互询问）")
+    parser.add_argument("--git-proxy",
+                        help="--upgrade 用的代理地址；'-' 表示直连（不指定则交互询问）")
     parser.add_argument("-h", "--help", action="store_true", dest="show_help")
     ns = parser.parse_args()
 
@@ -1993,6 +2026,7 @@ def main() -> int:
 
     cli_overrides = build_cli_overrides(ns)
     no_bootstrap = ns.no_auto_bootstrap
+    conflict = getattr(ns, "port_conflict", "prompt") or "prompt"
 
     if ns.bootstrap:
         return run_bootstrap(ns.port, ns.bootstrap_repo, ns.bootstrap_dir,
@@ -2000,7 +2034,10 @@ def main() -> int:
     if ns.stop:    return run_stop(ns.port)
     if ns.status:  return run_status()
     if ns.clean:   return run_clean()
-    if ns.upgrade: return run_upgrade(ns.port)
+    if ns.upgrade:
+        return run_upgrade(ns.port,
+                           target_choice=getattr(ns, "upgrade_target", None),
+                           git_proxy=getattr(ns, "git_proxy", None))
     if ns.init:    return run_init()
     if ns.init_and_start:
         if is_initialized():
@@ -2010,10 +2047,15 @@ def main() -> int:
             if rc != 0 or not is_initialized():
                 print("[init] init 后仍未生成 config，终止", file=sys.stderr)
                 return rc or 1
-        return run_start(ns.port, cli_overrides=cli_overrides, no_bootstrap=no_bootstrap)
+        return run_start(ns.port, cli_overrides=cli_overrides, no_bootstrap=no_bootstrap,
+                         conflict=conflict)
     if ns.with_shim:  return run_shim_then_start(ns.port, cli_overrides=cli_overrides, no_bootstrap=no_bootstrap)
-    if ns.background: return run_background(ns.port, cli_overrides=cli_overrides, no_bootstrap=no_bootstrap)
-    if ns.foreground: return run_start(ns.port, cli_overrides=cli_overrides, no_bootstrap=no_bootstrap)
+    if ns.background:
+        return run_background(ns.port, cli_overrides=cli_overrides,
+                              no_bootstrap=no_bootstrap, conflict=conflict)
+    if ns.foreground:
+        return run_start(ns.port, cli_overrides=cli_overrides, no_bootstrap=no_bootstrap,
+                         conflict=conflict)
 
     return main_menu(ns.port, cli_overrides=cli_overrides, no_bootstrap=no_bootstrap)
 
